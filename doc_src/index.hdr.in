@@ -59,7 +59,7 @@ Switches differ between commands and are documented in the manual page for each 
 
 \subsection quotes Quotes
 
-Sometimes features such as <a href="#expand">parameter expansion</a> and <a href="#escapes">character escapes</a> get in the way. When that happens, the user can write a parameter within quotes, either `'` (single quote) or `&quot;` (double quote). There is one important difference between single quoted and double quoted strings: When using double quoted string, <a href="#expand-variable">variable expansion</a> still takes place. Other than that, a quoted parameter will not be parameter expanded, may contain spaces, and escape sequences are ignored. The only backslash escape accepted within single quotes is `\'`, which escapes a single quote and `\\`, which escapes the backslash symbol. The only backslash escapes accepted within double quotes are `\&quot;`, which escapes a double quote, `\$`, which escapes a dollar character, `\` followed by a newline, which deletes the backslash and the newline, and lastly `\\`, which escapes the backslash symbol. Single quotes have no special meaning within double quotes and vice versa.
+Sometimes features such as <a href="#expand">parameter expansion</a> and <a href="#escapes">character escapes</a> get in the way. When that happens, the user can write a parameter within quotes, either `'` (single quote) or `&quot;` (double quote). There is one important difference between single quoted and double quoted strings: When using double quoted string, <a href="#expand-variable">variable expansion</a> still takes place. Other than that, no other kind of expansion (including <a href="#expand-brace">brace expansion</a> and parameter expansion) will take place, the parameter may contain spaces, and escape sequences are ignored. The only backslash escape accepted within single quotes is `\'`, which escapes a single quote and `\\`, which escapes the backslash symbol. The only backslash escapes accepted within double quotes are `\&quot;`, which escapes a double quote, `\$`, which escapes a dollar character, `\` followed by a newline, which deletes the backslash and the newline, and lastly `\\`, which escapes the backslash symbol. Single quotes have no special meaning within double quotes and vice versa.
 
 Example:
 
@@ -179,7 +179,7 @@ will call the `cat` program with the parameter 'foo.txt', which will print the c
 Pipes usually connect file descriptor 1 (standard output) of the first process to file descriptor 0 (standard input) of the second process. It is possible use a different output file descriptor by prepending the desired FD number and then output redirect symbol to the pipe. For example:
 
 \fish
-make fish 2> | less
+make fish 2>| less
 \endfish
 
 will attempt to build the fish program, and any errors will be shown using the less pager.
@@ -912,7 +912,7 @@ You can change these key bindings using the <a href="commands.html#bind">bind</a
 
 \subsection vi-mode Vi mode commands
 
-Vi mode allows for the use of Vi-like commands at the prompt. Initially, <a href="#vi-mode-insert">insert mode</a> is active. @key{Escape} enters <a href="#vi-mode-command">command mode</a>. The commands available in command, insert and visual mode are described below.
+Vi mode allows for the use of Vi-like commands at the prompt. Initially, <a href="#vi-mode-insert">insert mode</a> is active. @key{Escape} enters <a href="#vi-mode-command">command mode</a>. The commands available in command, insert and visual mode are described below. Vi mode builds on top of <a href="#emacs-mode">Emacs mode</a>, so all keybindings mentioned there that do not contradict the ones mentioned here also work.
 
 \subsubsection vi-mode-command Command mode
 

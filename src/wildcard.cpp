@@ -787,7 +787,7 @@ void wildcard_expander_t::expand_trailing_slash(const wcstring &base_dir)
     if (! (flags & EXPAND_FOR_COMPLETIONS))
     {
         /* Trailing slash and not accepting incomplete, e.g. `echo /tmp/`. Insert this file if it exists. */
-        if (waccess(base_dir, F_OK))
+        if (waccess(base_dir, F_OK) == 0)
         {
             this->add_expansion_result(base_dir);
         }
@@ -841,6 +841,9 @@ void wildcard_expander_t::expand_intermediate_segment(const wcstring &base_dir, 
         /* We made it through. Perform normal wildcard expansion on this new directory, starting at our tail_wc, which includes the ANY_STRING_RECURSIVE guy. */
         full_path.push_back(L'/');
         this->expand(full_path, wc_remainder);
+
+        /* Now remove the visited file. This is for #2414: only directories "beneath" us should be considered visited. */
+        this->visited_files.erase(file_id);
     }
 }
         
@@ -999,9 +1002,11 @@ void wildcard_expander_t::expand(const wcstring &base_dir, const wchar_t *wc)
         /* This just trumps everything */
         size_t before = this->resolved_completions->size();
         this->expand(base_dir + wc_segment + L'/', wc_remainder);
-        if ((this->flags & EXPAND_FUZZY_MATCH) && this->resolved_completions->size() == before)
+        
+        /* Maybe try a fuzzy match (#94) if nothing was found with the literal match. Respect EXPAND_NO_DIRECTORY_ABBREVIATIONS (#2413). */
+        bool allow_fuzzy = (this->flags & (EXPAND_FUZZY_MATCH | EXPAND_NO_FUZZY_DIRECTORIES)) == EXPAND_FUZZY_MATCH;
+        if (allow_fuzzy && this->resolved_completions->size() == before)
         {
-            /* Nothing was found with the literal match. Try a fuzzy match (#94). */
             assert(this->flags & EXPAND_FOR_COMPLETIONS);
             DIR *base_dir_fd = open_dir(base_dir);
             if (base_dir_fd != NULL)

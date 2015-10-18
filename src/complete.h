@@ -213,11 +213,9 @@ void complete(const wcstring &cmd,
               completion_request_flags_t flags);
 
 /**
-   Print a list of all current completions into the string.
-
-   \param out The string to write completions to
+   Return a list of all current completions.
 */
-void complete_print(wcstring &out);
+wcstring complete_print();
 
 /**
    Tests if the specified option is defined for the specified command
@@ -235,19 +233,6 @@ bool complete_is_valid_argument(const wcstring &str,
                                 const wcstring &opt,
                                 const wcstring &arg);
 
-
-/**
-   Load command-specific completions for the specified command. This
-   is done automatically whenever completing any given command, so
-   there is no need to call this except in the case of completions
-   with internal dependencies.
-
-   \param cmd the command for which to load command-specific completions
-   \param reload should the commands completions be reloaded, even if they where
-      previously loaded. (This is set to true on actual completions, so that
-      changed completion are updated in running shells)
-*/
-void complete_load(const wcstring &cmd, bool reload);
 
 /**
    Create a new completion entry

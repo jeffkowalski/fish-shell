@@ -2,7 +2,13 @@
 # Use 'command git' to avoid interactions for aliases from git to (e.g.) hub
 
 function __fish_git_branches
-  command git branch --no-color -a ^/dev/null | __fish_sgrep -v ' -> ' | sed -e 's/^..//' -e 's/^remotes\///'
+	command git branch --no-color -a ^/dev/null | __fish_sgrep -v ' -> ' | string trim -c "* " | string replace -r "^remotes/" ""
+end
+
+function __fish_git_unique_remote_branches
+	# Allow all remote branches with one remote without the remote part
+	# This is useful for `git checkout` to automatically create a remote-tracking branch
+	command git branch --no-color -a ^/dev/null | __fish_sgrep -v ' -> ' | string trim -c "* " | string replace -r "^remotes/[^/]*/" "" | sort | uniq -u
 end
 
 function __fish_git_tags
@@ -19,36 +25,70 @@ function __fish_git_remotes
 end
 
 function __fish_git_modified_files
-  command git ls-files -m --exclude-standard ^/dev/null
+	# git diff --name-only hands us filenames relative to the git toplevel
+	set -l root (command git rev-parse --show-toplevel)
+	# Print files from the current $PWD as-is, prepend all others with ":/" (relative to toplevel in git-speak)
+	# This is a bit simplistic but finding the lowest common directory and then replacing everything else in $PWD with ".." is a bit annoying
+	string replace -- "$PWD/" "" "$root/"(command git diff --name-only ^/dev/null) | string replace "$root/" ":/"
 end
 
 function __fish_git_staged_files
-  command git diff --staged --name-only ^/dev/null
+	set -l root (command git rev-parse --show-toplevel)
+	string replace -- "$PWD/" "" "$root/"(command git diff --staged --name-only ^/dev/null) | string replace "$root/" ":/"
 end
 
 function __fish_git_add_files
-  command git ls-files -mo --exclude-standard ^/dev/null
+	set -l root (command git rev-parse --show-toplevel)
+	string replace -- "$PWD/" "" "$root/"(command git -C $root ls-files -mo --exclude-standard ^/dev/null) | string replace "$root/" ":/"
 end
 
 function __fish_git_ranges
-  set -l from (commandline -ot | perl -ne 'if (index($_, "..") > 0) { my @parts = split(/\.\./); print $parts[0]; }')
-  if test -z "$from"
-    __fish_git_branches
-    return 0
-  end
+	set -l both (commandline -ot | string split "..")
+	set -l from $both[1]
+	# If we didn't need to split (or there's nothing _to_ split), complete only the first part
+	# Note that status here is from `string split` because `set` doesn't alter it
+	if test -z "$from" -o $status -gt 0
+		__fish_git_heads
+		return 0
+	end
 
-  set -l to (commandline -ot | perl -ne 'if (index($_, "..") > 0) { my @parts = split(/\.\./); print $parts[1]; }')
-  for from_ref in (__fish_git_heads | __fish_sgrep -e "$from")
-    for to_ref in (__fish_git_heads | __fish_sgrep -e "$to")
-      printf "%s..%s\n" $from_ref $to_ref
-    end
-  end
+	set -l to (set -q both[2]; and echo $both[2])
+	for from_ref in (__fish_git_heads | string match "$from")
+		for to_ref in (__fish_git_heads | string match "*$to*") # if $to is empty, this correctly matches everything
+			printf "%s..%s\n" $from_ref $to_ref
+		end
+	end
 end
 
 function __fish_git_needs_command
   set cmd (commandline -opc)
   if [ (count $cmd) -eq 1 ]
-    return 0
+	  return 0
+  else
+	  set -l skip_next 1
+	  # Skip first word because it's "git" or a wrapper
+	  for c in $cmd[2..-1]
+		  test $skip_next -eq 0; and set skip_next 1; and continue
+		  # git can only take a few options before a command, these are the ones mentioned in the "git" man page
+		  # e.g. `git --follow log` is wrong, `git --help log` is okay (and `git --help log $branch` is superfluous but works)
+		  # In case any other option is used before a command, we'll fail, but that's okay since it's invalid anyway
+		  switch $c
+			  # General options that can still take a command
+			  case "--help" "-p" "--paginate" "--no-pager" "--bare" "--no-replace-objects" --{literal,glob,noglob,icase}-pathspecs  --{exec-path,git-dir,work-tree,namespace}"=*"
+				  continue
+			  # General options with an argument we need to skip. The option=value versions have already been handled above
+			  case --{exec-path,git-dir,work-tree,namespace}
+				  set skip_next 0
+				  continue
+			  # General options that cause git to do something and exit - these behave like commands and everything after them is ignored
+			  case "--version" --{html,man,info}-path
+				  return 1
+			  # We assume that any other token that's not an argument to a general option is a command
+			  case "*"
+				  return 1
+		  end
+	  end
+	  return 0
   end
   return 1
 end
@@ -61,8 +101,8 @@ function __fish_git_using_command
     end
 
     # aliased command
-    set -l aliased (command git config --get "alias.$cmd[2]" ^ /dev/null | sed 's/ .*$//')
-    if [ $argv[1] = "$aliased" ]
+    set -l aliased (command git config --get "alias.$cmd[2]" ^ /dev/null | string split " ")
+    if [ $argv[1] = "$aliased[1]" ]
       return 0
     end
   end
@@ -100,7 +140,7 @@ function __fish_git_aliases
         begin
             set -l IFS "."
             echo -n $key | read -l _ name
-            echo $name
+            printf "%s\t%s\n" $name "Alias for $value"
         end
     end
 end
@@ -112,8 +152,7 @@ function __fish_git_custom_commands
     # if any of these completion results match the name of the builtin git commands,
     # but it's simpler just to blacklist these names. They're unlikely to change,
     # and the failure mode is we accidentally complete a plumbing command.
-    set -l IFS \n
-    for name in (builtin complete -Cgit- | sed 's/^git-\([^[:space:]]*\).*/\1/')
+	for name in (string replace -r "^.*/git-([^/]*)" '$1' $PATH/git-*)
         switch $name
             case cvsserver receive-pack shell upload-archive upload-pack
                 # skip these
@@ -165,6 +204,7 @@ complete -f -c git -n '__fish_git_using_command remote' -a update -d 'Fetches up
 ### show
 complete -f -c git -n '__fish_git_needs_command' -a show -d 'Shows the last commit of a branch'
 complete -f -c git -n '__fish_git_using_command show' -a '(__fish_git_branches)' -d 'Branch'
+complete -f -c git -n '__fish_git_using_command show' -a '(__fish_git_unique_remote_branches)' -d 'Remote branch'
 # TODO options
 
 ### show-branch
@@ -193,6 +233,7 @@ complete -f -c git -n '__fish_git_using_command add' -a '(__fish_git_add_files)'
 ### checkout
 complete -f -c git -n '__fish_git_needs_command'    -a checkout -d 'Checkout and switch to a branch'
 complete -f -c git -n '__fish_git_using_command checkout'  -a '(__fish_git_branches)' --description 'Branch'
+complete -f -c git -n '__fish_git_using_command checkout'  -a '(__fish_git_unique_remote_branches)' --description 'Remote branch'
 complete -f -c git -n '__fish_git_using_command checkout'  -a '(__fish_git_tags)' --description 'Tag'
 complete -f -c git -n '__fish_git_using_command checkout' -a '(__fish_git_modified_files)' --description 'File'
 complete -f -c git -n '__fish_git_using_command checkout' -s b -d 'Create a new branch'
@@ -228,6 +269,7 @@ complete -f -c git -n '__fish_git_using_command branch' -l no-merged -d 'List br
 ### cherry-pick
 complete -f -c git -n '__fish_git_needs_command' -a cherry-pick -d 'Apply the change introduced by an existing commit'
 complete -f -c git -n '__fish_git_using_command cherry-pick' -a '(__fish_git_branches)' -d 'Branch'
+complete -f -c git -n '__fish_git_using_command cherry-pick' -a '(__fish_git_unique_remote_branches)' -d 'Remote branch'
 # TODO options
 
 ### clone
@@ -270,6 +312,7 @@ complete -f -c git -n '__fish_git_using_command log' -l pretty -a 'oneline short
 ### merge
 complete -f -c git -n '__fish_git_needs_command' -a merge -d 'Join two or more development histories together'
 complete -f -c git -n '__fish_git_using_command merge' -a '(__fish_git_branches)' -d 'Branch'
+complete -f -c git -n '__fish_git_using_command merge' -a '(__fish_git_unique_remote_branches)' -d 'Remote branch'
 complete -f -c git -n '__fish_git_using_command merge' -l commit -d "Autocommit the merge"
 complete -f -c git -n '__fish_git_using_command merge' -l no-commit -d "Don't autocommit the merge"
 complete -f -c git -n '__fish_git_using_command merge' -l edit -d 'Edit auto-generated merge message'
@@ -314,6 +357,7 @@ complete -f -c git -n '__fish_git_using_command pull' -l no-tags -d 'Disable aut
 complete -f -c git -n '__fish_git_using_command pull' -l progress -d 'Force progress status'
 complete -f -c git -n '__fish_git_using_command pull' -a '(git remote)' -d 'Remote alias'
 complete -f -c git -n '__fish_git_using_command pull' -a '(__fish_git_branches)' -d 'Branch'
+complete -f -c git -n '__fish_git_using_command pull' -a '(__fish_git_unique_remote_branches)' -d 'Remote branch'
 # TODO other options
 
 ### push
@@ -482,7 +526,7 @@ complete -f -c git -n '__fish_git_using_command submodule; and __fish_git_seen_s
 complete -f -c git -n '__fish_git_needs_command' -a whatchanged -d 'Show logs with difference each commit introduces'
 
 ## Aliases (custom user-defined commands)
-complete -c git -n '__fish_git_needs_command' -a '(__fish_git_aliases)' -d 'Alias (user-defined command)'
+complete -c git -n '__fish_git_needs_command' -a '(__fish_git_aliases)'
 
 ### git clean
 complete -f -c git -n '__fish_git_needs_command' -a clean -d 'Remove untracked files from the working tree'
