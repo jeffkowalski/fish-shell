@@ -76,7 +76,6 @@ function fish_default_key_bindings -d "Default (Emacs-like) key bindings for fis
 	bind $argv \ce end-of-line
 	bind $argv \ey yank-pop
 	bind $argv \ch backward-delete-char
-	bind $argv \cw backward-kill-word
 	bind $argv \cp up-or-search
 	bind $argv \cn down-or-search
 	bind $argv \cf forward-char
@@ -121,7 +120,8 @@ function fish_default_key_bindings -d "Default (Emacs-like) key bindings for fis
 	bind $argv -k f1 __fish_man_page
 	bind $argv \eh __fish_man_page
 
-	# This will make sure the output of the current command is paged using the less pager when you press Meta-p
+	# This will make sure the output of the current command is paged using the default pager when you press Meta-p
+	# If none is set, less will be used
 	bind $argv \ep '__fish_paginate'
 	
 	# shift-tab does a tab complete followed by a search
