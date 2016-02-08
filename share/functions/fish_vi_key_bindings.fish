@@ -1,29 +1,31 @@
 function fish_vi_key_bindings --description 'vi-like key bindings for fish'
-  bind --erase --all
+  # The default escape timeout is 300ms. But for users of Vi bindings that can
+  # be slightly annoying when trying to switch to Vi "normal" mode. Too,
+  # vi-mode users are unlikely to use escape-as-meta. So set a much shorter
+  # timeout in this case.
+  set -q fish_escape_delay_ms; or set -g fish_escape_delay_ms 10
+
   set -l init_mode insert
+  set -l eol_keys \$ g\$ \e\[F
+  set -l bol_keys \^ 0 g\^ \e\[H
   if set -q argv[1]
     set init_mode $argv[1]
   end
 
-  # Inherit default key bindings
-  # Do this first so vi-bindings win over default
+  # Inherit default key bindings.
+  # Do this first so vi-bindings win over default.
+  bind --erase --all
   fish_default_key_bindings -M insert
   fish_default_key_bindings -M default
 
-  # Add a way to get out of insert mode
+  # Add a way to switch from insert to normal (command) mode.
   bind -M insert -m default \cc force-repaint
   bind -M insert -m default \e backward-char force-repaint
 
-  ##
-  ## command mode
-  ##
-
+  #
+  # normal (command) mode
+  #
   bind :q exit
-
-  #
-  # normal (default) mode
-  #
-
   bind \cd exit
   bind \cc 'commandline ""'
   bind h backward-char
@@ -51,13 +53,12 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   bind gg beginning-of-buffer
   bind G end-of-buffer
 
-  bind \x24 end-of-line
-  bind \x5e beginning-of-line
-  bind 0 beginning-of-line
-  bind g\x24 end-of-line
-  bind g\x5e beginning-of-line
-  bind \e\[H beginning-of-line
-  bind \e\[F end-of-line
+  for key in $eol_keys
+      bind $key end-of-line
+  end
+  for key in $bol_keys
+      bind $key beginning-of-line
+  end
 
   bind u history-search-backward
   bind \cr history-search-forward
@@ -94,8 +95,8 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
 
   bind dd kill-whole-line
   bind D kill-line
-  bind d\x24 kill-line
-  bind d\x5e backward-kill-line
+  bind d\$ kill-line
+  bind d\^ backward-kill-line
   bind dw kill-word
   bind dW kill-bigword
   bind diw forward-char forward-char backward-word kill-word
@@ -113,8 +114,8 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   bind -m insert S kill-whole-line force-repaint
   bind -m insert cc kill-whole-line force-repaint
   bind -m insert C kill-line force-repaint
-  bind -m insert c\x24 kill-line force-repaint
-  bind -m insert c\x5e backward-kill-line force-repaint
+  bind -m insert c\$ kill-line force-repaint
+  bind -m insert c\^ backward-kill-line force-repaint
   bind -m insert cw kill-word force-repaint
   bind -m insert cW kill-bigword force-repaint
   bind -m insert ciw forward-char forward-char backward-word kill-word force-repaint
@@ -128,17 +129,17 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   bind -m insert cge backward-kill-word force-repaint
   bind -m insert cgE backward-kill-bigword force-repaint
 
-  bind '~' capitalize-word 
-  bind gu downcase-word 
-  bind gU upcase-word 
+  bind '~' capitalize-word
+  bind gu downcase-word
+  bind gU upcase-word
 
   bind J end-of-line delete-char
   bind K 'man (commandline -t) ^/dev/null; or echo -n \a'
 
   bind yy kill-whole-line yank
   bind Y  kill-whole-line yank
-  bind y\x24 kill-line yank
-  bind y\x5e backward-kill-line yank
+  bind y\$ kill-line yank
+  bind y\^ backward-kill-line yank
   bind yw kill-word yank
   bind yW kill-bigword yank
   bind yiw forward-char forward-char backward-word kill-word yank
@@ -172,7 +173,6 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   #
   # Lowercase r, enters replace-one mode
   #
-
   bind -m replace-one r force-repaint
   bind -M replace-one -m default '' delete-char self-insert backward-char force-repaint
   bind -M replace-one -m default \e cancel force-repaint
@@ -180,7 +180,6 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   #
   # visual mode
   #
-
   bind -M visual \e\[C forward-char
   bind -M visual \e\[D backward-char
   bind -M visual -k right forward-char
@@ -189,6 +188,9 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   bind -M insert \eOD backward-char
   bind -M visual h backward-char
   bind -M visual l forward-char
+
+  bind -M visual k up-line
+  bind -M visual j down-line
 
   bind -M visual b backward-word
   bind -M visual B backward-bigword
@@ -199,6 +201,14 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
   bind -M visual e forward-word
   bind -M visual E forward-bigword
 
+  for key in $eol_keys
+      bind -M visual $key end-of-line
+  end
+  for key in $bol_keys
+      bind -M visual $key beginning-of-line
+  end
+
+  bind -M visual -m insert  c kill-selection end-selection force-repaint
   bind -M visual -m default d kill-selection end-selection force-repaint
   bind -M visual -m default x kill-selection end-selection force-repaint
   bind -M visual -m default X kill-whole-line end-selection force-repaint

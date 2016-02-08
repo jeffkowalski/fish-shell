@@ -45,6 +45,7 @@
 #include "parse_util.h"
 #include "io.h"
 #include "parse_tree.h"
+#include "reader.h"
 
 /**
    file descriptor redirection error message
@@ -148,8 +149,8 @@ static bool chain_contains_redirection_to_real_file(const io_chain_t &io_chain)
     bool result = false;
     for (size_t idx=0; idx < io_chain.size(); idx++)
     {
-        const shared_ptr<const io_data_t> &io = io_chain.at(idx);
-        if (redirection_is_to_real_file(io.get()))
+        const io_data_t *io = io_chain.at(idx).get();
+        if (redirection_is_to_real_file(io))
         {
             result = true;
             break;
@@ -253,7 +254,8 @@ static void safe_launch_process(process_t *p, const char *actual_cmd, const char
 }
 
 /**
-   This function is similar to launch_process, except it is not called after a fork (i.e. it only calls exec) and therefore it can allocate memory.
+   This function is similar to launch_process, except it is not called after a
+   fork (i.e. it only calls exec) and therefore it can allocate memory.
 */
 static void launch_process_nofork(process_t *p)
 {
@@ -266,6 +268,8 @@ static void launch_process_nofork(process_t *p)
     const char *const *envv = env_export_arr(false);
     char *actual_cmd = wcs2str(p->actual_cmd.c_str());
 
+    /* Ensure the terminal modes are what they were before we changed them. */
+    restore_term_mode();
     /* Bounce to launch_process. This never returns. */
     safe_launch_process(p, actual_cmd, argv_array.get(), envv);
 }

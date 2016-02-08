@@ -2015,7 +2015,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
                 if (sig < 0)
                 {
                     append_format(*out_err,
-                                  _(L"%ls: Unknown signal '%ls'\n"),
+                                  _(L"%ls: Unknown signal '%ls'"),
                                   argv[0],
                                   w.woptarg);
                     res=1;
@@ -2030,7 +2030,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
                 if (wcsvarname(w.woptarg))
                 {
                     append_format(*out_err,
-                                  _(L"%ls: Invalid variable name '%ls'\n"),
+                                  _(L"%ls: Invalid variable name '%ls'"),
                                   argv[0],
                                   w.woptarg);
                     res=STATUS_BUILTIN_ERROR;
@@ -2083,7 +2083,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
                     if (job_id == -1)
                     {
                         append_format(*out_err,
-                                      _(L"%ls: Cannot find calling job for event handler\n"),
+                                      _(L"%ls: Cannot find calling job for event handler"),
                                       argv[0]);
                         res=1;
                     }
@@ -2101,7 +2101,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
                     if (errno || !end || *end)
                     {
                         append_format(*out_err,
-                                      _(L"%ls: Invalid process id %ls\n"),
+                                      _(L"%ls: Invalid process id %ls"),
                                       argv[0],
                                       w.woptarg);
                         res=1;
@@ -2141,7 +2141,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
             {
                 if (wcsvarname(w.woptarg))
                 {
-                    append_format(*out_err, _(L"%ls: Invalid variable name '%ls'\n"), argv[0], w.woptarg);
+                    append_format(*out_err, _(L"%ls: Invalid variable name '%ls'"), argv[0], w.woptarg);
                     res = STATUS_BUILTIN_ERROR;
                     break;
                 }
@@ -2190,14 +2190,14 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
         if (name_is_missing)
         {
             append_format(*out_err,
-                          _(L"%ls: Expected function name\n"),
+                          _(L"%ls: Expected function name"),
                           argv[0]);
             res=1;
         }
         else if (wcsfuncname(function_name))
         {
             append_format(*out_err,
-                          _(L"%ls: Illegal function name '%ls'\n"),
+                          _(L"%ls: Illegal function name '%ls'"),
                           argv[0],
                           function_name.c_str());
 
@@ -2207,7 +2207,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
         {
 
             append_format(*out_err,
-                          _(L"%ls: The name '%ls' is reserved,\nand can not be used as a function name\n"),
+                          _(L"%ls: The name '%ls' is reserved,\nand can not be used as a function name"),
                           argv[0],
                           function_name.c_str());
 
@@ -2215,7 +2215,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
         }
         else if (function_name.empty())
         {
-            append_format(*out_err, _(L"%ls: No function name given\n"), argv[0]);
+            append_format(*out_err, _(L"%ls: No function name given"), argv[0]);
             res=1;
         }
         else
@@ -2229,7 +2229,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
                     if (wcsvarname(named_arguments.at(i)))
                     {
                         append_format(*out_err,
-                                      _(L"%ls: Invalid variable name '%ls'\n"),
+                                      _(L"%ls: Invalid variable name '%ls'"),
                                       argv[0],
                                       named_arguments.at(i).c_str());
                         res = STATUS_BUILTIN_ERROR;
@@ -2241,38 +2241,41 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
             {
                 // +1 because we already got the function name
                 append_format(*out_err,
-                              _(L"%ls: Expected one argument, got %d\n"),
+                              _(L"%ls: Expected one argument, got %lu"),
                               argv[0],
-                              positionals.size() + 1);
+                              (unsigned long)(positionals.size() + 1));
                 res=1;
             }
         }
 
-        /* Here we actually define the function! */
-        function_data_t d;
-
-        d.name = function_name;
-        if (desc)
-            d.description = desc;
-        d.events.swap(events);
-        d.shadows = shadows;
-        d.named_arguments.swap(named_arguments);
-        d.inherit_vars.swap(inherit_vars);
-
-        for (size_t i=0; i<d.events.size(); i++)
+        if (!res)
         {
-            event_t &e = d.events.at(i);
-            e.function_name = d.name;
-        }
+            /* Here we actually define the function! */
+            function_data_t d;
 
-        d.definition = contents.c_str();
+            d.name = function_name;
+            if (desc)
+                d.description = desc;
+            d.events.swap(events);
+            d.shadows = shadows;
+            d.named_arguments.swap(named_arguments);
+            d.inherit_vars.swap(inherit_vars);
 
-        function_add(d, parser, definition_line_offset);
+            for (size_t i=0; i<d.events.size(); i++)
+            {
+                event_t &e = d.events.at(i);
+                e.function_name = d.name;
+            }
 
-        // Handle wrap targets
-        for (size_t w=0; w < wrap_targets.size(); w++)
-        {
-            complete_add_wrapper(function_name, wrap_targets.at(w));
+            d.definition = contents.c_str();
+
+            function_add(d, parser, definition_line_offset);
+
+            // Handle wrap targets
+            for (size_t w=0; w < wrap_targets.size(); w++)
+            {
+                complete_add_wrapper(function_name, wrap_targets.at(w));
+            }
         }
     }
 
@@ -2342,7 +2345,6 @@ static int builtin_random(parser_t &parser, io_streams_t &streams, wchar_t **arg
 
     switch (argc-w.woptind)
     {
-
         case 0:
         {
             long res;
@@ -2353,8 +2355,9 @@ static int builtin_random(parser_t &parser, io_streams_t &streams, wchar_t **arg
                 srand48_r(time(0), &seed_buffer);
             }
             lrand48_r(&seed_buffer, &res);
-
-            streams.out.append_format( L"%ld\n", labs(res%32767));
+            // The labs() shouldn't be necessary since lrand48 is supposed to
+            // return only positive integers but we're going to play it safe.
+            streams.out.append_format(L"%ld\n", labs(res % 32768));
             break;
         }
 

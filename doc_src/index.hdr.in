@@ -273,13 +273,13 @@ This is a short explanation of some of the commonly used words in fish.
 
 - <b>command</b> a program that the shell can run.
 
-- <b>function</b> a block of commands that can be called as if they where a single command. By using functions, it is possible to string together multiple smaller commands into one more advanced command.
+- <b>function</b> a block of commands that can be called as if they were a single command. By using functions, it is possible to string together multiple smaller commands into one more advanced command.
 
 - <b>job</b> a running pipeline or command
 
 - <b>pipeline</b> a set of commands stringed together so that the output of one command is the input of the next command
 
-- <b>redirection</b> a operation that changes one of the input/output streams associated with a job
+- <b>redirection</b> an operation that changes one of the input/output streams associated with a job
 
 - <b>switch</b> a special flag sent as an argument to a command that will alter the behavior of the command. A switch almost always begins with one or two hyphens.
 
@@ -460,7 +460,7 @@ A dollar sign followed by a string of characters is expanded into the value of t
 
 Undefined and empty variables expand to nothing.
 
-To separate a variable name from text it should immediately be followed by, encase the variable within braces.
+To separate a variable name from text it should immediately be followed by, encase the variable within quotes.
 
 Examples:
 \fish
@@ -470,15 +470,17 @@ echo $HOME
 echo $nonexistentvariable
 # Prints no output.
 
-echo The plural of $WORD is {$WORD}s
+echo The plural of $WORD is "$WORD"s
 # Prints "The plural of cat is cats" when $WORD is set to cat.
+echo The plural of $WORD is {$WORD}s
+# ditto
 \endfish
 
-Note that without the braces, fish will try to expand a variable called `$WORDs`, which may not exist.
+Note that without the quotes or braces, fish will try to expand a variable called `$WORDs`, which may not exist.
 
-The latter syntax works by exploiting <a href="#expand-brace">brace expansion</a>; care should be taken with array variables and undefined variables, as these behave very differently to POSIX shells.
+The latter syntax `{$WORD}` works by exploiting <a href="#expand-brace">brace expansion</a>; care should be taken with array variables and undefined variables, as these behave very differently to POSIX shells.
 
-Variable expansion is the only type of expansion performed on double quoted strings. There is, however, an important difference in how variables are expanded when quoted and when unquoted. An unquoted variable expansion will result in a variable number of arguments. For example, if the variable `$foo` has zero elements or is undefined, the argument `$foo` will expand to zero elements. If the variable $foo is an array of five elements, the argument `$foo` will expand to five elements. When quoted, like `"$foo"`, a variable expansion will always result in exactly one argument. Undefined variables will expand to the empty string, and array variables will be concatenated using the space character. The dangers noted in the third example above can therefore be avoided by wrapping the variable in double quotes (`echo {"$WORD"}s`).
+Variable expansion is the only type of expansion performed on double quoted strings. There is, however, an important difference in how variables are expanded when quoted and when unquoted. An unquoted variable expansion will result in a variable number of arguments. For example, if the variable `$foo` has zero elements or is undefined, the argument `$foo` will expand to zero elements. If the variable $foo is an array of five elements, the argument `$foo` will expand to five elements. When quoted, like `"$foo"`, a variable expansion will always result in exactly one argument. Undefined variables will expand to the empty string, and array variables will be concatenated using the space character.
 
 There is one further notable feature of fish variable expansion. Consider the following code snippet:
 
@@ -496,6 +498,32 @@ end
 \endfish
 
 The above code demonstrates how to use multiple '`$`' symbols to expand the value of a variable as a variable name. One can think of the `$` symbol as a variable dereference operator. When using this feature together with array brackets, the brackets will always match the innermost `$` dereference. Thus, `$$foo[5]` will always mean the fifth element of the `foo` variable should be dereferenced, not the fifth element of the doubly dereferenced variable `foo`. The latter can instead be expressed as `$$foo[1][5]`.
+
+
+\subsection cartesian-product Cartesian Products
+
+Lists adjacent to other lists or strings are expanded as cartesian products:
+
+Examples:
+\fish
+echo {good,bad}" apples"
+# Outputs 'good apples bad apples'
+
+set -l a x y z
+set -l b 1 2 3
+echo $a$b
+# Outputs 'x1 y1 z1 x2 y2 z2 x3 y3 z3'
+echo $a"-"$b
+# Outputs 'x-1 y-1 z-1 x-2 y-2 z-2 x-3 y-3 z-3'
+
+echo {x,y,z}$b
+# Outputs 'x1 y1 z1 x2 y2 z2 x3 y3 z3'
+
+echo {$b}word
+# Outputs '1word 2word 3word'
+\endfish
+
+Be careful when you try to use braces to separate variable names from text. The dangers noted in the last example above can be avoided by wrapping the variable in double quotes instead of braces (`echo "$b"word`).
 
 
 \subsection expand-index-range Index range expansion
@@ -641,6 +669,8 @@ To see universal variables in action, start two fish sessions side by side, and 
 
 <a href="#variables-universal">Universal variables</a> are stored in the file `.config/fish/fishd.MACHINE_ID`, where MACHINE_ID is typically your MAC address. Do not edit this file directly, as your edits may be overwritten. Edit them through fish scripts or by using fish interactively instead.
 
+Do not append to universal variables in <a href="index.html#initialization">config.fish</a>, because these variables will then get longer with each new shell instance. Instead, simply set them once at the command line.
+
 
 \subsection variables-functions Variable scope for functions
 
@@ -725,16 +755,17 @@ All arrays are one-dimensional and cannot contain other arrays, although it is p
 
 \subsection variables-special Special variables
 
-The user can change the settings of `fish` by changing the values of
-certain environment variables.
-
-- `BROWSER`, the user's preferred web browser. If this variable is set, fish will use the specified browser instead of the system default browser to display the fish documentation.
-
-- `CDPATH`, an array of directories in which to search for the new directory for the `cd` builtin. By default, the fish configuration defines `CDPATH` to be a universal variable with the values `.` and `~`.
+The user can change the settings of `fish` by changing the values of certain variables.
 
 - A large number of variable starting with the prefixes `fish_color` and `fish_pager_color.` See <a href='#variables-color'>Variables for changing highlighting colors</a> for more information.
 
 - `fish_greeting`, the greeting message printed on startup.
+
+- `fish_escape_delay_ms` overrides the default timeout of 300ms (default key bindings) or 10ms (vi key bindings) after seeing an escape character before giving up on matching a key binding. See the documentation for the <a href='bind.html#special-case-escape'>bind</a> builtin command. This delay facilitates using escape as a meta key.
+
+- `BROWSER`, the user's preferred web browser. If this variable is set, fish will use the specified browser instead of the system default browser to display the fish documentation.
+
+- `CDPATH`, an array of directories in which to search for the new directory for the `cd` builtin. By default, the fish configuration defines `CDPATH` to be a universal variable with the values `.` and `~`.
 
 - `LANG`, `LC_ALL`, `LC_COLLATE`, `LC_CTYPE`, `LC_MESSAGES`, `LC_MONETARY`, `LC_NUMERIC` and `LC_TIME` set the language option for the shell and subprograms. See the section <a href='#variables-locale'>Locale variables</a> for more information.
 
@@ -1138,7 +1169,7 @@ If you install fish in your home directory, fish will not work correctly for any
 
 If you have a question not answered by this documentation, there are several avenues for help:
 
--# The official mailing list at <a href='https://lists.sf.net/lists/listinfo/fish-users'>fish-users@lists.sf.net</a>
+-# The official mailing list at <a href='https://lists.sourceforge.net/lists/listinfo/fish-users'>fish-users@lists.sourceforge.net</a>
 
 -# The Internet Relay Chat channel, \#fish on `irc.oftc.net`
 
