@@ -112,7 +112,16 @@ public:
     wcstring describe(void) const;
 
     /* Constructor */
-    explicit parse_node_t(parse_token_type_t ty) : source_start(SOURCE_OFFSET_INVALID), source_length(0), parent(NODE_OFFSET_INVALID), child_start(0), child_count(0), type(ty), flags(0), tag(0)
+    explicit parse_node_t(parse_token_type_t ty) :
+        source_start(SOURCE_OFFSET_INVALID),
+        source_length(0),
+        parent(NODE_OFFSET_INVALID),
+        child_start(0),
+        child_count(0),
+        type(ty),
+        keyword(parse_keyword_none),
+        flags(0),
+        tag(0)
     {
     }
 
@@ -156,6 +165,13 @@ public:
 class parse_node_tree_t : public std::vector<parse_node_t>
 {
 public:
+    
+    parse_node_tree_t() {}
+    
+    parse_node_tree_t(moved_ref<parse_node_tree_t> t)
+    {
+        this->swap(t.val);
+    }
 
     /* Get the node corresponding to a child of the given node, or NULL if there is no such child. If expected_type is provided, assert that the node has that type.
      */

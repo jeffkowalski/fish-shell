@@ -34,10 +34,12 @@ function history --description "Deletes an item from history"
 				set cmd clear
 			case --search
 				set cmd print
+			case --merge
+				set cmd merge
 			case --
 				set -e argv[$i]
 				break
-			case -* --*
+			case "-*" "--*"
 				printf ( _ "%s: invalid option -- %s\n" ) history $argv[1] >& 2
 				return 1
 			end
@@ -96,7 +98,7 @@ function history --description "Deletes an item from history"
 				end
 
 				#Following two validations could be embedded with "and" but I find the syntax kind of weird.
-				if not string match -qr '^[0-9]+$'
+				if not string match -qr '^[0-9]+$' $i
 					printf "Invalid input: %s\n" $i
 					continue
 				end
@@ -127,6 +129,8 @@ function history --description "Deletes an item from history"
 	case save
 		#Save changes to history file
 		builtin history $argv
+	case merge
+		builtin history --merge
 	case clear
 		# Erase the entire history
 		echo "Are you sure you want to clear history ? (y/n)"

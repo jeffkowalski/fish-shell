@@ -18,27 +18,19 @@
 #include "expand.h"
 #include "complete.h"
 
-/*
-  Use unencoded private-use keycodes for internal characters
-*/
-
-#define WILDCARD_RESERVED 0xf400
-
-/**
-   Enumeration of all wildcard types
-*/
+// Enumeration of all wildcard types
 enum
 {
-    /** Character representing any character except '/' */
-    ANY_CHAR = WILDCARD_RESERVED,
-
-    /** Character representing any character string not containing '/' (A slash) */
+    // Character representing any character except '/' (slash).
+    ANY_CHAR = WILDCARD_RESERVED_BASE,
+    // Character representing any character string not containing '/' (slash).
     ANY_STRING,
-
-    /** Character representing any character string */
+    // Character representing any character string.
     ANY_STRING_RECURSIVE,
-}
-;
+    // This is a special psuedo-char that is not used other than to mark the
+    // end of the the special characters so we can sanity check the enum range.
+    ANY_SENTINAL
+};
 
 /**
     Expand the wildcard by matching against the filesystem.
@@ -58,14 +50,15 @@ enum
   wildcard_expand will continue the matching process.
 
   \param wc The wildcard string
-  \param base_dir The base directory of the filesystem to perform the match against
+  \param working_directory The working directory
   \param flags flags for the search. Can be any combination of EXPAND_FOR_COMPLETIONS and EXECUTABLES_ONLY
   \param out The list in which to put the output
 
   \return 1 if matches where found, 0 otherwise. Return -1 on abort (I.e. ^C was pressed).
 
 */
-int wildcard_expand_string(const wcstring &wc, const wcstring &base_dir, expand_flags_t flags, std::vector<completion_t> *out);
+int wildcard_expand_string(const wcstring &wc, const wcstring &working_directory, expand_flags_t flags, std::vector<completion_t> *out);
+
 /**
    Test whether the given wildcard matches the string. Does not perform any I/O.
 
@@ -75,9 +68,6 @@ int wildcard_expand_string(const wcstring &wc, const wcstring &base_dir, expand_
    \return true if the wildcard matched
 */
 bool wildcard_match(const wcstring &str, const wcstring &wc, bool leading_dots_fail_to_match = false);
-
-/* Like wildcard_match, but returns a fuzzy match type */
-enum fuzzy_match_type_t wildcard_match_fuzzy(const wcstring &str, const wcstring &wc, bool leading_dots_fail_to_match = false, enum fuzzy_match_type_t max_type = fuzzy_match_none);
 
 /** Check if the specified string contains wildcards */
 bool wildcard_has(const wcstring &, bool internal);

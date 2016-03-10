@@ -1705,7 +1705,6 @@ static unsigned int builtin_echo_digit(wchar_t wc, unsigned int base)
 static bool builtin_echo_parse_numeric_sequence(const wchar_t *str, size_t *consumed, unsigned char *out_val)
 {
     bool success = false;
-    unsigned char val = 0; //resulting character
     unsigned int start = 0; //the first character of the numeric part of the sequence
 
     unsigned int base = 0, max_digits = 0;
@@ -1731,6 +1730,7 @@ static bool builtin_echo_parse_numeric_sequence(const wchar_t *str, size_t *cons
     if (base != 0)
     {
         unsigned int idx;
+        unsigned char val = 0; //resulting character
         for (idx = start; idx < start + max_digits; idx++)
         {
             unsigned int digit = builtin_echo_digit(str[idx], base);
@@ -1982,7 +1982,7 @@ int define_function(parser_t &parser, io_streams_t &streams, const wcstring_list
         // The leading - here specifies RETURN_IN_ORDER
         int opt = w.wgetopt_long(argc,
                                  argv,
-                                 L"-d:s:j:p:v:e:haSV:",
+                                 L"-d:s:j:p:v:e:w:haSV:",
                                  long_options,
                                  &opt_index);
         if (opt == -1)
@@ -2805,7 +2805,7 @@ static int builtin_read(parser_t &parser, io_streams_t &streams, wchar_t **argv)
             wcstring tokens;
             tokens.reserve(buff.size());
             bool empty = true;
-
+            
             for (wcstring_range loc = wcstring_tok(buff, ifs); loc.first != wcstring::npos; loc = wcstring_tok(buff, ifs, loc))
             {
                 if (!empty) tokens.push_back(ARRAY_SEP);
@@ -2820,7 +2820,7 @@ static int builtin_read(parser_t &parser, io_streams_t &streams, wchar_t **argv)
 
             while (i<argc)
             {
-                loc = wcstring_tok(buff, (i+1<argc) ? ifs : L"", loc);
+                loc = wcstring_tok(buff, (i+1<argc) ? ifs : wcstring(), loc);
                 env_set(argv[i], loc.first == wcstring::npos ? L"" : &buff.c_str()[loc.first], place);
 
                 ++i;
@@ -3141,7 +3141,7 @@ static int builtin_cd(parser_t &parser, io_streams_t &streams, wchar_t **argv)
     }
     else
     {
-        dir_in = argv[1];
+        dir_in = env_var_t(argv[1]);
     }
 
     bool got_cd_path = false;
@@ -3305,15 +3305,16 @@ static int builtin_contains(parser_t &parser, io_streams_t &streams, wchar_t ** 
     {
         streams.err.append_format(_(L"%ls: Key not specified\n"), argv[0]);
     }
-
-
-    for (int i=w.woptind+1; i<argc; i++)
+    else
     {
-
-        if (!wcscmp(needle, argv[i]))
+        for (int i=w.woptind+1; i<argc; i++)
         {
-            if (should_output_index) streams.out.append_format( L"%d\n", i-w.woptind);
-            return 0;
+
+            if (!wcscmp(needle, argv[i]))
+            {
+                if (should_output_index) streams.out.append_format( L"%d\n", i-w.woptind);
+                return 0;
+            }
         }
     }
     return 1;
@@ -3868,6 +3869,7 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
     if (merge_history)
     {
         history->incorporate_external_changes();
+        return STATUS_BUILTIN_OK;
     }
 
     if (search_history)

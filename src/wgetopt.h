@@ -54,7 +54,7 @@ class wgetopter_t
 private:
     void exchange(wchar_t **argv);
     const wchar_t * _wgetopt_initialize(const wchar_t *optstring);
-    int _wgetopt_internal(int argc, wchar_t *const *argv, const wchar_t *optstring, const struct woption *longopts, int *longind, int long_only);
+    int _wgetopt_internal(int argc, wchar_t **argv, const wchar_t *optstring, const struct woption *longopts, int *longind, int long_only);
     
 public:
     /* For communication from `getopt' to the caller.
@@ -143,13 +143,13 @@ public:
     int last_nonopt;
     
     
-    wgetopter_t() : woptarg(NULL), woptind(0), nextchar(0), wopterr(0), woptopt('?'), first_nonopt(0), last_nonopt(0)
+    wgetopter_t() : woptarg(NULL), woptind(0), nextchar(0), wopterr(0), woptopt('?'), ordering(), first_nonopt(0), last_nonopt(0)
     {
     }
     
-    int wgetopt(int argc, wchar_t *const *argv, const wchar_t *optstring);
-    int wgetopt_long(int argc, wchar_t *const *argv, const wchar_t *options, const struct woption *long_options, int *opt_index);
-    int wgetopt_long_only(int argc, wchar_t *const *argv, const wchar_t *options, const struct woption *long_options, int *opt_index);
+    int wgetopt(int argc, wchar_t **argv, const wchar_t *optstring);
+    int wgetopt_long(int argc, wchar_t **argv, const wchar_t *options, const struct woption *long_options, int *opt_index);
+    int wgetopt_long_only(int argc, wchar_t **argv, const wchar_t *options, const struct woption *long_options, int *opt_index);
 };
 
 /** Describe the long-named options requested by the application.

@@ -549,7 +549,7 @@ bool contains_internal(const wchar_t *a, int vararg_handle, ...)
     return res;
 }
 
-/* wcstring variant of contains_internal. The first parameter is a wcstring, the rest are const wchar_t *. vararg_handle exists only to give us a POD-value to apss to va_start */
+/* wcstring variant of contains_internal. The first parameter is a wcstring, the rest are const wchar_t *. vararg_handle exists only to give us a POD-value to pass to va_start */
 __sentinel bool contains_internal(const wcstring &needle, int vararg_handle, ...)
 {
     const wchar_t *arg;
@@ -793,6 +793,24 @@ void format_long_safe(wchar_t buff[64], long val)
             buff[right--] = tmp;
         }
     }
+}
+
+void narrow_string_safe(char buff[64], const wchar_t *s)
+{
+    size_t idx = 0;
+    for (size_t widx = 0; s[widx] != L'\0'; widx++)
+    {
+        wchar_t c = s[widx];
+        if (c <= 127)
+        {
+            buff[idx++] = char(c);
+            if (idx + 1 == 64)
+            {
+                break;
+            }
+        }
+    }
+    buff[idx] = '\0';
 }
 
 wcstring reformat_for_screen(const wcstring &msg)

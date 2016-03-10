@@ -101,12 +101,11 @@ class env_var_t : public wcstring
 private:
     bool is_missing;
 public:
-    static env_var_t missing_var(void)
+    static env_var_t missing_var()
     {
-        env_var_t result(L"");
+        env_var_t result((wcstring()));
         result.is_missing = true;
         return result;
-
     }
 
     env_var_t(const env_var_t &x) : wcstring(x), is_missing(x.is_missing) { }
@@ -227,10 +226,13 @@ class env_vars_snapshot_t
 {
     std::map<wcstring, wcstring> vars;
     bool is_current() const;
-
+    
+    env_vars_snapshot_t(const env_vars_snapshot_t&);
+    void operator=(const env_vars_snapshot_t &);
+    
 public:
     env_vars_snapshot_t(const wchar_t * const * keys);
-    env_vars_snapshot_t(void);
+    env_vars_snapshot_t();
 
     env_var_t get(const wcstring &key) const;
 
@@ -239,6 +241,9 @@ public:
 
     // vars necessary for highlighting
     static const wchar_t * const highlighting_keys[];
+    
+    // vars necessary for completion
+    static const wchar_t * const completing_keys[];
 };
 
 extern bool g_log_forks;

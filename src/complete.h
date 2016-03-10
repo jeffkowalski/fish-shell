@@ -111,7 +111,7 @@ public:
     complete_flags_t flags;
 
     /* Construction. Note: defining these so that they are not inlined reduces the executable size. */
-    completion_t(const wcstring &comp, const wcstring &desc = wcstring(), string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), complete_flags_t flags_val = 0);
+    explicit completion_t(const wcstring &comp, const wcstring &desc = wcstring(), string_fuzzy_match_t match = string_fuzzy_match_t(fuzzy_match_exact), complete_flags_t flags_val = 0);
     completion_t(const completion_t &);
     completion_t &operator=(const completion_t &);
 
@@ -124,6 +124,9 @@ public:
     /* If this completion replaces the entire token, prepend a prefix. Otherwise do nothing. */
     void prepend_token_prefix(const wcstring &prefix);
 };
+
+/** Sorts and remove any duplicate completions in the completion list, then puts them in priority order. */
+void completions_sort_and_prioritize(std::vector<completion_t> *comps);
 
 enum
 {
@@ -215,9 +218,11 @@ void complete_remove_all(const wcstring &cmd, bool cmd_is_path);
 
 /** Find all completions of the command cmd, insert them into out.
  */
+class env_vars_snapshot_t;
 void complete(const wcstring &cmd,
-              std::vector<completion_t> &comp,
-              completion_request_flags_t flags);
+              std::vector<completion_t> *out_comps,
+              completion_request_flags_t flags,
+              const env_vars_snapshot_t &vars);
 
 /**
    Return a list of all current completions.
