@@ -24,19 +24,6 @@ int fish_wcswidth(const wchar_t *str, size_t n);
 #endif
 
 /**
-   Make sure __func__ is defined to some string. In C99, this should
-   be the currently compiled function. If we aren't using C99 or
-   later, older versions of GCC had __FUNCTION__.
-*/
-#if __STDC_VERSION__ < 199901L
-# if __GNUC__ >= 2
-#  define __func__ __FUNCTION__
-# else
-#  define __func__ "<unknown>"
-# endif
-#endif
-
-/**
    Under curses, tputs expects an int (*func)(char) as its last
    parameter, but in ncurses, tputs expects a int (*func)(int) as its
    last parameter. tputs_arg_t is defined to always be what tputs
@@ -158,29 +145,13 @@ int vswprintf(wchar_t *out, size_t n, const wchar_t *filter, va_list va);
 #endif
 
 #ifndef HAVE_FGETWC
-/**
-   Fallback implementation of fgetwc
-*/
+// Fallback implementation of fgetwc.
 wint_t fgetwc(FILE *stream);
-
-/**
-   Fallback implementation of getwc
-*/
-wint_t getwc(FILE *stream);
-
 #endif
 
 #ifndef HAVE_FPUTWC
-
-/**
-   Fallback implementation of fputwc
-*/
+// Fallback implementation of fputwc.
 wint_t fputwc(wchar_t wc, FILE *stream);
-/**
-   Fallback implementation of putwc
-*/
-wint_t putwc(wchar_t wc, FILE *stream);
-
 #endif
 
 #ifndef HAVE_WCSTOK

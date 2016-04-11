@@ -15,8 +15,6 @@ AC_INIT(fish,
         m4_esyscmd([cut -f 3 -d ' ' FISH-BUILD-VERSION-FILE | tr -d '\n']),
         fish-users@lists.sourceforge.net)
 
-conf_arg=$@
-
 #
 # List of output variables produced by this configure script
 #
@@ -845,7 +843,7 @@ You may need to install the PCRE2 development library for your system.])
   fi
 fi
 
-# Re-test as value may have changed
+# Re-test as value may have changed.
 if test "x$included_pcre2" = "xyes"; then
   # Build configure/Makefile for pcre2
   AC_MSG_NOTICE([using included PCRE2 library])
@@ -862,7 +860,29 @@ if test "x$included_pcre2" = "xyes"; then
   LIBS="$LIBS $PCRE2_LIBS"
 fi
 
-# Tell the world what we know
+# Allow configurable extra directories.
+AC_SUBST(extra_completionsdir)
+AC_ARG_WITH([extra-completionsdir],
+            AS_HELP_STRING([--with-extra-completionsdir=DIR],
+                           [path for extra completions]),
+            [extra_completionsdir=$withval],
+            [extra_completionsdir='${datadir}/fish/vendor_completions.d'])
+
+AC_SUBST(extra_functionsdir)
+AC_ARG_WITH([extra_functionsdir],
+            AS_HELP_STRING([--with-extra-functionsdir=DIR],
+                           [path for extra functions]),
+            [extra_functionsdir=$withval],
+            [extra_functionsdir='${datadir}/fish/vendor_functions.d'])
+
+AC_SUBST(extra_confdir)
+AC_ARG_WITH([extra-confdir],
+            AS_HELP_STRING([--with-extra-confdir=DIR],
+                           [path for extra conf]),
+            [extra_confdir=$withval],
+            [extra_confdir='${datadir}/fish/vendor_conf.d'])
+
+# Tell the world what we know.
 AC_CONFIG_FILES([Makefile])
 AC_OUTPUT
 

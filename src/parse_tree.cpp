@@ -16,6 +16,49 @@
 #include <vector>
 #include <algorithm>
 
+// This array provides strings for each symbol in enum parse_token_type_t in parse_constants.h.
+const wchar_t * const token_type_map[] = {
+    L"token_type_invalid",
+    L"symbol_job_list",
+    L"symbol_job",
+    L"symbol_job_continuation",
+    L"symbol_statement",
+    L"symbol_block_statement",
+    L"symbol_block_header",
+    L"symbol_for_header",
+    L"symbol_while_header",
+    L"symbol_begin_header",
+    L"symbol_function_header",
+    L"symbol_if_statement",
+    L"symbol_if_clause",
+    L"symbol_else_clause",
+    L"symbol_else_continuation",
+    L"symbol_switch_statement",
+    L"symbol_case_item_list",
+    L"symbol_case_item",
+    L"symbol_boolean_statement",
+    L"symbol_decorated_statement",
+    L"symbol_plain_statement",
+    L"symbol_arguments_or_redirections_list",
+    L"symbol_argument_or_redirection",
+    L"symbol_andor_job_list",
+    L"symbol_argument_list",
+    L"symbol_freestanding_argument_list",
+    L"symbol_argument",
+    L"symbol_redirection",
+    L"symbol_optional_background",
+    L"symbol_end_command",
+    L"parse_token_type_string",
+    L"parse_token_type_pipe",
+    L"parse_token_type_redirection",
+    L"parse_token_type_background",
+    L"parse_token_type_end",
+    L"parse_token_type_terminate",
+    L"parse_special_type_parse_error",
+    L"parse_special_type_tokenizer_error",
+    L"parse_special_type_comment",
+    };
+
 using namespace parse_productions;
 
 static bool production_is_empty(const production_t *production)
@@ -122,101 +165,16 @@ void parse_error_offset_source_start(parse_error_list_t *errors, size_t amt)
     }
 }
 
-/** Returns a string description of the given token type */
-wcstring token_type_description(parse_token_type_t type)
+// Returns a string description for the given token type.
+const wchar_t *token_type_description(parse_token_type_t type)
 {
-    switch (type)
-    {
-        case token_type_invalid:
-            return L"invalid";
+    if (type >= 0 && type <= LAST_TOKEN_TYPE) return token_type_map[type];
 
-        case symbol_job_list:
-            return L"job_list";
-        case symbol_job:
-            return L"job";
-        case symbol_job_continuation:
-            return L"job_continuation";
-
-        case symbol_statement:
-            return L"statement";
-        case symbol_block_statement:
-            return L"block_statement";
-        case symbol_block_header:
-            return L"block_header";
-        case symbol_for_header:
-            return L"for_header";
-        case symbol_while_header:
-            return L"while_header";
-        case symbol_begin_header:
-            return L"begin_header";
-        case symbol_function_header:
-            return L"function_header";
-
-        case symbol_if_statement:
-            return L"if_statement";
-        case symbol_if_clause:
-            return L"if_clause";
-        case symbol_else_clause:
-            return L"else_clause";
-        case symbol_else_continuation:
-            return L"else_continuation";
-
-        case symbol_switch_statement:
-            return L"switch_statement";
-        case symbol_case_item_list:
-            return L"case_item_list";
-        case symbol_case_item:
-            return L"case_item";
-
-        case symbol_andor_job_list:
-            return L"andor_job_list";
-        case symbol_argument_list:
-            return L"argument_list";
-        case symbol_freestanding_argument_list:
-            return L"freestanding_argument_list";
-
-        case symbol_boolean_statement:
-            return L"boolean_statement";
-        case symbol_decorated_statement:
-            return L"decorated_statement";
-        case symbol_plain_statement:
-            return L"plain_statement";
-        case symbol_arguments_or_redirections_list:
-            return L"arguments_or_redirections_list";
-        case symbol_argument_or_redirection:
-            return L"argument_or_redirection";
-        case symbol_argument:
-            return L"symbol_argument";
-        case symbol_redirection:
-            return L"symbol_redirection";
-        case symbol_optional_background:
-            return L"optional_background";
-        case symbol_end_command:
-            return L"symbol_end_command";
-
-
-        case parse_token_type_string:
-            return L"token_string";
-        case parse_token_type_pipe:
-            return L"token_pipe";
-        case parse_token_type_redirection:
-            return L"token_redirection";
-        case parse_token_type_background:
-            return L"token_background";
-        case parse_token_type_end:
-            return L"token_end";
-        case parse_token_type_terminate:
-            return L"token_terminate";
-
-        case parse_special_type_parse_error:
-            return L"parse_error";
-        case parse_special_type_tokenizer_error:
-            return L"tokenizer_error";
-        case parse_special_type_comment:
-            return L"comment";
-
-    }
-    return format_string(L"Unknown token type %ld", static_cast<long>(type));
+    // This leaks memory but it should never be run unless we have a bug elsewhere in the code.
+    const wcstring d = format_string(L"unknown_token_type_%ld", static_cast<long>(type));
+    wchar_t *d2 = new wchar_t[d.size() + 1];
+    // cppcheck-suppress memleak
+    return std::wcscpy(d2, d.c_str());
 }
 
 #define LONGIFY(x) L ## x
@@ -248,23 +206,22 @@ keyword_map[] =
     KEYWORD_MAP(while)
 };
 
-wcstring keyword_description(parse_keyword_t k)
+const wchar_t *keyword_description(parse_keyword_t type)
 {
-    if (k >= 0 && k <= LAST_KEYWORD)
-    {
-        return keyword_map[k].name;
-    }
-    else
-    {
-        return format_string(L"Unknown keyword type %ld", static_cast<long>(k));
-    }
+    if (type >= 0 && type <= LAST_KEYWORD) return keyword_map[type].name;
+
+    // This leaks memory but it should never be run unless we have a bug elsewhere in the code.
+    const wcstring d = format_string(L"unknown_keyword_%ld", static_cast<long>(type));
+    wchar_t *d2 = new wchar_t[d.size() + 1];
+    // cppcheck-suppress memleak
+    return std::wcscpy(d2, d.c_str());
 }
 
 static wcstring token_type_user_presentable_description(parse_token_type_t type, parse_keyword_t keyword = parse_keyword_none)
 {
     if (keyword != parse_keyword_none)
     {
-        return format_string(L"keyword '%ls'", keyword_description(keyword).c_str());
+        return format_string(L"keyword '%ls'", keyword_description(keyword));
     }
 
     switch (type)
@@ -295,7 +252,7 @@ static wcstring token_type_user_presentable_description(parse_token_type_t type,
             return L"end of the input";
 
         default:
-            return format_string(L"a %ls", token_type_description(type).c_str());
+            return format_string(L"a %ls", token_type_description(type));
     }
 }
 
@@ -340,7 +297,7 @@ wcstring parse_token_t::describe() const
     wcstring result = token_type_description(type);
     if (keyword != parse_keyword_none)
     {
-        append_format(result, L" <%ls>", keyword_description(keyword).c_str());
+        append_format(result, L" <%ls>", keyword_description(keyword));
     }
     return result;
 }
@@ -499,7 +456,7 @@ struct parse_stack_element_t
         wcstring result = token_type_description(type);
         if (keyword != parse_keyword_none)
         {
-            append_format(result, L" <%ls>", keyword_description(keyword).c_str());
+            append_format(result, L" <%ls>", keyword_description(keyword));
         }
         return result;
     }
@@ -568,7 +525,8 @@ class parse_ll_t
                 {
                     parse_token_type_t type = production_element_type(elem);
                     parse_keyword_t keyword = production_element_keyword(elem);
-                    fprintf(stderr, "\t%ls <%ls>\n", token_type_description(type).c_str(), keyword_description(keyword).c_str());
+                    fprintf(stderr, "\t%ls <%ls>\n", token_type_description(type),
+                            keyword_description(keyword));
                     count++;
                 }
             }
@@ -690,7 +648,7 @@ void parse_ll_t::dump_stack(void) const
         }
     }
 
-    fprintf(stderr, "Stack dump (%lu elements):\n", symbol_stack.size());
+    fprintf(stderr, "Stack dump (%zu elements):\n", symbol_stack.size());
     for (size_t idx = 0; idx < lines.size(); idx++)
     {
         fprintf(stderr, "    %ls\n", lines.at(idx).c_str());
@@ -1035,9 +993,11 @@ bool parse_ll_t::top_node_handle_terminal_types(parse_token_t token)
 
         if (matched)
         {
-            // Success. Tell the node that it matched this token, and what its source range is
-            // In the parse phase, we only set source ranges for terminal types. We propagate ranges to parent nodes afterwards.
+            // Success. Tell the node that it matched this token, and what its source range is in
+            // the parse phase, we only set source ranges for terminal types. We propagate ranges to
+            // parent nodes afterwards.
             parse_node_t &node = node_for_top_symbol();
+            node.keyword = token.keyword;
             node.source_start = token.source_start;
             node.source_length = token.source_length;
         }
@@ -1211,6 +1171,12 @@ static parse_keyword_t keyword_with_name(const wchar_t *name)
     return result;
 }
 
+static bool is_keyword_char(wchar_t c)
+{
+    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9')
+            || c == L'\'' || c == L'"' || c == L'\\' || c == '\n';
+}
+
 /* Given a token, returns the keyword it matches, or parse_keyword_none. */
 static parse_keyword_t keyword_for_token(token_type tok, const wcstring &token)
 {
@@ -1224,17 +1190,16 @@ static parse_keyword_t keyword_for_token(token_type tok, const wcstring &token)
     parse_keyword_t result = parse_keyword_none;
     bool needs_expand = false, all_chars_valid = true;
     const wchar_t *tok_txt = token.c_str();
-    const wchar_t *chars_allowed_in_keywords = L"abcdefghijklmnopqrstuvwxyz'\"";
     for (size_t i=0; tok_txt[i] != L'\0'; i++)
     {
         wchar_t c = tok_txt[i];
-        if (! wcschr(chars_allowed_in_keywords, c))
+        if (! is_keyword_char(c))
         {
             all_chars_valid = false;
             break;
         }
         // If we encounter a quote, we need expansion
-        needs_expand = needs_expand || c == L'"' || c == L'\'';
+        needs_expand = needs_expand || c == L'"' || c == L'\'' || c == L'\\';
     }
     
     if (all_chars_valid)
@@ -1685,9 +1650,8 @@ enum parse_bool_statement_type_t parse_node_tree_t::statement_boolean_type(const
 bool parse_node_tree_t::job_should_be_backgrounded(const parse_node_t &job) const
 {
     assert(job.type == symbol_job);
-    bool result = false;
     const parse_node_t *opt_background = get_child(job, 2, symbol_optional_background);
-    result = opt_background != NULL && opt_background->tag == parse_background;
+    bool result = opt_background != NULL && opt_background->tag == parse_background;
     return result;
 }
 
