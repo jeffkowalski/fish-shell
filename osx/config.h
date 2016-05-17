@@ -206,9 +206,6 @@
 /* Define to 1 if the _sys_errs array is available. */
 /* #undef HAVE__SYS__ERRS */
 
-/* Define to 1 if the __environ symbol is exported. */
-/* #undef HAVE___ENVIRON */
-
 /* Define to 1 to disable ncurses macros that conflict with the STL */
 #define NCURSES_NOMACROS 1
 
@@ -222,7 +219,7 @@
 #define PACKAGE_NAME "fish"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "fish 2.2.0-git"
+#define PACKAGE_STRING "fish 2.3b2-git"
 
 /* Define to the one symbol short name of this package. */
 #define PACKAGE_TARNAME "fish"
@@ -231,7 +228,7 @@
 #define PACKAGE_URL ""
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "2.2.0-git"
+#define PACKAGE_VERSION "2.3b2-git"
 
 /* The size of `wchar_t', as computed by sizeof. */
 #define SIZEOF_WCHAR_T 4
