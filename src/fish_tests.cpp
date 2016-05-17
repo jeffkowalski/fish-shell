@@ -1260,15 +1260,6 @@ static void test_expand() {
     expand_test(L"/tmp/fish_expand_test/**z/xxx", 0, L"/tmp/fish_expand_test/baz/xxx", wnull,
                 L"Glob did the wrong thing 3");
 
-<<<<<<< HEAD
-    expand_test(L"/tmp/fish_expand_test/b**", 0,
-                L"/tmp/fish_expand_test/b", L"/tmp/fish_expand_test/b/x", L"/tmp/fish_expand_test/bar", L"/tmp/fish_expand_test/bax", L"/tmp/fish_expand_test/bax/xxx", L"/tmp/fish_expand_test/baz", L"/tmp/fish_expand_test/baz/xxx", L"/tmp/fish_expand_test/baz/yyy", wnull,
-                L"Glob did the wrong thing 4");
-
-    // a trailing slash should only produce directories
-    expand_test(L"/tmp/fish_expand_test/b*/", 0,
-                L"/tmp/fish_expand_test/b/", L"/tmp/fish_expand_test/baz/", L"/tmp/fish_expand_test/bax/", wnull,
-=======
     expand_test(L"/tmp/fish_expand_test/b**", 0, L"/tmp/fish_expand_test/b",
                 L"/tmp/fish_expand_test/b/x", L"/tmp/fish_expand_test/bar",
                 L"/tmp/fish_expand_test/bax", L"/tmp/fish_expand_test/bax/xxx",
@@ -1278,27 +1269,17 @@ static void test_expand() {
     // A trailing slash should only produce directories.
     expand_test(L"/tmp/fish_expand_test/b*/", 0, L"/tmp/fish_expand_test/b/",
                 L"/tmp/fish_expand_test/baz/", L"/tmp/fish_expand_test/bax/", wnull,
->>>>>>> upstream/master
                 L"Glob did the wrong thing 5");
 
     expand_test(L"/tmp/fish_expand_test/b**/", 0, L"/tmp/fish_expand_test/b/",
                 L"/tmp/fish_expand_test/baz/", L"/tmp/fish_expand_test/bax/", wnull,
                 L"Glob did the wrong thing 6");
 
-<<<<<<< HEAD
-    expand_test(L"/tmp/fish_expand_test/**/q", 0,
-                L"/tmp/fish_expand_test/lol/nub/q", wnull,
-                L"Glob did the wrong thing 7");
-
-    expand_test(L"/tmp/fish_expand_test/BA", EXPAND_FOR_COMPLETIONS,
-                L"/tmp/fish_expand_test/bar", L"/tmp/fish_expand_test/bax/",  L"/tmp/fish_expand_test/baz/", wnull,
-=======
     expand_test(L"/tmp/fish_expand_test/**/q", 0, L"/tmp/fish_expand_test/lol/nub/q", wnull,
                 L"Glob did the wrong thing 7");
 
     expand_test(L"/tmp/fish_expand_test/BA", EXPAND_FOR_COMPLETIONS, L"/tmp/fish_expand_test/bar",
                 L"/tmp/fish_expand_test/bax/", L"/tmp/fish_expand_test/baz/", wnull,
->>>>>>> upstream/master
                 L"Case insensitive test did the wrong thing");
 
     expand_test(L"/tmp/fish_expand_test/BA", EXPAND_FOR_COMPLETIONS, L"/tmp/fish_expand_test/bar",
