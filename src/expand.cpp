@@ -433,17 +433,6 @@ bool process_iterator_t::next_process(wcstring *out_str, pid_t *out_pid) {
 
 #endif
 
-std::vector<wcstring> expand_get_all_process_names(void) {
-    wcstring name;
-    pid_t pid;
-    process_iterator_t iterator;
-    std::vector<wcstring> result;
-    while (iterator.next_process(&name, &pid)) {
-        result.push_back(name);
-    }
-    return result;
-}
-
 // Helper function to do a job search.
 struct find_job_data_t {
     const wchar_t *proc;  // the process to search for - possibly numeric, possibly a name
@@ -917,8 +906,7 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
                 wchar_t *slice_end;
                 size_t bad_pos;
 
-                bad_pos =
-                    parse_slice(in + slice_start, &slice_end, var_idx_list, var_pos_list, 1);
+                bad_pos = parse_slice(in + slice_start, &slice_end, var_idx_list, var_pos_list, 1);
                 if (bad_pos != 0) {
                     append_syntax_error(errors, stop_pos + bad_pos, L"Invalid index value");
                     is_ok = 0;
@@ -931,8 +919,7 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
                     long tmp = var_idx_list.at(j);
                     if (tmp != 1) {
                         size_t var_src_pos = var_pos_list.at(j);
-                        append_syntax_error(errors, slice_start + var_src_pos,
-                                            ARRAY_BOUNDS_ERR);
+                        append_syntax_error(errors, slice_start + var_src_pos, ARRAY_BOUNDS_ERR);
                         is_ok = 0;
                         return is_ok;
                     }

@@ -2,9 +2,10 @@
 //
 // This library can be seen as a 'toolbox' for functions that are used in many places in fish and
 // that are somehow related to parsing the code.
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <wchar.h>
@@ -1052,12 +1053,12 @@ parser_test_error_bits_t parse_util_detect_errors_in_argument(const parse_node_t
                         // We have something like $$$^....  Back up until we reach the first $.
                         size_t first_dollar = idx;
                         while (first_dollar > 0 &&
-                                (unesc.at(first_dollar - 1) == VARIABLE_EXPAND ||
+                               (unesc.at(first_dollar - 1) == VARIABLE_EXPAND ||
                                 unesc.at(first_dollar - 1) == VARIABLE_EXPAND_SINGLE)) {
                             first_dollar--;
                         }
                         parse_util_expand_variable_error(unesc, node.source_start, first_dollar,
-                                                            out_errors);
+                                                         out_errors);
                     }
                 }
 

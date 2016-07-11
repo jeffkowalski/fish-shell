@@ -1,21 +1,22 @@
 // Various bug and feature tests. Compiled and run by make test.
+#include "config.h"  // IWYU pragma: keep
 
 // IWYU pragma: no_include <cstring>
 // IWYU pragma: no_include <cstddef>
 #include <assert.h>
 #include <libgen.h>
 #include <limits.h>
-#include <locale.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/select.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <sys/utsname.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -59,13 +60,14 @@
 #include "signal.h"
 #include "tokenizer.h"
 #include "utf8.h"
-#include "util.h"
 #include "wcstringutil.h"
 #include "wildcard.h"
 #include "wutil.h"  // IWYU pragma: keep
 
 static const char *const *s_arguments;
 static int s_test_run_count = 0;
+
+bool is_wchar_ucs2() { return sizeof(wchar_t) == 2; }
 
 // Indicate if we should test the given function. Either we test everything (all arguments) or we
 // run only tests that have a prefix in s_arguments.
@@ -193,8 +195,12 @@ static void test_unescape_sane() {
     if (unescape_string(L"echo \\U110000", &output, UNESCAPE_DEFAULT)) {
         err(L"Should not have been able to unescape \\U110000\n");
     }
-    if (!unescape_string(L"echo \\U10FFFF", &output, UNESCAPE_DEFAULT)) {
-        err(L"Should have been able to unescape \\U10FFFF\n");
+    if (is_wchar_ucs2()) {
+        // TODO: Make this work on MS Windows.
+    } else {
+        if (!unescape_string(L"echo \\U10FFFF", &output, UNESCAPE_DEFAULT)) {
+            err(L"Should have been able to unescape \\U10FFFF\n");
+        }
     }
 }
 
@@ -257,37 +263,21 @@ static void test_format(void) {
     do_test(!strcmp(buff1, buff2));
 }
 
+/// Helper to convert a narrow string to a sequence of hex digits.
+static char *str2hex(const char *input) {
+    char *output = (char *)malloc(5 * strlen(input) + 1);
+    char *p = output;
+    for (; *input; input++) {
+        sprintf(p, "0x%02X ", (int)*input & 0xFF);
+        p += 5;
+    }
+    *p = '\0';
+    return output;
+}
+
 /// Test wide/narrow conversion by creating random strings and verifying that the original string
-/// comes back thorugh double conversion.
+/// comes back through double conversion.
 static void test_convert() {
-#if 0
-    char o[] = {-17, -128, -121, -68, 0};
-
-    wchar_t *w = str2wcs(o);
-    char *n = wcs2str(w);
-    int i;
-
-    for (i = 0; o[i]; i++) {
-        bitprint(o[i]);
-        // wprintf(L"%d ", o[i]);
-    }
-    wprintf(L"\n");
-
-    for (i = 0; w[i]; i++) {
-        wbitprint(w[i]);
-        // wprintf(L"%d ", w[i]);
-    }
-    wprintf(L"\n");
-
-    for (i = 0; n[i]; i++) {
-        bitprint(n[i]);
-        // wprintf(L"%d ", n[i]);
-    }
-    wprintf(L"\n");
-
-    return;
-#endif
-
     int i;
     std::vector<char> sb;
 
@@ -295,11 +285,9 @@ static void test_convert() {
 
     for (i = 0; i < ESCAPE_TEST_COUNT; i++) {
         const char *o, *n;
-
         char c;
 
         sb.clear();
-
         while (rand() % ESCAPE_TEST_LENGTH) {
             c = rand();
             sb.push_back(c);
@@ -317,8 +305,13 @@ static void test_convert() {
         }
 
         if (strcmp(o, n)) {
-            err(L"Line %d - %d: Conversion cycle of string %s produced different string %s",
-                __LINE__, i, o, n);
+            char *o2 = str2hex(o);
+            char *n2 = str2hex(n);
+            err(L"Line %d - %d: Conversion cycle of string:\n%4d chars: %s\n"
+                L"produced different string:\n%4d chars: %s",
+                __LINE__, i, strlen(o), o2, strlen(n), n2);
+            free(o2);
+            free(n2);
         }
         free((void *)n);
     }
@@ -326,7 +319,7 @@ static void test_convert() {
 
 /// Verify correct behavior with embedded nulls.
 static void test_convert_nulls(void) {
-    say(L"Testing embedded nulls in string conversion");
+    say(L"Testing convert_nulls");
     const wchar_t in[] = L"AAA\0BBB";
     const size_t in_len = (sizeof in / sizeof *in) - 1;
     const wcstring in_str = wcstring(in, in_len);
@@ -352,9 +345,9 @@ static void test_convert_nulls(void) {
 }
 
 /// Test the tokenizer.
-static void test_tok() {
-    tok_t token;
+static void test_tokenizer() {
     say(L"Testing tokenizer");
+    tok_t token;
 
     const wchar_t *str =
         L"string <redirection  2>&1 'nested \"quoted\" '(string containing subshells "
@@ -497,7 +490,6 @@ static parser_test_error_bits_t detect_argument_errors(const wcstring &src) {
 /// Test the parser.
 static void test_parser() {
     say(L"Testing parser");
-
     parser_t parser;
 
     say(L"Testing block nesting");
@@ -852,35 +844,25 @@ static void test_utf82wchar(const char *src, size_t slen, const wchar_t *dst, si
         }
     }
 
-    if (dst != NULL) {
+    if (!dst) {
+        size = utf8_to_wchar(src, slen, NULL, flags);
+    } else {
         mem = (wchar_t *)malloc(dlen * sizeof(*mem));
         if (mem == NULL) {
             err(L"u2w: %s: MALLOC FAILED\n", descr);
             return;
         }
+
+        std::wstring buff;
+        size = utf8_to_wchar(src, slen, &buff, flags);
+        std::copy(buff.begin(), buff.begin() + std::min(dlen, buff.size()), mem);
     }
 
-    do {
-        if (mem == NULL) {
-            size = utf8_to_wchar(src, slen, NULL, flags);
-        } else {
-            std::wstring buff;
-            size = utf8_to_wchar(src, slen, &buff, flags);
-            std::copy(buff.begin(), buff.begin() + std::min(dlen, buff.size()), mem);
-        }
-        if (res != size) {
-            err(L"u2w: %s: FAILED (rv: %lu, must be %lu)", descr, size, res);
-            break;
-        }
-
-        if (mem == NULL) break; /* OK */
-
-        if (memcmp(mem, dst, size * sizeof(*mem)) != 0) {
-            err(L"u2w: %s: BROKEN", descr);
-            break;
-        }
-
-    } while (0);
+    if (res != size) {
+        err(L"u2w: %s: FAILED (rv: %lu, must be %lu)", descr, size, res);
+    } else if (mem && memcmp(mem, dst, size * sizeof(*mem)) != 0) {
+        err(L"u2w: %s: BROKEN", descr);
+    }
 
     free(mem);
 }
@@ -910,7 +892,7 @@ static void test_wchar2utf8(const wchar_t *src, size_t slen, const char *dst, si
         }
     }
 
-    if (dst != NULL) {
+    if (dst) {
         mem = (char *)malloc(dlen);
         if (mem == NULL) {
             err(L"w2u: %s: MALLOC FAILED", descr);
@@ -921,17 +903,10 @@ static void test_wchar2utf8(const wchar_t *src, size_t slen, const char *dst, si
     size = wchar_to_utf8(src, slen, mem, dlen, flags);
     if (res != size) {
         err(L"w2u: %s: FAILED (rv: %lu, must be %lu)", descr, size, res);
-        goto finish;
-    }
-
-    if (mem == NULL) goto finish; /* OK */
-
-    if (memcmp(mem, dst, size) != 0) {
+    } else if (dst && memcmp(mem, dst, size) != 0) {
         err(L"w2u: %s: BROKEN", descr);
-        goto finish;
     }
 
-finish:
     free(mem);
 }
 
@@ -943,87 +918,54 @@ static void test_wchar2utf8(const wchar_t *src, size_t slen, const unsigned char
 }
 
 static void test_utf8() {
+    say(L"Testing utf8");
     wchar_t w1[] = {0x54, 0x65, 0x73, 0x74};
     wchar_t w2[] = {0x0422, 0x0435, 0x0441, 0x0442};
     wchar_t w3[] = {0x800, 0x1e80, 0x98c4, 0x9910, 0xff00};
-    wchar_t w4[] = {0x15555, 0xf7777, 0xa};
-    wchar_t w5[] = {0x255555, 0x1fa04ff, 0xddfd04, 0xa};
-    wchar_t w6[] = {0xf255555, 0x1dfa04ff, 0x7fddfd04, 0xa};
+    wchar_t w4[] = {0x15555, 0xf7777, 0x0a};
     wchar_t wb[] = {(wchar_t)-2, 0xa, (wchar_t)0xffffffff, 0x0441};
-    wchar_t wm[] = {0x41, 0x0441, 0x3042, 0xff67, 0x9b0d, 0x2e05da67};
-    wchar_t wb1[] = {0xa, 0x0422};
-    wchar_t wb2[] = {0xd800, 0xda00, 0x41, 0xdfff, 0xa};
-    wchar_t wbom[] = {0xfeff, 0x41, 0xa};
+    wchar_t wm[] = {0x41, 0x0441, 0x3042, 0xff67, 0x9b0d};
+    wchar_t wb1[] = {0x0a, 0x0422};
+    wchar_t wb2[] = {0xd800, 0xda00, 0x41, 0xdfff, 0x0a};
+    wchar_t wbom[] = {0xfeff, 0x41, 0x0a};
     wchar_t wbom2[] = {0x41, 0xa};
-    wchar_t wbom22[] = {0xfeff, 0x41, 0xa};
+    wchar_t wbom22[] = {0xfeff, 0x41, 0x0a};
     unsigned char u1[] = {0x54, 0x65, 0x73, 0x74};
     unsigned char u2[] = {0xd0, 0xa2, 0xd0, 0xb5, 0xd1, 0x81, 0xd1, 0x82};
     unsigned char u3[] = {0xe0, 0xa0, 0x80, 0xe1, 0xba, 0x80, 0xe9, 0xa3,
                           0x84, 0xe9, 0xa4, 0x90, 0xef, 0xbc, 0x80};
-    unsigned char u4[] = {0xf0, 0x95, 0x95, 0x95, 0xf3, 0xb7, 0x9d, 0xb7, 0xa};
-    unsigned char u5[] = {0xf8, 0x89, 0x95, 0x95, 0x95, 0xf9, 0xbe, 0xa0,
-                          0x93, 0xbf, 0xf8, 0xb7, 0x9f, 0xb4, 0x84, 0x0a};
-    unsigned char u6[] = {0xfc, 0x8f, 0x89, 0x95, 0x95, 0x95, 0xfc, 0x9d, 0xbe, 0xa0,
-                          0x93, 0xbf, 0xfd, 0xbf, 0xb7, 0x9f, 0xb4, 0x84, 0x0a};
+    unsigned char u4[] = {0xf0, 0x95, 0x95, 0x95, 0xf3, 0xb7, 0x9d, 0xb7, 0x0a};
     unsigned char ub[] = {0xa, 0xd1, 0x81};
-    unsigned char um[] = {0x41, 0xd1, 0x81, 0xe3, 0x81, 0x82, 0xef, 0xbd, 0xa7,
-                          0xe9, 0xac, 0x8d, 0xfc, 0xae, 0x81, 0x9d, 0xa9, 0xa7};
+    unsigned char um[] = {0x41, 0xd1, 0x81, 0xe3, 0x81, 0x82, 0xef, 0xbd, 0xa7, 0xe9, 0xac, 0x8d};
     unsigned char ub1[] = {0xa, 0xff, 0xd0, 0xa2, 0xfe, 0x8f, 0xe0, 0x80};
     unsigned char uc080[] = {0xc0, 0x80};
-    unsigned char ub2[] = {0xed, 0xa1, 0x8c, 0xed, 0xbe, 0xb4, 0xa};
+    unsigned char ub2[] = {0xed, 0xa1, 0x8c, 0xed, 0xbe, 0xb4, 0x0a};
     unsigned char ubom[] = {0x41, 0xa};
-    unsigned char ubom2[] = {0xef, 0xbb, 0xbf, 0x41, 0xa};
+    unsigned char ubom2[] = {0xef, 0xbb, 0xbf, 0x41, 0x0a};
 
     // UTF-8 -> UCS-4 string.
     test_utf82wchar(ubom2, sizeof(ubom2), wbom2, sizeof(wbom2) / sizeof(*wbom2), UTF8_SKIP_BOM,
-                    sizeof(wbom2) / sizeof(*wbom2), "skip BOM");
+                    sizeof(wbom2) / sizeof(*wbom2), "ubom2 skip BOM");
     test_utf82wchar(ubom2, sizeof(ubom2), wbom22, sizeof(wbom22) / sizeof(*wbom22), 0,
-                    sizeof(wbom22) / sizeof(*wbom22), "BOM");
-    test_utf82wchar(uc080, sizeof(uc080), NULL, 0, 0, 0, "c0 80 - forbitten by rfc3629");
-    test_utf82wchar(ub2, sizeof(ub2), NULL, 0, 0, is_wchar_ucs2() ? 0 : 3,
-                    "resulted in forbitten wchars (len)");
+                    sizeof(wbom22) / sizeof(*wbom22), "ubom2 BOM");
+    test_utf82wchar(uc080, sizeof(uc080), NULL, 0, 0, 0, "uc080 c0 80 - forbitten by rfc3629");
+    test_utf82wchar(ub2, sizeof(ub2), NULL, 0, 0, 3, "ub2 resulted in forbitten wchars (len)");
     test_utf82wchar(ub2, sizeof(ub2), wb2, sizeof(wb2) / sizeof(*wb2), 0, 0,
-                    "resulted in forbitten wchars");
+                    "ub2 resulted in forbitten wchars");
     test_utf82wchar(ub2, sizeof(ub2), L"\x0a", 1, UTF8_IGNORE_ERROR, 1,
-                    "resulted in ignored forbitten wchars");
+                    "ub2 resulted in ignored forbitten wchars");
     test_utf82wchar(u1, sizeof(u1), w1, sizeof(w1) / sizeof(*w1), 0, sizeof(w1) / sizeof(*w1),
-                    "1 octet chars");
+                    "u1/w1 1 octet chars");
     test_utf82wchar(u2, sizeof(u2), w2, sizeof(w2) / sizeof(*w2), 0, sizeof(w2) / sizeof(*w2),
-                    "2 octets chars");
+                    "u2/w2 2 octets chars");
     test_utf82wchar(u3, sizeof(u3), w3, sizeof(w3) / sizeof(*w3), 0, sizeof(w3) / sizeof(*w3),
-                    "3 octets chars");
-    test_utf82wchar(u4, sizeof(u4), w4, sizeof(w4) / sizeof(*w4), 0, sizeof(w4) / sizeof(*w4),
-                    "4 octets chars");
-    test_utf82wchar(u5, sizeof(u5), w5, sizeof(w5) / sizeof(*w5), 0, sizeof(w5) / sizeof(*w5),
-                    "5 octets chars");
-    test_utf82wchar(u6, sizeof(u6), w6, sizeof(w6) / sizeof(*w6), 0, sizeof(w6) / sizeof(*w6),
-                    "6 octets chars");
+                    "u3/w3 3 octets chars");
     test_utf82wchar("\xff", 1, NULL, 0, 0, 0, "broken utf-8 0xff symbol");
     test_utf82wchar("\xfe", 1, NULL, 0, 0, 0, "broken utf-8 0xfe symbol");
     test_utf82wchar("\x8f", 1, NULL, 0, 0, 0, "broken utf-8, start from 10 higher bits");
-    if (!is_wchar_ucs2())
-        test_utf82wchar(ub1, sizeof(ub1), wb1, sizeof(wb1) / sizeof(*wb1), UTF8_IGNORE_ERROR,
-                        sizeof(wb1) / sizeof(*wb1), "ignore bad chars");
-    test_utf82wchar(um, sizeof(um), wm, sizeof(wm) / sizeof(*wm), 0, sizeof(wm) / sizeof(*wm),
-                    "mixed languages");
-    // PCA this test was to ensure that if the output buffer was too small, we'd get 0
-    // we no longer have statically sized result buffers, so this test is disabled
-    //    test_utf82wchar(um, sizeof(um), wm, sizeof(wm) / sizeof(*wm) - 1, 0,
-    //                    0, "boundaries -1");
-    test_utf82wchar(um, sizeof(um), wm, sizeof(wm) / sizeof(*wm) + 1, 0, sizeof(wm) / sizeof(*wm),
-                    "boundaries +1");
-    test_utf82wchar(um, sizeof(um), NULL, 0, 0, sizeof(wm) / sizeof(*wm), "calculate length");
-    test_utf82wchar(ub1, sizeof(ub1), NULL, 0, 0, 0, "calculate length of bad chars");
-    test_utf82wchar(ub1, sizeof(ub1), NULL, 0, UTF8_IGNORE_ERROR, sizeof(wb1) / sizeof(*wb1),
-                    "calculate length, ignore bad chars");
     test_utf82wchar((const char *)NULL, 0, NULL, 0, 0, 0, "invalid params, all 0");
     test_utf82wchar(u1, 0, NULL, 0, 0, 0, "invalid params, src buf not NULL");
     test_utf82wchar((const char *)NULL, 10, NULL, 0, 0, 0, "invalid params, src length is not 0");
-
-    // PCA this test was to ensure that converting into a zero length output buffer would return 0
-    // we no longer statically size output buffers, so the test is disabled
-    //    test_utf82wchar(u1, sizeof(u1), w1, 0, 0, 0,
-    //                    "invalid params, dst is not NULL");
 
     // UCS-4 -> UTF-8 string.
     const char *const nullc = NULL;
@@ -1032,31 +974,54 @@ static void test_utf8() {
     test_wchar2utf8(wb2, sizeof(wb2) / sizeof(*wb2), nullc, 0, 0, 0, "prohibited wchars");
     test_wchar2utf8(wb2, sizeof(wb2) / sizeof(*wb2), nullc, 0, UTF8_IGNORE_ERROR, 2,
                     "ignore prohibited wchars");
-    test_wchar2utf8(w1, sizeof(w1) / sizeof(*w1), u1, sizeof(u1), 0, sizeof(u1), "1 octet chars");
-    test_wchar2utf8(w2, sizeof(w2) / sizeof(*w2), u2, sizeof(u2), 0, sizeof(u2), "2 octets chars");
-    test_wchar2utf8(w3, sizeof(w3) / sizeof(*w3), u3, sizeof(u3), 0, sizeof(u3), "3 octets chars");
-    test_wchar2utf8(w4, sizeof(w4) / sizeof(*w4), u4, sizeof(u4), 0, sizeof(u4), "4 octets chars");
-    test_wchar2utf8(w5, sizeof(w5) / sizeof(*w5), u5, sizeof(u5), 0, sizeof(u5), "5 octets chars");
-    test_wchar2utf8(w6, sizeof(w6) / sizeof(*w6), u6, sizeof(u6), 0, sizeof(u6), "6 octets chars");
-    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), ub, sizeof(ub), 0, 0, "bad chars");
-    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), ub, sizeof(ub), UTF8_IGNORE_ERROR, sizeof(ub),
-                    "ignore bad chars");
-    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um), 0, sizeof(um), "mixed languages");
-    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um) - 1, 0, 0, "boundaries -1");
-    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um) + 1, 0, sizeof(um),
-                    "boundaries +1");
-    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), nullc, 0, 0, sizeof(um), "calculate length");
-    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), nullc, 0, 0, 0, "calculate length of bad chars");
-    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), nullc, 0, UTF8_IGNORE_ERROR, sizeof(ub),
-                    "calculate length, ignore bad chars");
+    test_wchar2utf8(w1, sizeof(w1) / sizeof(*w1), u1, sizeof(u1), 0, sizeof(u1),
+                    "w1/u1 1 octet chars");
+    test_wchar2utf8(w2, sizeof(w2) / sizeof(*w2), u2, sizeof(u2), 0, sizeof(u2),
+                    "w2/u2 2 octets chars");
+    test_wchar2utf8(w3, sizeof(w3) / sizeof(*w3), u3, sizeof(u3), 0, sizeof(u3),
+                    "w3/u3 3 octets chars");
     test_wchar2utf8(NULL, 0, nullc, 0, 0, 0, "invalid params, all 0");
     test_wchar2utf8(w1, 0, nullc, 0, 0, 0, "invalid params, src buf not NULL");
-    test_wchar2utf8(NULL, 10, nullc, 0, 0, 0, "invalid params, src length is not 0");
     test_wchar2utf8(w1, sizeof(w1) / sizeof(*w1), u1, 0, 0, 0, "invalid params, dst is not NULL");
+    test_wchar2utf8(NULL, 10, nullc, 0, 0, 0, "invalid params, src length is not 0");
+
+    // The following tests won't pass on systems (e.g., Cygwin) where sizeof wchar_t is 2. That's
+    // due to several reasons but the primary one is that narrowing conversions of literals assigned
+    // to the wchar_t arrays above don't result in values that will be treated as errors by the
+    // conversion functions.
+    if (is_wchar_ucs2()) return;
+    test_utf82wchar(u4, sizeof(u4), w4, sizeof(w4) / sizeof(*w4), 0, sizeof(w4) / sizeof(*w4),
+                    "u4/w4 4 octets chars");
+    test_wchar2utf8(w4, sizeof(w4) / sizeof(*w4), u4, sizeof(u4), 0, sizeof(u4),
+                    "w4/u4 4 octets chars");
+    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), ub, sizeof(ub), 0, 0, "wb/ub bad chars");
+    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), ub, sizeof(ub), UTF8_IGNORE_ERROR, sizeof(ub),
+                    "wb/ub ignore bad chars");
+    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um), 0, sizeof(um),
+                    "wm/um mixed languages");
+    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um) - 1, 0, 0, "wm/um boundaries -1");
+    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), um, sizeof(um) + 1, 0, sizeof(um),
+                    "wm/um boundaries +1");
+    test_wchar2utf8(wm, sizeof(wm) / sizeof(*wm), nullc, 0, 0, sizeof(um),
+                    "wm/um calculate length");
+    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), nullc, 0, 0, 0,
+                    "wb calculate length of bad chars");
+    test_wchar2utf8(wb, sizeof(wb) / sizeof(*wb), nullc, 0, UTF8_IGNORE_ERROR, sizeof(ub),
+                    "calculate length, ignore bad chars");
+    test_utf82wchar(ub1, sizeof(ub1), wb1, sizeof(wb1) / sizeof(*wb1), UTF8_IGNORE_ERROR,
+                    sizeof(wb1) / sizeof(*wb1), "ub1/wb1 ignore bad chars");
+    test_utf82wchar(um, sizeof(um), wm, sizeof(wm) / sizeof(*wm), 0, sizeof(wm) / sizeof(*wm),
+                    "um/wm mixed languages");
+    test_utf82wchar(um, sizeof(um), wm, sizeof(wm) / sizeof(*wm) + 1, 0, sizeof(wm) / sizeof(*wm),
+                    "um/wm boundaries +1");
+    test_utf82wchar(um, sizeof(um), NULL, 0, 0, sizeof(wm) / sizeof(*wm), "um/wm calculate length");
+    test_utf82wchar(ub1, sizeof(ub1), NULL, 0, 0, 0, "ub1 calculate length of bad chars");
+    test_utf82wchar(ub1, sizeof(ub1), NULL, 0, UTF8_IGNORE_ERROR, sizeof(wb1) / sizeof(*wb1),
+                    "ub1 calculate length, ignore bad chars");
 }
 
 static void test_escape_sequences(void) {
-    say(L"Testing escape codes");
+    say(L"Testing escape_sequences");
     if (escape_code_length(L"") != 0) err(L"test_escape_sequences failed on line %d\n", __LINE__);
     if (escape_code_length(L"abcd") != 0)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
@@ -1260,6 +1225,9 @@ static void test_expand() {
     expand_test(L"/tmp/fish_expand_test/**z/xxx", 0, L"/tmp/fish_expand_test/baz/xxx", wnull,
                 L"Glob did the wrong thing 3");
 
+    expand_test(L"/tmp/fish_expand_test////baz/xxx", 0, L"/tmp/fish_expand_test////baz/xxx", wnull,
+                L"Glob did the wrong thing 3");
+
     expand_test(L"/tmp/fish_expand_test/b**", 0, L"/tmp/fish_expand_test/b",
                 L"/tmp/fish_expand_test/b/x", L"/tmp/fish_expand_test/bar",
                 L"/tmp/fish_expand_test/bax", L"/tmp/fish_expand_test/bax/xxx",
@@ -1324,6 +1292,11 @@ static void test_expand() {
 
     expand_test(L"b/xx", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH, L"bax/xxx", L"baz/xxx", wnull,
                 L"Wrong fuzzy matching 5");
+
+    // multiple slashes with fuzzy matching - #3185
+    expand_test(L"l///n", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH,
+                L"lol///nub/", wnull,
+                L"Wrong fuzzy matching 6");
 
     if (chdir_set_pwd(saved_wd)) {
         err(L"chdir failed");
@@ -2211,62 +2184,6 @@ static void test_autosuggestion_combining() {
     do_test(combine_command_and_autosuggestion(L"alpha", L"ALPHA") == L"alpha");
 }
 
-/// Test speed of completion calculations.
-void perf_complete() {
-    wchar_t c;
-    std::vector<completion_t> out;
-    long long t1, t2;
-    int matches = 0;
-    double t;
-    wchar_t str[3] = {0, 0, 0};
-    int i;
-
-    say(L"Testing completion performance");
-
-    reader_push(L"");
-    say(L"Here we go");
-
-    t1 = get_time();
-
-    for (c = L'a'; c <= L'z'; c++) {
-        str[0] = c;
-        reader_set_buffer(str, 0);
-
-        complete(str, &out, COMPLETION_REQUEST_DEFAULT, env_vars_snapshot_t::current());
-
-        matches += out.size();
-        out.clear();
-    }
-    t2 = get_time();
-
-    t = (double)(t2 - t1) / (1000000 * 26);
-
-    say(L"One letter command completion took %f seconds per completion, %f microseconds/match", t,
-        (double)(t2 - t1) / matches);
-
-    matches = 0;
-    t1 = get_time();
-    for (i = 0; i < LAPS; i++) {
-        str[0] = 'a' + (rand() % 26);
-        str[1] = 'a' + (rand() % 26);
-
-        reader_set_buffer(str, 0);
-
-        complete(str, &out, COMPLETION_REQUEST_DEFAULT, env_vars_snapshot_t::current());
-
-        matches += out.size();
-        out.clear();
-    }
-    t2 = get_time();
-
-    t = (double)(t2 - t1) / (1000000 * LAPS);
-
-    say(L"Two letter command completion took %f seconds per completion, %f microseconds/match", t,
-        (double)(t2 - t1) / matches);
-
-    reader_pop();
-}
-
 static void test_history_matches(history_search_t &search, size_t matches) {
     size_t i;
     for (i = 0; i < matches; i++) {
@@ -2673,9 +2590,9 @@ void history_tests_t::test_history_races_pound_on_history() {
     // Called in child process to modify history.
     history_t *hist = new history_t(L"race_test");
     hist->chaos_mode = true;
-    const wcstring_list_t lines = generate_history_lines(getpid());
-    for (size_t idx = 0; idx < lines.size(); idx++) {
-        const wcstring &line = lines.at(idx);
+    const wcstring_list_t hist_lines = generate_history_lines(getpid());
+    for (size_t idx = 0; idx < hist_lines.size(); idx++) {
+        const wcstring &line = hist_lines.at(idx);
         hist->add(line);
         hist->save();
     }
@@ -2714,15 +2631,15 @@ void history_tests_t::test_history_races(void) {
     }
 
     // Compute the expected lines.
-    wcstring_list_t lines[RACE_COUNT];
+    wcstring_list_t expected_lines[RACE_COUNT];
     for (size_t i = 0; i < RACE_COUNT; i++) {
-        lines[i] = generate_history_lines(children[i]);
+        expected_lines[i] = generate_history_lines(children[i]);
     }
 
     // Count total lines.
     size_t line_count = 0;
     for (size_t i = 0; i < RACE_COUNT; i++) {
-        line_count += lines[i].size();
+        line_count += expected_lines[i].size();
     }
 
     // Ensure we consider the lines that have been outputted as part of our history.
@@ -2741,10 +2658,10 @@ void history_tests_t::test_history_races(void) {
         size_t i;
         for (i = 0; i < RACE_COUNT; i++) {
             wcstring_list_t::iterator where =
-                std::find(lines[i].begin(), lines[i].end(), item.str());
-            if (where != lines[i].end()) {
+                std::find(expected_lines[i].begin(), expected_lines[i].end(), item.str());
+            if (where != expected_lines[i].end()) {
                 // Delete everything from the found location onwards.
-                lines[i].resize(where - lines[i].begin());
+                expected_lines[i].resize(where - expected_lines[i].begin());
 
                 // Break because we found it.
                 break;
@@ -2812,6 +2729,16 @@ void history_tests_t::test_history_merge(void) {
     for (size_t i = 0; i < count; i++) {
         hists[i]->incorporate_external_changes();
     }
+
+    // Everyone should also have items in the same order (#2312)
+    wcstring string_rep;
+    hists[0]->get_string_representation(&string_rep, L"\n");
+    for (size_t i = 0; i < count; i++) {
+        wcstring string_rep2;
+        hists[i]->get_string_representation(&string_rep2, L"\n");
+        do_test(string_rep == string_rep2);
+    }
+
     // Add some more per-history items.
     for (size_t i = 0; i < count; i++) {
         hists[i]->add(alt_texts[i]);
@@ -3861,6 +3788,42 @@ static void test_string(void) {
     }
 }
 
+/// Helper for test_timezone_env_vars().
+long return_timezone_hour(time_t tstamp, const wchar_t *timezone) {
+    struct tm ltime;
+    char ltime_str[3];
+    char *str_ptr;
+    int n;
+
+    env_set(L"TZ", timezone, ENV_EXPORT);
+    localtime_r(&tstamp, &ltime);
+    n = strftime(ltime_str, 3, "%H", &ltime);
+    if (n != 2) {
+        err(L"strftime() returned %d, expected 2", n);
+        return 0;
+    }
+    return strtol(ltime_str, &str_ptr, 10);
+}
+
+/// Verify that setting special env vars have the expected effect on the current shell process.
+static void test_timezone_env_vars(void) {
+    // Confirm changing the timezone affects fish's idea of the local time.
+    time_t tstamp = time(NULL);
+
+    long first_tstamp = return_timezone_hour(tstamp, L"UTC-1");
+    long second_tstamp = return_timezone_hour(tstamp, L"UTC-2");
+    long delta = second_tstamp - first_tstamp;
+    if (delta != 1 && delta != -23) {
+        err(L"expected a one hour timezone delta got %ld", delta);
+    }
+}
+
+/// Verify that setting special env vars have the expected effect on the current shell process.
+static void test_env_vars(void) {
+    test_timezone_env_vars();
+    // TODO: Add tests for the locale and ncurses vars.
+}
+
 /// Main test.
 int main(int argc, char **argv) {
     // Look for the file tests/test.fish. We expect to run in a directory containing that file.
@@ -3881,12 +3844,14 @@ int main(int argc, char **argv) {
         }
     }
 
-    setlocale(LC_ALL, "");
-    // srand(time(0));
+    srand(time(0));
     configure_thread_assertions_for_testing();
 
     program_name = L"(ignore)";
     s_arguments = argv + 1;
+
+    struct utsname uname_info;
+    uname(&uname_info);
 
     say(L"Testing low-level functionality");
     set_main_thread();
@@ -3895,8 +3860,9 @@ int main(int argc, char **argv) {
     event_init();
     function_init();
     builtin_init();
-    reader_init();
     env_init();
+
+    reader_init();
 
     // Set default signal handlers, so we can ctrl-C out of this.
     signal_reset_handlers();
@@ -3914,7 +3880,7 @@ int main(int argc, char **argv) {
     if (should_test_function("format")) test_format();
     if (should_test_function("convert")) test_convert();
     if (should_test_function("convert_nulls")) test_convert_nulls();
-    if (should_test_function("tok")) test_tok();
+    if (should_test_function("tok")) test_tokenizer();
     if (should_test_function("iothread")) test_iothread();
     if (should_test_function("parser")) test_parser();
     if (should_test_function("cancellation")) test_cancellation();
@@ -3947,15 +3913,11 @@ int main(int argc, char **argv) {
     if (should_test_function("history_races")) history_tests_t::test_history_races();
     if (should_test_function("history_formats")) history_tests_t::test_history_formats();
     if (should_test_function("string")) test_string();
+    if (should_test_function("env_vars")) test_env_vars();
     // history_tests_t::test_history_speed();
 
     say(L"Encountered %d errors in low-level tests", err_count);
     if (s_test_run_count == 0) say(L"*** No Tests Were Actually Run! ***");
-
-    // Skip performance tests for now, since they seem to hang when running from inside make.
-
-    //  say( L"Testing performance" );
-    //  perf_complete();
 
     reader_destroy();
     builtin_destroy();

@@ -2,13 +2,12 @@
 #include "config.h"
 
 #include <assert.h>
+#include <cxxabi.h>
+#include <dlfcn.h>
 #include <errno.h>
 #include <limits.h>
-#include <locale.h>
-#include <math.h>
 #include <signal.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -16,7 +15,6 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #include <termios.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -49,12 +47,16 @@ static bool thread_assertions_configured_for_testing = false;
 
 wchar_t ellipsis_char;
 wchar_t omitted_newline_char;
-
 bool g_profiling_active = false;
-
 const wchar_t *program_name;
+int debug_level = 1;         // default maximum debug output level (errors and warnings)
+int debug_stack_frames = 0;  // default number of stack frames to show on debug() calls
 
-int debug_level = 1;
+/// This allows us to notice when we've forked.
+static pid_t initial_pid = 0;
+
+/// Be able to restore the term's foreground process group.
+static pid_t initial_foreground_process_group = -1;
 
 /// This struct maintains the current state of the terminal size. It is updated on demand after
 /// receiving a SIGWINCH. Do not touch this struct directly, it's managed with a rwlock. Use
@@ -64,20 +66,70 @@ static volatile bool termsize_valid;
 static rwlock_t termsize_rwlock;
 
 static char *wcs2str_internal(const wchar_t *in, char *out);
+static void debug_shared(const wchar_t msg_level, const wcstring &msg);
 
-void show_stackframe() {
+bool has_working_tty_timestamps = true;
+
+#ifdef HAVE_BACKTRACE_SYMBOLS
+// This function produces a stack backtrace with demangled function & method names. It is based on
+// https://gist.github.com/fmela/591333 but adapted to the style of the fish project.
+static const wcstring_list_t __attribute__((noinline))
+demangled_backtrace(int max_frames, int skip_levels) {
+    void *callstack[128];
+    const int n_max_frames = sizeof(callstack) / sizeof(callstack[0]);
+    int n_frames = backtrace(callstack, n_max_frames);
+    char **symbols = backtrace_symbols(callstack, n_frames);
+    wchar_t text[1024];
+    std::vector<wcstring> backtrace_text;
+
+    if (skip_levels + max_frames < n_frames) n_frames = skip_levels + max_frames;
+
+    for (int i = skip_levels; i < n_frames; i++) {
+        Dl_info info;
+        if (dladdr(callstack[i], &info) && info.dli_sname) {
+            char *demangled = NULL;
+            int status = -1;
+            if (info.dli_sname[0] == '_')
+                demangled = abi::__cxa_demangle(info.dli_sname, NULL, 0, &status);
+            swprintf(text, sizeof(text) / sizeof(wchar_t), L"%-3d %s + %td", i - skip_levels,
+                     status == 0 ? demangled : info.dli_sname == 0 ? symbols[i] : info.dli_sname,
+                     (char *)callstack[i] - (char *)info.dli_saddr);
+            free(demangled);
+        } else {
+            swprintf(text, sizeof(text) / sizeof(wchar_t), L"%-3d %s", i - skip_levels, symbols[i]);
+        }
+        backtrace_text.push_back(text);
+    }
+    free(symbols);
+    return backtrace_text;
+}
+
+void __attribute__((noinline))
+show_stackframe(const wchar_t msg_level, int frame_count, int skip_levels) {
     ASSERT_IS_NOT_FORKED_CHILD();
 
+    // TODO: Decide if this is still needed. I'm commenting it out because it caused me some grief
+    // while trying to debug a test failure. And the tests run just fine without spurious failures
+    // if this check is not done.
+    //
     // Hack to avoid showing backtraces in the tester.
-    if (program_name && !wcscmp(program_name, L"(ignore)")) return;
+    // if (program_name && !wcscmp(program_name, L"(ignore)")) return;
 
-    void *trace[32];
-    int trace_size = 0;
-
-    trace_size = backtrace(trace, 32);
-    debug(0, L"Backtrace:");
-    backtrace_symbols_fd(trace, trace_size, STDERR_FILENO);
+    if (frame_count < 1) frame_count = 999;
+    debug_shared(msg_level, L"Backtrace:");
+    std::vector<wcstring> bt = demangled_backtrace(frame_count, skip_levels + 2);
+    for (int i = 0; i < bt.size(); i++) {
+        debug_shared(msg_level, bt[i]);
+    }
 }
+
+#else   // HAVE_BACKTRACE_SYMBOLS
+
+void __attribute__((noinline))
+show_stackframe(const wchar_t msg_level, int frame_count, int skip_levels) {
+    debug_shared(msg_level, L"Sorry, but your system does not support backtraces");
+}
+#endif  // HAVE_BACKTRACE_SYMBOLS
 
 int fgetws2(wcstring *s, FILE *f) {
     int i = 0;
@@ -125,8 +177,8 @@ static wcstring str2wcs_internal(const char *in, const size_t in_len) {
     result.reserve(in_len);
     size_t in_pos = 0;
 
-    if (MB_CUR_MAX == 1)  // single-byte locale, all values are legal
-    {
+    if (MB_CUR_MAX == 1) {
+        // Single-byte locale, all values are legal.
         while (in_pos < in_len) {
             result.push_back((unsigned char)in[in_pos]);
             in_pos++;
@@ -136,37 +188,58 @@ static wcstring str2wcs_internal(const char *in, const size_t in_len) {
 
     mbstate_t state = {};
     while (in_pos < in_len) {
-        wchar_t wc = 0;
-        size_t ret = mbrtowc(&wc, &in[in_pos], in_len - in_pos, &state);
-
-        // Determine whether to encode this characters with our crazy scheme.
         bool use_encode_direct = false;
-        if (wc >= ENCODE_DIRECT_BASE && wc < ENCODE_DIRECT_BASE + 256) {
+        size_t ret;
+        wchar_t wc = 0;
+
+        if ((in[in_pos] & 0xF8) == 0xF8) {
+            // Protect against broken mbrtowc() implementations which attempt to encode UTF-8
+            // sequences longer than four bytes (e.g., OS X Snow Leopard).
             use_encode_direct = true;
-        } else if (wc == INTERNAL_SEPARATOR) {
+        } else if (sizeof(wchar_t) == 2 && (in[in_pos] & 0xF8) == 0xF0) {
+            // Assume we are in a UTF-16 environment (e.g., Cygwin) using a UTF-8 encoding.
+            // The bits set check will be true for a four byte UTF-8 sequence that requires
+            // two UTF-16 chars. Something that doesn't work with our simple use of mbrtowc().
             use_encode_direct = true;
-        } else if (ret == (size_t)-2) {
-            // Incomplete sequence.
-            use_encode_direct = true;
-        } else if (ret == (size_t)-1) {
-            // Invalid data.
-            use_encode_direct = true;
-        } else if (ret > in_len - in_pos) {
-            // Other error codes? Terrifying, should never happen.
-            use_encode_direct = true;
+        } else {
+            ret = mbrtowc(&wc, &in[in_pos], in_len - in_pos, &state);
+            // fprintf(stderr, "WTF in_pos %d  ret %d\n", in_pos, ret);
+
+            // Determine whether to encode this character with our crazy scheme.
+            if (wc >= ENCODE_DIRECT_BASE && wc < ENCODE_DIRECT_BASE + 256) {
+                use_encode_direct = true;
+            } else if (wc == INTERNAL_SEPARATOR) {
+                use_encode_direct = true;
+            } else if (ret == (size_t)-2) {
+                // Incomplete sequence.
+                use_encode_direct = true;
+            } else if (ret == (size_t)-1) {
+                // Invalid data.
+                use_encode_direct = true;
+            } else if (ret > in_len - in_pos) {
+                // Other error codes? Terrifying, should never happen.
+                use_encode_direct = true;
+            } else if (sizeof(wchar_t) == 2 && wc >= 0xD800 && wc <= 0xDFFF) {
+                // If we get a surrogate pair char on a UTF-16 system (e.g., Cygwin) then
+                // it's guaranteed the UTF-8 decoding is wrong so use direct encoding.
+                use_encode_direct = true;
+            }
         }
 
         if (use_encode_direct) {
+            // fprintf(stderr, "WTF use_encode_direct\n");
             wc = ENCODE_DIRECT_BASE + (unsigned char)in[in_pos];
             result.push_back(wc);
             in_pos++;
             memset(&state, 0, sizeof state);
         } else if (ret == 0) {
+            // fprintf(stderr, "WTF null byte\n");
             // Embedded null byte!
             result.push_back(L'\0');
             in_pos++;
             memset(&state, 0, sizeof state);
         } else {
+            // fprintf(stderr, "WTF null byte\n");
             // Normal case.
             result.push_back(wc);
             in_pos += ret;
@@ -180,7 +253,7 @@ wcstring str2wcstring(const char *in, size_t len) { return str2wcs_internal(in, 
 wcstring str2wcstring(const char *in) { return str2wcs_internal(in, strlen(in)); }
 
 wcstring str2wcstring(const std::string &in) {
-    /* Handles embedded nulls! */
+    // Handles embedded nulls!
     return str2wcs_internal(in.data(), in.size());
 }
 
@@ -395,19 +468,12 @@ wchar_t *quote_end(const wchar_t *pos) {
     return 0;
 }
 
-wcstring wsetlocale(int category, const wchar_t *locale) {
-    char *lang = locale ? wcs2str(locale) : NULL;
-    char *res = setlocale(category, lang);
-    free(lang);
-
+void fish_setlocale() {
     // Use ellipsis if on known unicode system, otherwise use $.
-    ellipsis_char = (wcwidth(L'\x2026') > 0) ? L'\x2026' : L'$';
+    ellipsis_char = (fish_wcwidth(L'\x2026') > 0) ? L'\x2026' : L'$';
 
     // U+23CE is the "return" character
-    omitted_newline_char = (wcwidth(L'\x23CE') > 0) ? L'\x23CE' : L'~';
-
-    if (!res) return wcstring();
-    return format_string(L"%s", res);
+    omitted_newline_char = (fish_wcwidth(L'\x23CE') > 0) ? L'\x23CE' : L'~';
 }
 
 bool contains_internal(const wchar_t *a, int vararg_handle, ...) {
@@ -493,23 +559,34 @@ static bool should_debug(int level) {
     return true;
 }
 
-static void debug_shared(const wcstring &msg) {
-    const wcstring sb = wcstring(program_name) + L": " + msg;
-    fwprintf(stderr, L"%ls", reformat_for_screen(sb).c_str());
+static void debug_shared(const wchar_t level, const wcstring &msg) {
+    pid_t current_pid = getpid();
+
+    if (current_pid == initial_pid) {
+        fwprintf(stderr, L"<%lc> %ls: %ls\n", (unsigned long)level, program_name, msg.c_str());
+    } else {
+        fwprintf(stderr, L"<%lc> %ls: %d: %ls\n", (unsigned long)level, program_name, current_pid,
+                 msg.c_str());
+    }
 }
 
-void debug(int level, const wchar_t *msg, ...) {
+static wchar_t level_char[] = {L'E', L'W', L'2', L'3', L'4', L'5'};
+void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...) {
     if (!should_debug(level)) return;
     int errno_old = errno;
     va_list va;
     va_start(va, msg);
     wcstring local_msg = vformat_string(msg, va);
     va_end(va);
-    debug_shared(local_msg);
+    const wchar_t msg_level = level <= 5 ? level_char[level] : L'9';
+    debug_shared(msg_level, local_msg);
+    if (debug_stack_frames > 0) {
+        show_stackframe(msg_level, debug_stack_frames, 1);
+    }
     errno = errno_old;
 }
 
-void debug(int level, const char *msg, ...) {
+void __attribute__((noinline)) debug(int level, const char *msg, ...) {
     if (!should_debug(level)) return;
     int errno_old = errno;
     char local_msg[512];
@@ -517,7 +594,11 @@ void debug(int level, const char *msg, ...) {
     va_start(va, msg);
     vsnprintf(local_msg, sizeof local_msg, msg, va);
     va_end(va);
-    debug_shared(str2wcstring(local_msg));
+    const wchar_t msg_level = level <= 5 ? level_char[level] : L'9';
+    debug_shared(msg_level, str2wcstring(local_msg));
+    if (debug_stack_frames > 0) {
+        show_stackframe(msg_level, debug_stack_frames, 1);
+    }
     errno = errno_old;
 }
 
@@ -667,7 +748,7 @@ wcstring reformat_for_screen(const wcstring &msg) {
 
             // If token is zero character long, we don't do anything.
             if (pos == start) {
-                start = pos = pos + 1;
+                pos = pos + 1;
             } else if (overflow) {
                 // In case of overflow, we print a newline, except if we already are at position 0.
                 wchar_t *token = wcsndup(start, pos - start);
@@ -1470,7 +1551,7 @@ int create_directory(const wcstring &d) {
 }
 
 __attribute__((noinline)) void bugreport() {
-    debug(1, _(L"This is a bug. Break on bugreport to debug."
+    debug(1, _(L"This is a bug. Break on bugreport to debug. "
                L"If you can reproduce it, please send a bug report to %s."),
           PACKAGE_BUGREPORT);
 }
@@ -1566,19 +1647,13 @@ void format_size_safe(char buff[128], unsigned long long sz) {
     }
 }
 
+/// Return the number of seconds from the UNIX epoch, with subsecond precision. This function uses
+/// the gettimeofday function and will have the same precision as that function.
 double timef() {
     struct timeval tv;
-    int time_res = gettimeofday(&tv, 0);
-
-    if (time_res) {
-        // Fixme: What on earth is the correct parameter value for NaN? The man pages and the
-        // standard helpfully state that this parameter is implementation defined. Gcc gives a
-        // warning if a null pointer is used. But not even all mighty Google gives a hint to what
-        // value should actually be returned.
-        return nan("");
-    }
-
-    return (double)tv.tv_sec + 0.000001 * tv.tv_usec;
+    VOMIT_ON_FAILURE(gettimeofday(&tv, 0));
+    // return (double)tv.tv_sec + 0.000001 * tv.tv_usec;
+    return (double)tv.tv_sec + 1e-6 * tv.tv_usec;
 }
 
 void exit_without_destructors(int code) { _exit(code); }
@@ -1629,12 +1704,6 @@ void set_main_thread() { main_thread_id = pthread_self(); }
 void configure_thread_assertions_for_testing(void) {
     thread_assertions_configured_for_testing = true;
 }
-
-/// Notice when we've forked.
-static pid_t initial_pid = 0;
-
-/// Be able to restore the term's foreground process group.
-static pid_t initial_foreground_process_group = -1;
 
 bool is_forked_child(void) {
     // Just bail if nobody's called setup_fork_guards, e.g. some of our tools.
@@ -1712,14 +1781,14 @@ void assert_is_locked(void *vmutex, const char *who, const char *caller) {
 
 void scoped_lock::lock(void) {
     assert(!locked);
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_mutex_lock(lock_obj));
     locked = true;
 }
 
 void scoped_lock::unlock(void) {
     assert(locked);
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_mutex_unlock(lock_obj));
     locked = false;
 }
@@ -1736,35 +1805,35 @@ scoped_lock::~scoped_lock() {
 
 void scoped_rwlock::lock(void) {
     assert(!(locked || locked_shared));
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_rdlock(rwlock_obj));
     locked = true;
 }
 
 void scoped_rwlock::unlock(void) {
     assert(locked);
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_unlock(rwlock_obj));
     locked = false;
 }
 
 void scoped_rwlock::lock_shared(void) {
     assert(!(locked || locked_shared));
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_wrlock(rwlock_obj));
     locked_shared = true;
 }
 
 void scoped_rwlock::unlock_shared(void) {
     assert(locked_shared);
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_unlock(rwlock_obj));
     locked_shared = false;
 }
 
 void scoped_rwlock::upgrade(void) {
     assert(locked_shared);
-    assert(!is_forked_child());
+    ASSERT_IS_NOT_FORKED_CHILD();
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_unlock(rwlock_obj));
     locked = false;
     VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_wrlock(rwlock_obj));
@@ -1868,4 +1937,20 @@ wchar_t **make_null_terminated_array(const wcstring_list_t &lst) {
 
 char **make_null_terminated_array(const std::vector<std::string> &lst) {
     return make_null_terminated_array_helper(lst);
+}
+
+long convert_digit(wchar_t d, int base) {
+    long res = -1;
+    if ((d <= L'9') && (d >= L'0')) {
+        res = d - L'0';
+    } else if ((d <= L'z') && (d >= L'a')) {
+        res = d + 10 - L'a';
+    } else if ((d <= L'Z') && (d >= L'A')) {
+        res = d + 10 - L'A';
+    }
+    if (res >= base) {
+        res = -1;
+    }
+
+    return res;
 }

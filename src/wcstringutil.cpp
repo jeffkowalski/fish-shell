@@ -1,6 +1,8 @@
 // Helper functions for working with wcstring.
-#include "wcstringutil.h"
+#include "config.h"  // IWYU pragma: keep
+
 #include "common.h"
+#include "wcstringutil.h"
 
 typedef wcstring::size_type size_type;
 

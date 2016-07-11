@@ -5,8 +5,9 @@ function __fish_git_commits
     # Complete commits with their subject line as the description
     # This allows filtering by subject with the new pager!
     # Because even subject lines can be quite long,
-    # trim them (abbrev'd hash+tab+subject) to 70 characters
-    command git log --pretty=tformat:"%h"\t"%s" --all | string replace -r '(.{70}).+' '$1...'
+    # trim them (abbrev'd hash+tab+subject) to 73 characters
+    command git log --pretty=tformat:"%h"\t"%s" --all ^/dev/null \
+    | string replace -r '(.{73}).+' '$1…'
 end
 
 function __fish_git_branches
@@ -34,19 +35,19 @@ end
 
 function __fish_git_modified_files
     # git diff --name-only hands us filenames relative to the git toplevel
-    set -l root (command git rev-parse --show-toplevel)
+    set -l root (command git rev-parse --show-toplevel ^/dev/null)
     # Print files from the current $PWD as-is, prepend all others with ":/" (relative to toplevel in git-speak)
     # This is a bit simplistic but finding the lowest common directory and then replacing everything else in $PWD with ".." is a bit annoying
     string replace -- "$PWD/" "" "$root/"(command git diff --name-only ^/dev/null) | string replace "$root/" ":/"
 end
 
 function __fish_git_staged_files
-    set -l root (command git rev-parse --show-toplevel)
+    set -l root (command git rev-parse --show-toplevel ^/dev/null)
     string replace -- "$PWD/" "" "$root/"(command git diff --staged --name-only ^/dev/null) | string replace "$root/" ":/"
 end
 
 function __fish_git_add_files
-    set -l root (command git rev-parse --show-toplevel)
+    set -l root (command git rev-parse --show-toplevel ^/dev/null)
     string replace -- "$PWD/" "" "$root/"(command git -C $root ls-files -mo --exclude-standard ^/dev/null) | string replace "$root/" ":/"
 end
 
@@ -200,11 +201,31 @@ function __fish_git_possible_commithash
 end
 
 function __fish_git_reflog
-	command git reflog | string replace -r '[0-9a-f]* (.+@\{[0-9]+\}): (.*)$' '$1\t$2'
+	command git reflog ^/dev/null | string replace -r '[0-9a-f]* (.+@\{[0-9]+\}): (.*)$' '$1\t$2'
 end
 
 # general options
 complete -f -c git -l help -d 'Display the manual of a git command'
+complete -f -c git -n '__fish_git_needs_command' -l version -d 'Display version'
+complete -x -c git -n '__fish_git_needs_command' -s C -a '(__fish_complete_directories)' -d 'Run as if git was started in this directory'
+complete -x -c git -n '__fish_git_needs_command' -s c -a '(command git config -l ^/dev/null | string replace = \t)' -d 'Set a configuration option'
+complete -x -c git -n '__fish_git_needs_command' -l exec-path -a '(__fish_git_complete_directories)' -d 'Get or set the path to the git programs'
+complete -f -c git -n '__fish_git_needs_command' -l html-path -d 'Print the path to the html documentation'
+complete -f -c git -n '__fish_git_needs_command' -l man-path -d 'Print the path to the man documentation'
+complete -f -c git -n '__fish_git_needs_command' -l info-path -d 'Print the path to the info documentation'
+complete -f -c git -n '__fish_git_needs_command' -s p -l paginate -d 'Pipe output into a pager'
+complete -f -c git -n '__fish_git_needs_command' -l no-pager -d 'Do not pipe output into a pager'
+complete -f -c git -n '__fish_git_needs_command' -l git-dir -d 'Set the path to the repository'
+complete -f -c git -n '__fish_git_needs_command' -l work-tree -d 'Set the path to the working tree'
+complete -f -c git -n '__fish_git_needs_command' -l namespace -d 'Set the namespace'
+complete -f -c git -n '__fish_git_needs_command' -l bare -d 'Treat the repository as bare'
+complete -f -c git -n '__fish_git_needs_command' -l no-replace-objects -d 'Do not use replacement refs to replace git objects'
+complete -f -c git -n '__fish_git_needs_command' -l literal-pathspecs -d 'Treat pathspecs literally'
+complete -f -c git -n '__fish_git_needs_command' -l glob-pathspecs -d 'Treat pathspecs as globs'
+complete -f -c git -n '__fish_git_needs_command' -l noglob-pathspecs -d "Don't treat pathspecs as globs"
+complete -f -c git -n '__fish_git_needs_command' -l icase-pathspecs -d 'Match pathspecs case-insensitively'
+
+# Options shared between multiple commands
 complete -f -c git -n '__fish_git_using_command log show diff-tree rev-list' -l pretty -a 'oneline short medium full fuller email raw format:'
 
 #### fetch
@@ -439,10 +460,12 @@ complete -f -c git -n '__fish_git_using_command pull; and __fish_git_branch_for_
 ### push
 complete -f -c git -n '__fish_git_needs_command' -a push -d 'Update remote refs along with associated objects'
 complete -f -c git -n '__fish_git_using_command push; and not __fish_git_branch_for_remote' -a '(__fish_git_remotes)' -d 'Remote alias'
-# The "refspec" here is an optional "+" to signify a force-push (implemented)
-# then src:dest (where both src and dest are git objects, so we most likely want to complete branches (not implemented)
 complete -f -c git -n '__fish_git_using_command push; and __fish_git_branch_for_remote' -a '(__fish_git_branches)' -d 'Branch'
+# The "refspec" here is an optional "+" to signify a force-push
 complete -f -c git -n '__fish_git_using_command push; and __fish_git_branch_for_remote; and string match -q "+*" -- (commandline -ct)' -a '+(__fish_git_branches)' -d 'Force-push branch'
+# then src:dest (where both src and dest are git objects, so we want to complete branches)
+complete -f -c git -n '__fish_git_using_command push; and __fish_git_branch_for_remote; and string match -q "+*:*" -- (commandline -ct)' -a '+(__fish_git_branches):(__fish_git_branch_for_remote)' -d 'Force-push local branch to remote branch'
+complete -f -c git -n '__fish_git_using_command push; and __fish_git_branch_for_remote; and string match -q "*:*" -- (commandline -ct)' -a '(__fish_git_branches):(__fish_git_branch_for_remote)' -d 'Push local branch to remote branch'
 complete -f -c git -n '__fish_git_using_command push' -l all -d 'Push all refs under refs/heads/'
 complete -f -c git -n '__fish_git_using_command push' -l prune -d "Remove remote branches that don't have a local counterpart"
 complete -f -c git -n '__fish_git_using_command push' -l mirror -d 'Push all refs under refs/'
@@ -622,6 +645,32 @@ complete -f -c git -n '__fish_git_using_command clean' -s d -d 'Remove untracked
 complete -f -c git -n '__fish_git_using_command clean' -s x -d 'Remove ignored files, as well'
 complete -f -c git -n '__fish_git_using_command clean' -s X -d 'Remove only ignored files'
 # TODO -e option
+
+### git blame
+complete -f -c git -n '__fish_git_needs_command' -a blame -d 'Show what revision and author last modified each line of a file'
+complete -f -c git -n '__fish_git_using_command blame' -s b -d 'Show blank SHA-1 for boundary commits'
+complete -f -c git -n '__fish_git_using_command blame' -l root -d 'Do not treat root commits as boundaries'
+complete -f -c git -n '__fish_git_using_command blame' -l show-stats -d 'Include additional statistics'
+complete -f -c git -n '__fish_git_using_command blame' -s L -d 'Annotate only the given line range'
+complete -f -c git -n '__fish_git_using_command blame' -s l -d 'Show long rev'
+complete -f -c git -n '__fish_git_using_command blame' -s t -d 'Show raw timestamp'
+complete -r -c git -n '__fish_git_using_command blame' -s S -d 'Use revisions from named file instead of calling rev-list'
+complete -f -c git -n '__fish_git_using_command blame' -l reverse -d 'Walk history forward instead of backward'
+complete -f -c git -n '__fish_git_using_command blame' -s p -l porcelain -d 'Show in a format designed for machine consumption'
+complete -f -c git -n '__fish_git_using_command blame' -l line-porcelain -d 'Show the porcelain format'
+complete -f -c git -n '__fish_git_using_command blame' -l incremental -d 'Show the result incrementally'
+complete -r -c git -n '__fish_git_using_command blame' -l contents -d 'Instead of working tree, use the contents of the named file'
+complete -x -c git -n '__fish_git_using_command blame' -l date -d 'Specifies the format used to output dates'
+complete -f -c git -n '__fish_git_using_command blame' -s M -d 'Detect moved or copied lines within a file'
+complete -f -c git -n '__fish_git_using_command blame' -s C -d 'Detect lines moved or copied from other files that were modified in the same commit'
+complete -f -c git -n '__fish_git_using_command blame' -s h -d 'Show help message'
+complete -f -c git -n '__fish_git_using_command blame' -s c -d 'Use the same output mode as git-annotate'
+complete -f -c git -n '__fish_git_using_command blame' -s f -l show-name -d 'Show the filename in the original commit'
+complete -f -c git -n '__fish_git_using_command blame' -s n -l show-number -d 'Show the line number in the original commit'
+complete -f -c git -n '__fish_git_using_command blame' -s s -d 'Suppress the author name and timestamp from the output'
+complete -f -c git -n '__fish_git_using_command blame' -s e -l show-email -d 'Show the author email instead of author name'
+complete -f -c git -n '__fish_git_using_command blame' -s w -d 'Ignore whitespace changes'
+
 
 ## Custom commands (git-* commands installed in the PATH)
 complete -c git -n '__fish_git_needs_command' -a '(__fish_git_custom_commands)' -d 'Custom command'

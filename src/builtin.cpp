@@ -15,12 +15,12 @@
 // Check the other builtin manuals for proper syntax.
 //
 // 4). Use 'git add doc_src/NAME.txt' to start tracking changes to the documentation file.
+#include "config.h"  // IWYU pragma: keep
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -31,7 +31,7 @@
 #include <wctype.h>
 #include <algorithm>
 #include <map>
-#include <memory>  // IWYU pragma: keep
+#include <memory>
 #include <string>
 #include <utility>
 
@@ -80,7 +80,7 @@
 // The send stuff to foreground message.
 #define FG_MSG _(L"Send job %d, '%ls' to foreground\n")
 
-/// Datastructure to describe a builtin.
+/// Data structure to describe a builtin.
 struct builtin_data_t {
     // Name of the builtin.
     const wchar_t *name;
@@ -1762,7 +1762,7 @@ int builtin_function(parser_t &parser, io_streams_t &streams, const wcstring_lis
     return res;
 }
 
-// The random builtin. For generating random numbers.
+/// The random builtin generates random numbers.
 static int builtin_random(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     static int seeded = 0;
     static struct drand48_data seed_buffer;
@@ -1806,9 +1806,7 @@ static int builtin_random(parser_t &parser, io_streams_t &streams, wchar_t **arg
                 srand48_r(time(0), &seed_buffer);
             }
             lrand48_r(&seed_buffer, &res);
-            // The labs() shouldn't be necessary since lrand48 is supposed to
-            // return only positive integers but we're going to play it safe.
-            streams.out.append_format(L"%ld\n", labs(res % 32768));
+            streams.out.append_format(L"%ld\n", res % 32768);
             break;
         }
         case 1: {
@@ -2587,7 +2585,7 @@ static int builtin_fg(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
             streams.err.append_format(_(L"%ls: There are no suitable jobs\n"), argv[0]);
         }
     } else if (argv[2] != 0) {
-        // Specifying what more than one job to put to the foreground is a syntax error, we still
+        // Specifying more than one job to put to the foreground is a syntax error, we still
         // try to locate the job argv[1], since we want to know if this is an ambigous job
         // specification or if this is an malformed job id.
         wchar_t *endptr;
@@ -2624,13 +2622,11 @@ static int builtin_fg(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
             j = job_get_from_pid(pid);
             if (!j || !job_get_flag(j, JOB_CONSTRUCTED) || job_is_completed(j)) {
                 streams.err.append_format(_(L"%ls: No suitable job: %d\n"), argv[0], pid);
-                builtin_print_help(parser, streams, argv[0], streams.err);
                 j = 0;
             } else if (!job_get_flag(j, JOB_CONTROL)) {
                 streams.err.append_format(_(L"%ls: Can't put job %d, '%ls' to foreground because "
                                             L"it is not under job control\n"),
                                           argv[0], pid, j->command_wcstr());
-                builtin_print_help(parser, streams, argv[0], streams.err);
                 j = 0;
             }
         }
@@ -2654,7 +2650,7 @@ static int builtin_fg(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
         job_continue(j, job_is_stopped(j));
     }
-    return j != 0;
+    return j ? STATUS_BUILTIN_OK : STATUS_BUILTIN_ERROR;
 }
 
 /// Helper function for builtin_bg().
@@ -2694,7 +2690,7 @@ static int builtin_bg(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
         if (!j) {
             streams.err.append_format(_(L"%ls: There are no suitable jobs\n"), argv[0]);
-            res = 1;
+            res = STATUS_BUILTIN_ERROR;
         } else {
             res = send_to_bg(parser, streams, j, _(L"(default)"));
         }
@@ -2702,23 +2698,15 @@ static int builtin_bg(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
         wchar_t *end;
         int i;
         int pid;
-        int err = 0;
 
         for (i = 1; argv[i]; i++) {
             errno = 0;
             pid = fish_wcstoi(argv[i], &end, 10);
             if (errno || pid < 0 || *end || !job_get_from_pid(pid)) {
                 streams.err.append_format(_(L"%ls: '%ls' is not a job\n"), argv[0], argv[i]);
-                err = 1;
-                break;
+                return STATUS_BUILTIN_ERROR;
             }
-        }
-
-        if (!err) {
-            for (i = 1; !res && argv[i]; i++) {
-                pid = fish_wcstoi(argv[i], 0, 10);
-                res |= send_to_bg(parser, streams, job_get_from_pid(pid), *argv);
-            }
+            res |= send_to_bg(parser, streams, job_get_from_pid(pid), *argv);
         }
     }
 
@@ -2826,6 +2814,28 @@ static int builtin_return(parser_t &parser, io_streams_t &streams, wchar_t **arg
     return status;
 }
 
+// Formats a single history record, including a trailing newline.  Returns true
+// if bytes were written to the output stream and false otherwise.
+static bool format_history_record(const history_item_t &item, const bool with_time,
+                                  output_stream_t *const out) {
+    if (with_time) {
+        const time_t seconds = item.timestamp();
+        struct tm timestamp;
+        if (!localtime_r(&seconds, &timestamp)) {
+            return false;
+        }
+        char timestamp_string[22];
+        // TODO: this should probably be formatted appropriately per the users' locale.
+        if (strftime(timestamp_string, 22, "%Y-%m-%d %H:%M:%S  ", &timestamp) != 21) {
+            return false;
+        }
+        out->append(str2wcstring(timestamp_string));
+    }
+    out->append(item.str());
+    out->append(L"\n");
+    return true;
+}
+
 /// History of commands executed by user.
 static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     int argc = builtin_count_args(argv);
@@ -2836,16 +2846,14 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
     bool save_history = false;
     bool clear_history = false;
     bool merge_history = false;
+    bool with_time = false;
 
-    static const struct woption long_options[] = {{L"prefix", no_argument, 0, 'p'},
-                                                  {L"delete", no_argument, 0, 'd'},
-                                                  {L"search", no_argument, 0, 's'},
-                                                  {L"contains", no_argument, 0, 'c'},
-                                                  {L"save", no_argument, 0, 'v'},
-                                                  {L"clear", no_argument, 0, 'l'},
-                                                  {L"merge", no_argument, 0, 'm'},
-                                                  {L"help", no_argument, 0, 'h'},
-                                                  {0, 0, 0, 0}};
+    static const struct woption long_options[] = {
+        {L"prefix", no_argument, 0, 'p'},    {L"delete", no_argument, 0, 'd'},
+        {L"search", no_argument, 0, 's'},    {L"contains", no_argument, 0, 'c'},
+        {L"save", no_argument, 0, 'v'},      {L"clear", no_argument, 0, 'l'},
+        {L"merge", no_argument, 0, 'm'},     {L"help", no_argument, 0, 'h'},
+        {L"with-time", no_argument, 0, 't'}, {0, 0, 0, 0}};
 
     int opt = 0;
     int opt_index = 0;
@@ -2857,7 +2865,7 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
     // from webconfig.py.
     if (!history) history = &history_t::history_with_name(L"fish");
 
-    while ((opt = w.wgetopt_long_only(argc, argv, L"pdscvl", long_options, &opt_index)) != EOF) {
+    while ((opt = w.wgetopt_long(argc, argv, L"pdscvlmht", long_options, &opt_index)) != EOF) {
         switch (opt) {
             case 'p': {
                 search_prefix = true;
@@ -2886,6 +2894,10 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
                 merge_history = true;
                 break;
             }
+            case 't': {
+                with_time = true;
+                break;
+            }
             case 'h': {
                 builtin_print_help(parser, streams, argv[0], streams.out);
                 return STATUS_BUILTIN_OK;
@@ -2906,11 +2918,13 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
     // Everything after is an argument.
     const wcstring_list_t args(argv + w.woptind, argv + argc);
 
-    if (argc == 1) {
-        wcstring full_history;
-        history->get_string_representation(&full_history, wcstring(L"\n"));
-        streams.out.append(full_history);
-        streams.out.push_back('\n');
+    if (argc == 1 || with_time) {
+        for (int i = 1;  // 0 is the current input
+             !history->item_at_index(i).empty(); ++i) {
+            if (!format_history_record(history->item_at_index(i), with_time, &streams.out)) {
+                return STATUS_BUILTIN_ERROR;
+            }
+        }
         return STATUS_BUILTIN_OK;
     }
 
@@ -2933,8 +2947,9 @@ static int builtin_history(parser_t &parser, io_streams_t &streams, wchar_t **ar
                 *history, search_string,
                 search_prefix ? HISTORY_SEARCH_TYPE_PREFIX : HISTORY_SEARCH_TYPE_CONTAINS);
             while (searcher.go_backwards()) {
-                streams.out.append(searcher.current_string());
-                streams.out.append(L"\n");
+                if (!format_history_record(searcher.current_item(), with_time, &streams.out)) {
+                    return STATUS_BUILTIN_ERROR;
+                }
                 res = STATUS_BUILTIN_OK;
             }
         }

@@ -1,9 +1,10 @@
 // Functions used for implementing the test builtin.
 //
 // Implemented from scratch (yes, really) by way of IEEE 1003.1 as reference.
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
 #include <stdarg.h>
-#include <stdbool.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>

@@ -1,4 +1,6 @@
 // Programmatic representation of fish code.
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -10,7 +12,7 @@
 #include <vector>
 
 #include "common.h"
-#include "fallback.h"  // IWYU pragma: keep
+#include "fallback.h"
 #include "parse_constants.h"
 #include "parse_productions.h"
 #include "parse_tree.h"
@@ -333,7 +335,10 @@ static inline parse_token_type_t parse_token_type_from_tokenizer_token(
     return result;
 }
 
-/// Helper function for dump_tree.
+#if 0
+// Disabled for the 2.2.0 release: https://github.com/fish-shell/fish-shell/issues/1809.
+
+/// Helper function for parse_dump_tree().
 static void dump_tree_recursive(const parse_node_tree_t &nodes, const wcstring &src,
                                 node_offset_t node_idx, size_t indent, wcstring *result,
                                 size_t *line, node_offset_t *inout_first_node_not_dumped) {
@@ -409,6 +414,7 @@ wcstring parse_dump_tree(const parse_node_tree_t &nodes, const wcstring &src) {
     }
     return result;
 }
+#endif
 
 /// Struct representing elements of the symbol stack, used in the internal state of the LL parser.
 struct parse_stack_element_t {
@@ -465,7 +471,7 @@ class parse_ll_t {
     // failure (e.g. it is not an unclosed block).
     bool report_error_for_unclosed_block();
 
-    void dump_stack(void) const;
+    // void dump_stack(void) const;
 
     /// Get the node corresponding to the top element of the stack.
     parse_node_t &node_for_top_symbol() {
@@ -584,29 +590,31 @@ class parse_ll_t {
     void acquire_output(parse_node_tree_t *output, parse_error_list_t *errors);
 };
 
+#if 0
 void parse_ll_t::dump_stack(void) const {
     // Walk backwards from the top, looking for parents.
-    wcstring_list_t lines;
+    wcstring_list_t stack_lines;
     if (symbol_stack.empty()) {
-        lines.push_back(L"(empty)");
+        stack_lines.push_back(L"(empty)");
     } else {
         node_offset_t child = symbol_stack.back().node_idx;
         node_offset_t cursor = child;
-        lines.push_back(nodes.at(cursor).describe());
+        stack_lines.push_back(nodes.at(cursor).describe());
         while (cursor--) {
             const parse_node_t &node = nodes.at(cursor);
             if (node.child_start <= child && node.child_start + node.child_count > child) {
-                lines.push_back(node.describe());
+                stack_lines.push_back(node.describe());
                 child = cursor;
             }
         }
     }
 
     fprintf(stderr, "Stack dump (%zu elements):\n", symbol_stack.size());
-    for (size_t idx = 0; idx < lines.size(); idx++) {
-        fprintf(stderr, "    %ls\n", lines.at(idx).c_str());
+    for (size_t idx = 0; idx < stack_lines.size(); idx++) {
+        fprintf(stderr, "    %ls\n", stack_lines.at(idx).c_str());
     }
 }
+#endif
 
 // Give each node a source range equal to the union of the ranges of its children. Terminal nodes
 // already have source ranges (and no children). Since children always appear after their parents,
@@ -1034,7 +1042,7 @@ void parse_ll_t::accept_tokens(parse_token_t token1, parse_token_t token2) {
             if (logit) {
                 fprintf(stderr, "Consumed token %ls\n", token1.describe().c_str());
             }
-            consumed = true;
+            // consumed = true;
             break;
         }
 

@@ -15,13 +15,16 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
+#include <errno.h>
 #include <getopt.h>
 #include <locale.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
 #include <wctype.h>
 #include <memory>
@@ -162,10 +165,9 @@ static void prettify_node_recursive(const wcstring &source, const parse_node_tre
 // Entry point for prettification.
 static wcstring prettify(const wcstring &src, bool do_indent) {
     parse_node_tree_t tree;
-    if (!parse_tree_from_string(src,
-                                parse_flag_continue_after_error | parse_flag_include_comments |
-                                    parse_flag_leave_unterminated | parse_flag_show_blank_lines,
-                                &tree, NULL /* errors */)) {
+    int parse_flags = (parse_flag_continue_after_error | parse_flag_include_comments |
+                       parse_flag_leave_unterminated | parse_flag_show_blank_lines);
+    if (!parse_tree_from_string(src, parse_flags, &tree, NULL)) {
         // We return the initial string on failure.
         return src;
     }
@@ -211,7 +213,7 @@ static std::string ansi_colorize(const wcstring &text,
         }
         writech(text.at(i));
     }
-
+    set_color(rgb_color_t::normal(), rgb_color_t::normal());
     output_set_writer(saved);
     std::string result;
     result.swap(output_receiver);
@@ -325,28 +327,37 @@ static std::string html_colorize(const wcstring &text,
 static std::string no_colorize(const wcstring &text) { return wcs2string(text); }
 
 int main(int argc, char *argv[]) {
+    program_name = L"fish_indent";
     set_main_thread();
     setup_fork_guards();
-
-    wsetlocale(LC_ALL, L"");
-    program_name = L"fish_indent";
-
+    // Using the user's default locale could be a problem if it doesn't use UTF-8 encoding. That's
+    // because the fish project assumes Unicode UTF-8 encoding in all of its scripts.
+    //
+    // TODO: Auto-detect the encoding of the script. We should look for a vim style comment
+    // (e.g., "# vim: set fileencoding=<encoding-name>:") or an emacs style comment
+    // (e.g., "# -*- coding: <encoding-name> -*-").
+    setlocale(LC_ALL, "");
     env_init();
     input_init();
 
     // Types of output we support.
     enum {
         output_type_plain_text,
+        output_type_file,
         output_type_ansi,
         output_type_html
     } output_type = output_type_plain_text;
+    const char *output_location = "";
     bool do_indent = true;
 
-    const char *short_opts = "+dhvi";
-    const struct option long_opts[] = {{"dump", no_argument, NULL, 'd'},
+    const char *short_opts = "+d:hvwiD:";
+    const struct option long_opts[] = {{"debug-level", required_argument, NULL, 'd'},
+                                       {"debug-stack-frames", required_argument, NULL, 'D'},
+                                       {"dump-parse-tree", no_argument, NULL, 'P'},
                                        {"no-indent", no_argument, NULL, 'i'},
                                        {"help", no_argument, NULL, 'h'},
                                        {"version", no_argument, NULL, 'v'},
+                                       {"write", no_argument, NULL, 'w'},
                                        {"html", no_argument, NULL, 1},
                                        {"ansi", no_argument, NULL, 2},
                                        {NULL, 0, NULL, 0}};
@@ -356,20 +367,25 @@ int main(int argc, char *argv[]) {
         switch (opt) {
             case 0: {
                 fwprintf(stderr, _(L"getopt_long() unexpectedly returned zero\n"));
-                exit_without_destructors(127);
+                exit(127);
+                break;
             }
-            case 'd': {
+            case 'P': {
                 dump_parse_tree = true;
                 break;
             }
             case 'h': {
                 print_help("fish_indent", 1);
-                exit_without_destructors(0);
+                exit(0);
+                break;
             }
             case 'v': {
                 fwprintf(stderr, _(L"%ls, version %s\n"), program_name, get_fish_version());
                 exit(0);
-                assert(0 && "Unreachable code reached");
+                break;
+            }
+            case 'w': {
+                output_type = output_type_file;
                 break;
             }
             case 'i': {
@@ -384,14 +400,70 @@ int main(int argc, char *argv[]) {
                 output_type = output_type_ansi;
                 break;
             }
+            case 'd': {
+                char *end;
+                long tmp;
+
+                errno = 0;
+                tmp = strtol(optarg, &end, 10);
+
+                if (tmp >= 0 && tmp <= 10 && !*end && !errno) {
+                    debug_level = (int)tmp;
+                } else {
+                    fwprintf(stderr, _(L"Invalid value '%s' for debug-level flag"), optarg);
+                    exit(1);
+                }
+                break;
+            }
+            case 'D': {
+                char *end;
+                long tmp;
+
+                errno = 0;
+                tmp = strtol(optarg, &end, 10);
+
+                if (tmp > 0 && tmp <= 128 && !*end && !errno) {
+                    debug_stack_frames = (int)tmp;
+                } else {
+                    fwprintf(stderr, _(L"Invalid value '%s' for debug-stack-frames flag"), optarg);
+                    exit(1);
+                }
+                break;
+            }
             default: {
                 // We assume getopt_long() has already emitted a diagnostic msg.
-                exit_without_destructors(1);
+                exit(1);
+                break;
             }
         }
     }
 
-    const wcstring src = read_file(stdin);
+    argc -= optind;
+    argv += optind;
+
+    wcstring src;
+    if (argc == 0) {
+        if (output_type == output_type_file) {
+            fwprintf(stderr, _(L"Expected file path to read/write for -w:\n\n $ %ls -w foo.fish\n"),
+                     program_name);
+            exit(1);
+        }
+        src = read_file(stdin);
+    } else if (argc == 1) {
+        FILE *fh = fopen(*argv, "r");
+        if (fh) {
+            src = read_file(fh);
+            fclose(fh);
+            output_location = *argv;
+        } else {
+            fwprintf(stderr, _(L"Opening \"%s\" failed: %s\n"), *argv, strerror(errno));
+            exit(1);
+        }
+    } else {
+        fwprintf(stderr, _(L"Too many arguments\n"));
+        exit(1);
+    }
+
     const wcstring output_wtext = prettify(src, do_indent);
 
     // Maybe colorize.
@@ -405,6 +477,19 @@ int main(int argc, char *argv[]) {
     switch (output_type) {
         case output_type_plain_text: {
             colored_output = no_colorize(output_wtext);
+            break;
+        }
+        case output_type_file: {
+            FILE *fh = fopen(output_location, "w");
+            if (fh) {
+                fputs(wcs2str(output_wtext), fh);
+                fclose(fh);
+                exit(0);
+            } else {
+                fwprintf(stderr, _(L"Opening \"%s\" failed: %s\n"), output_location,
+                         strerror(errno));
+                exit(1);
+            }
             break;
         }
         case output_type_ansi: {

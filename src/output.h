@@ -5,7 +5,6 @@
 #ifndef FISH_OUTPUT_H
 #define FISH_OUTPUT_H
 
-#include <stdbool.h>
 #include <stddef.h>
 #include <vector>
 
@@ -75,12 +74,6 @@ void output_set_writer(int (*writer)(char));
 
 /// Return the current output writer.
 int (*output_get_writer())(char);
-
-/// Set the terminal name.
-void output_set_term(const wcstring &term);
-
-/// Return the terminal name.
-const wchar_t *output_get_term();
 
 /// Sets what colors are supported.
 enum { color_support_term256 = 1 << 0, color_support_term24bit = 1 << 1 };

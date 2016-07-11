@@ -530,9 +530,6 @@ void reader_data_t::pager_selection_changed() {
     }
     reader_set_buffer_maintaining_pager(new_cmd_line, cursor_pos);
 
-    // Since we just inserted a completion, don't immediately do a new autosuggestion.
-    this->suppress_autosuggestion = true;
-
     // Trigger repaint (see issue #765).
     reader_repaint_needed();
 }
@@ -784,22 +781,18 @@ void reader_init() {
 
     // Set the mode used for the terminal, initialized to the current mode.
     memcpy(&shell_modes, &terminal_mode_on_startup, sizeof shell_modes);
-    shell_modes.c_iflag &= ~ICRNL;   // turn off mapping CR (\cM) to NL (\cJ)
-    shell_modes.c_iflag &= ~INLCR;   // turn off mapping NL (\cJ) to CR (\cM)
+
+    shell_modes.c_iflag &= ~ICRNL;  // disable mapping CR (\cM) to NL (\cJ)
+    shell_modes.c_iflag &= ~INLCR;  // disable mapping NL (\cJ) to CR (\cM)
+    shell_modes.c_iflag &= ~IXON;   // disable flow control
+    shell_modes.c_iflag &= ~IXOFF;  // disable flow control
+
     shell_modes.c_lflag &= ~ICANON;  // turn off canonical mode
     shell_modes.c_lflag &= ~ECHO;    // turn off echo mode
-    shell_modes.c_iflag &= ~IXON;    // disable flow control
-    shell_modes.c_iflag &= ~IXOFF;   // disable flow control
+    shell_modes.c_lflag &= ~IEXTEN;  // turn off handling of discard and lnext characters
+
     shell_modes.c_cc[VMIN] = 1;
     shell_modes.c_cc[VTIME] = 0;
-
-#if defined(_POSIX_VDISABLE)
-// PCA disable VDSUSP (typically control-Y), which is a funny job control. function available only
-// on OS X and BSD systems. This lets us use control-Y for yank instead.
-#ifdef VDSUSP
-    shell_modes.c_cc[VDSUSP] = _POSIX_VDISABLE;
-#endif
-#endif
 
     // We don't use term_steal because this can fail if fd 0 isn't associated with a tty and this
     // function is run regardless of whether stdin is tied to a tty. This is harmless in that case.
@@ -1107,8 +1100,7 @@ wcstring completion_apply_to_command_line(const wcstring &val_str, complete_flag
     // Perform the insertion and compute the new location.
     wcstring result = command_line;
     result.insert(insertion_point, replaced);
-    size_t new_cursor_pos =
-        insertion_point + replaced.size() + (back_into_trailing_quote ? 1 : 0);
+    size_t new_cursor_pos = insertion_point + replaced.size() + (back_into_trailing_quote ? 1 : 0);
     if (add_space) {
         if (quote != L'\0' && unescaped_quote(command_line, insertion_point) != quote) {
             // This is a quoted parameter, first print a quote.
@@ -1132,9 +1124,6 @@ static void completion_insert(const wchar_t *val, complete_flags_t flags) {
     wcstring new_command_line = completion_apply_to_command_line(val, flags, el->text, &cursor,
                                                                  false /* not append only */);
     reader_set_buffer_maintaining_pager(new_command_line, cursor);
-
-    // Since we just inserted a completion, don't immediately do a new autosuggestion.
-    data->suppress_autosuggestion = true;
 }
 
 struct autosuggestion_context_t {
@@ -1444,53 +1433,56 @@ static bool handle_completions(const std::vector<completion_t> &comp,
             surviving_completions.push_back(el);
         }
 
-        // Try to find a common prefix to insert among the surviving completions.
-        wcstring common_prefix;
-        complete_flags_t flags = 0;
-        bool prefix_is_partial_completion = false;
-        for (size_t i = 0; i < surviving_completions.size(); i++) {
-            const completion_t &el = surviving_completions.at(i);
-            if (i == 0) {
-                // First entry, use the whole string.
-                common_prefix = el.completion;
-                flags = el.flags;
-            } else {
-                // Determine the shared prefix length.
-                size_t idx, max = mini(common_prefix.size(), el.completion.size());
-                for (idx = 0; idx < max; idx++) {
-                    wchar_t ac = common_prefix.at(idx), bc = el.completion.at(idx);
-                    bool matches = (ac == bc);
-                    // If we are replacing the token, allow case to vary.
-                    if (will_replace_token && !matches) {
-                        // Hackish way to compare two strings in a case insensitive way, hopefully
-                        // better than towlower().
-                        matches = (wcsncasecmp(&ac, &bc, 1) == 0);
+        bool use_prefix = false;
+        if (match_type_shares_prefix(best_match_type)) {
+            // Try to find a common prefix to insert among the surviving completions.
+            wcstring common_prefix;
+            complete_flags_t flags = 0;
+            bool prefix_is_partial_completion = false;
+            for (size_t i = 0; i < surviving_completions.size(); i++) {
+                const completion_t &el = surviving_completions.at(i);
+                if (i == 0) {
+                    // First entry, use the whole string.
+                    common_prefix = el.completion;
+                    flags = el.flags;
+                } else {
+                    // Determine the shared prefix length.
+                    size_t idx, max = mini(common_prefix.size(), el.completion.size());
+                    for (idx = 0; idx < max; idx++) {
+                        wchar_t ac = common_prefix.at(idx), bc = el.completion.at(idx);
+                        bool matches = (ac == bc);
+                        // If we are replacing the token, allow case to vary.
+                        if (will_replace_token && !matches) {
+                            // Hackish way to compare two strings in a case insensitive way,
+                            // hopefully better than towlower().
+                            matches = (wcsncasecmp(&ac, &bc, 1) == 0);
+                        }
+                        if (!matches) break;
                     }
-                    if (!matches) break;
+
+                    // idx is now the length of the new common prefix.
+                    common_prefix.resize(idx);
+                    prefix_is_partial_completion = true;
+
+                    // Early out if we decide there's no common prefix.
+                    if (idx == 0) break;
                 }
-
-                // idx is now the length of the new common prefix.
-                common_prefix.resize(idx);
-                prefix_is_partial_completion = true;
-
-                // Early out if we decide there's no common prefix.
-                if (idx == 0) break;
             }
-        }
 
-        // Determine if we use the prefix. We use it if it's non-empty and it will actually make the
-        // command line longer. It may make the command line longer by virtue of not using
-        // REPLACE_TOKEN (so it always appends to the command line), or by virtue of replacing the
-        // token but being longer than it.
-        bool use_prefix = common_prefix.size() > (will_replace_token ? tok.size() : 0);
-        assert(!use_prefix || !common_prefix.empty());
+            // Determine if we use the prefix. We use it if it's non-empty and it will actually make
+            // the command line longer. It may make the command line longer by virtue of not using
+            // REPLACE_TOKEN (so it always appends to the command line), or by virtue of replacing
+            // the token but being longer than it.
+            use_prefix = common_prefix.size() > (will_replace_token ? tok.size() : 0);
+            assert(!use_prefix || !common_prefix.empty());
 
-        if (use_prefix) {
-            // We got something. If more than one completion contributed, then it means we have a
-            // prefix; don't insert a space after it.
-            if (prefix_is_partial_completion) flags |= COMPLETE_NO_SPACE;
-            completion_insert(common_prefix.c_str(), flags);
-            success = true;
+            if (use_prefix) {
+                // We got something. If more than one completion contributed, then it means we have
+                // a prefix; don't insert a space after it.
+                if (prefix_is_partial_completion) flags |= COMPLETE_NO_SPACE;
+                completion_insert(common_prefix.c_str(), flags);
+                success = true;
+            }
         }
 
         if (continue_after_prefix_insertion || !use_prefix) {
@@ -1835,14 +1827,14 @@ static void handle_token_history(int forward, int reset) {
     }
 }
 
+enum move_word_dir_t { MOVE_DIR_LEFT, MOVE_DIR_RIGHT };
+
 /// Move buffer position one word or erase one word. This function updates both the internal buffer
 /// and the screen. It is used by M-left, M-right and ^W to do block movement or block erase.
 ///
-/// \param dir Direction to move/erase. 0 means move left, 1 means move right.
+/// \param move_right true if moving right
 /// \param erase Whether to erase the characters along the way or only move past them.
-/// \param new if the new kill item should be appended to the previous kill item or not.
-enum move_word_dir_t { MOVE_DIR_LEFT, MOVE_DIR_RIGHT };
-
+/// \param newv if the new kill item should be appended to the previous kill item or not.
 static void move_word(editable_line_t *el, bool move_right, bool erase,
                       enum move_word_style_t style, bool newv) {
     // Return if we are already at the edge.
@@ -2130,6 +2122,9 @@ class background_highlight_context_t {
             // The gen count has changed, so don't do anything.
             return 0;
         }
+        VOMIT_ON_FAILURE(
+            pthread_setspecific(generation_count_key, (void *)(uintptr_t)generation_count));
+
         if (!string_to_highlight.empty()) {
             highlight_function(string_to_highlight, colors, match_highlight_pos, NULL /* error */,
                                vars);
@@ -2179,13 +2174,12 @@ static int threaded_highlight(background_highlight_context_t *ctx) {
 /// highlighting maykes characters under the sursor unreadable.
 ///
 /// \param match_highlight_pos_adjust the adjustment to the position to use for bracket matching.
-/// This is added to the current cursor position and may be negative.
-/// \param error if non-null, any possible errors in the buffer are further descibed by the strings
-/// inserted into the specified arraylist
+///        This is added to the current cursor position and may be negative.
 /// \param no_io if true, do a highlight that does not perform I/O, synchronously. If false, perform
-/// an asynchronous highlight in the background, which may perform disk I/O.
+///        an asynchronous highlight in the background, which may perform disk I/O.
 static void reader_super_highlight_me_plenty(int match_highlight_pos_adjust, bool no_io) {
     const editable_line_t *el = &data->command_line;
+    assert(el != NULL);
     long match_highlight_pos = (long)el->position + match_highlight_pos_adjust;
     assert(match_highlight_pos >= 0);
 
@@ -2780,14 +2774,14 @@ const wchar_t *reader_readline(int nchars) {
             // Evaluate. If the current command is unfinished, or if the charater is escaped using a
             // backslash, insert a newline.
             case R_EXECUTE: {
-                // Delete any autosuggestion.
-                data->autosuggestion.clear();
-
                 // If the user hits return while navigating the pager, it only clears the pager.
                 if (data->is_navigating_pager_contents()) {
                     clear_pager();
                     break;
                 }
+
+                // Delete any autosuggestion.
+                data->autosuggestion.clear();
 
                 // The user may have hit return with pager contents, but while not navigating them.
                 // Clear the pager in that event.

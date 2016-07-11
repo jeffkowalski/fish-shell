@@ -25,7 +25,6 @@
 #ifdef HAVE_SIGINFO_H
 #include <siginfo.h>
 #endif
-#include <stdbool.h>
 
 #include "builtin.h"
 #include "common.h"
@@ -315,7 +314,7 @@ static bool io_transmogrify(const io_chain_t &in_chain, io_chain_t *out_chain,
 /// \param def the code to evaluate, or the empty string if none
 /// \param node_offset the offset of the node to evalute, or NODE_OFFSET_INVALID
 /// \param block_type the type of block to push on evaluation
-/// \param io the io redirections to be performed on this block
+/// \param ios the io redirections to be performed on this block
 static void internal_exec_helper(parser_t &parser, const wcstring &def, node_offset_t node_offset,
                                  enum block_type_t block_type, const io_chain_t &ios) {
     // If we have a valid node offset, then we must not have a string to execute.
@@ -948,7 +947,7 @@ void exec_job(parser_t &parser, job_t *j) {
                             bool builtin_io_done = do_builtin_io(outbuff.data(), outbuff.size(),
                                                                  errbuff.data(), errbuff.size());
                             if (!builtin_io_done && errno != EPIPE) {
-                                show_stackframe();
+                                show_stackframe(L'E');
                             }
                             fork_was_skipped = true;
                         }
@@ -1058,7 +1057,7 @@ void exec_job(parser_t &parser, job_t *j) {
 
                     // A 0 pid means we failed to posix_spawn. Since we have no pid, we'll never get
                     // told when it's exited, so we have to mark the process as failed.
-                    debug(2, L"Fork #%d, pid %d: spawn external command '%s' from '%ls'\n",
+                    debug(2, L"Fork #%d, pid %d: spawn external command '%s' from '%ls'",
                           g_fork_count, pid, actual_cmd, file ? file : L"<no file>");
                     if (pid == 0) {
                         job_mark_process_as_failed(j, p);

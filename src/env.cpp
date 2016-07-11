@@ -1,14 +1,19 @@
 // Functions for setting and getting environment variables.
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
 #include <errno.h>
 #include <locale.h>
 #include <pthread.h>
 #include <pwd.h>
-#include <stdbool.h>
 #include <stddef.h>
 #include <stdlib.h>
+#ifdef HAVE__NL_MSG_CAT_CNTR
+#include <string.h>
+#endif
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -122,10 +127,15 @@ static null_terminated_array_t<char> export_array;
 static bool has_changed_exported = true;
 static void mark_changed_exported() { has_changed_exported = true; }
 
-/// List of all locale variable names.
-static const wchar_t *const locale_variable[] = {L"LANG",       L"LC_ALL",      L"LC_COLLATE",
-                                                 L"LC_CTYPE",   L"LC_MESSAGES", L"LC_MONETARY",
-                                                 L"LC_NUMERIC", L"LC_TIME",     NULL};
+/// List of all locale environment variable names.
+static const wchar_t *const locale_variable[] = {
+    L"LANG",     L"LANGUAGE",          L"LC_ALL",         L"LC_ADDRESS",   L"LC_COLLATE",
+    L"LC_CTYPE", L"LC_IDENTIFICATION", L"LC_MEASUREMENT", L"LC_MESSAGES",  L"LC_MONETARY",
+    L"LC_NAME",  L"LC_NUMERIC",        L"LC_PAPER",       L"LC_TELEPHONE", L"LC_TIME",
+    NULL};
+
+/// List of all curses environment variable names.
+static const wchar_t *const curses_variable[] = {L"TERM", L"TERMINFO", L"TERMINFO_DIRS", NULL};
 
 const var_entry_t *env_node_t::find_entry(const wcstring &key) {
     const var_entry_t *result = NULL;
@@ -150,6 +160,24 @@ static mode_t get_umask() {
     return res;
 }
 
+/// Check if the specified variable is a timezone variable.
+static bool var_is_timezone(const wcstring &key) { return key == L"TZ"; }
+
+/// Properly sets all timezone information.
+static void handle_timezone(const wchar_t *env_var_name) {
+    debug(2, L"handle_timezone() called in response to '%ls' changing", env_var_name);
+    const env_var_t val = env_get_string(env_var_name, ENV_EXPORT);
+    const std::string &value = wcs2string(val);
+    const std::string &name = wcs2string(env_var_name);
+    debug(2, L"timezone var %s='%s'", name.c_str(), value.c_str());
+    if (val.empty()) {
+        unsetenv(name.c_str());
+    } else {
+        setenv(name.c_str(), value.c_str(), 1);
+    }
+    tzset();
+}
+
 /// Check if the specified variable is a locale variable.
 static bool var_is_locale(const wcstring &key) {
     for (size_t i = 0; locale_variable[i]; i++) {
@@ -161,47 +189,72 @@ static bool var_is_locale(const wcstring &key) {
 }
 
 /// Properly sets all locale information.
-static void handle_locale() {
-    const env_var_t lc_all = env_get_string(L"LC_ALL");
-    const wcstring old_locale = wsetlocale(LC_MESSAGES, NULL);
-
-    // Array of locale constants corresponding to the local variable names defined in
-    // locale_variable.
-    static const int cat[] = {0,           LC_ALL,      LC_COLLATE, LC_CTYPE,
-                              LC_MESSAGES, LC_MONETARY, LC_NUMERIC, LC_TIME};
-
-    if (!lc_all.missing()) {
-        wsetlocale(LC_ALL, lc_all.c_str());
+static void handle_locale(const wchar_t *env_var_name) {
+    debug(2, L"handle_locale() called in response to '%ls' changing", env_var_name);
+    const char *old_msg_locale = setlocale(LC_MESSAGES, NULL);
+    const env_var_t val = env_get_string(env_var_name, ENV_EXPORT);
+    const std::string &value = wcs2string(val);
+    const std::string &name = wcs2string(env_var_name);
+    debug(2, L"locale var %s='%s'", name.c_str(), value.c_str());
+    if (val.empty()) {
+        unsetenv(name.c_str());
     } else {
-        const env_var_t lang = env_get_string(L"LANG");
-        if (!lang.missing()) {
-            wsetlocale(LC_ALL, lang.c_str());
-        }
-
-        for (int i = 2; locale_variable[i]; i++) {
-            const env_var_t val = env_get_string(locale_variable[i]);
-
-            if (!val.missing()) {
-                wsetlocale(cat[i], val.c_str());
-            }
-        }
+        setenv(name.c_str(), value.c_str(), 1);
     }
 
-    const wcstring new_locale = wsetlocale(LC_MESSAGES, NULL);
-    if (old_locale != new_locale) {
-        // Try to make change known to gettext. Both changing _nl_msg_cat_cntr and calling dcgettext
-        // might potentially tell some gettext implementation that the translation strings should be
-        // reloaded. We do both and hope for the best.
+    char *locale = setlocale(LC_ALL, "");
+    fish_setlocale();
+    debug(2, L"handle_locale() setlocale(): '%s'", locale);
+
+    const char *new_msg_locale = setlocale(LC_MESSAGES, NULL);
+    debug(3, L"old LC_MESSAGES locale: '%s'", old_msg_locale);
+    debug(3, L"new LC_MESSAGES locale: '%s'", new_msg_locale);
+#ifdef HAVE__NL_MSG_CAT_CNTR
+    if (strcmp(old_msg_locale, new_msg_locale)) {
+        // Make change known to GNU gettext.
         extern int _nl_msg_cat_cntr;
         _nl_msg_cat_cntr++;
-        fish_dcgettext("fish", "Changing language to English", LC_MESSAGES);
     }
+#endif
+}
+
+/// Check if the specified variable is a locale variable.
+static bool var_is_curses(const wcstring &key) {
+    for (size_t i = 0; curses_variable[i]; i++) {
+        if (key == curses_variable[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/// Push all curses/terminfo env vars into the global environment where they can be found by those
+/// libraries.
+static void handle_curses(const wchar_t *env_var_name) {
+    debug(2, L"handle_curses() called in response to '%ls' changing", env_var_name);
+    const env_var_t val = env_get_string(env_var_name, ENV_EXPORT);
+    const std::string &name = wcs2string(env_var_name);
+    const std::string &value = wcs2string(val);
+    debug(2, L"curses var %s='%s'", name.c_str(), value.c_str());
+    if (val.empty()) {
+        unsetenv(name.c_str());
+    } else {
+        setenv(name.c_str(), value.c_str(), 1);
+    }
+    // TODO: Modify input_init() to allow calling it when the terminfo env vars are dynamically
+    // changed. At the present time it can be called just once. Also, we should really only do this
+    // if the TERM var is set.
+    // input_init();
 }
 
 /// React to modifying the given variable.
 static void react_to_variable_change(const wcstring &key) {
     if (var_is_locale(key)) {
-        handle_locale();
+        handle_locale(key.c_str());
+    } else if (var_is_curses(key)) {
+        handle_curses(key.c_str());
+    } else if (var_is_timezone(key)) {
+        handle_timezone(key.c_str());
     } else if (key == L"fish_term256" || key == L"fish_term24bit") {
         update_fish_color_support();
         reader_react_to_color_change();
@@ -282,11 +335,10 @@ static bool variable_is_colon_delimited_array(const wcstring &str) {
 }
 
 void env_init(const struct config_paths_t *paths /* or NULL */) {
-    // env_read_only variables can not be altered directly by the user.
+    // These variables can not be altered directly by the user.
     const wchar_t *const ro_keys[] = {
-        L"status", L"history", L"version", L"_", L"LINES", L"COLUMNS", L"PWD",
-        // L"SHLVL", // will be inserted a bit lower down
-        L"FISH_VERSION",
+        L"status", L"history", L"_", L"LINES", L"COLUMNS", L"PWD", L"FISH_VERSION",
+        // L"SHLVL" is readonly but will be inserted below after we increment it.
     };
     for (size_t i = 0; i < sizeof ro_keys / sizeof *ro_keys; i++) {
         env_read_only.insert(ro_keys[i]);
@@ -303,7 +355,7 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     global_env = top;
     global = &top->env;
 
-    // Now the environemnt variable handling is set up, the next step is to insert valid data.
+    // Now the environment variable handling is set up, the next step is to insert valid data.
 
     // Import environment variables. Walk backwards so that the first one out of any duplicates wins
     // (#2784).
@@ -352,9 +404,8 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
         }
     }
 
-    // Set up the version variables.
+    // Set up the version variable.
     wcstring version = str2wcstring(get_fish_version());
-    env_set(L"version", version.c_str(), ENV_GLOBAL);
     env_set(L"FISH_VERSION", version.c_str(), ENV_GLOBAL);
 
     // Set up SHLVL variable.
@@ -698,7 +749,7 @@ env_var_t env_get_string(const wcstring &key, env_mode_flags_t mode) {
 
     if (search_local || search_global) {
         /* Lock around a local region */
-        scoped_lock lock(env_lock);
+        scoped_lock lock(env_lock);  //!OCLINT(has side effects)
 
         env_node_t *env = search_local ? top : global_env;
 
@@ -816,14 +867,13 @@ void env_push(bool new_scope) {
 void env_pop() {
     if (&top->env != global) {
         int i;
-        int locale_changed = 0;
-
+        const wchar_t *locale_changed = NULL;
         env_node_t *killme = top;
 
         for (i = 0; locale_variable[i]; i++) {
             var_table_t::iterator result = killme->env.find(locale_variable[i]);
             if (result != killme->env.end()) {
-                locale_changed = 1;
+                locale_changed = locale_variable[i];
                 break;
             }
         }
@@ -845,7 +895,7 @@ void env_pop() {
 
         delete killme;
 
-        if (locale_changed) handle_locale();
+        if (locale_changed) handle_locale(locale_changed);
 
     } else {
         debug(0, _(L"Tried to pop empty environment stack."));
@@ -868,7 +918,7 @@ static void add_key_to_string_set(const var_table_t &envs, std::set<wcstring> *s
 }
 
 wcstring_list_t env_get_names(int flags) {
-    scoped_lock lock(env_lock);
+    scoped_lock lock(env_lock);  //!OCLINT(has side effects)
 
     wcstring_list_t result;
     std::set<wcstring> names;

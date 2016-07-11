@@ -2,8 +2,13 @@
 
 \subsection history-synopsis Synopsis
 \fish{synopsis}
-history ( --merge | --save | --clear )
-history ( --search | --delete ) [ --prefix "prefix string" | --contains "search string" ]
+history ( -m | --merge )
+history ( -s | --save )
+history ( -l | --clear )
+history ( -s | --search ) [ -t | --with-time ] [ -p "prefix string" | --prefix "prefix string" | -c "search string | --contains "search string" ]
+history ( -d | --delete ) [ -t | --with-time ] [ -p "prefix string" | --prefix "prefix string" | -c "search string | --contains "search string" ]
+history ( -t | --with-time )
+history ( -h | --help )
 \endfish
 
 \subsection history-description Description
@@ -11,24 +16,22 @@ history ( --search | --delete ) [ --prefix "prefix string" | --contains "search 
 `history` is used to list, search and delete the history of commands used.
 
 The following options are available:
+
 - `--merge` immediately incorporates history changes from other sessions. Ordinarily `fish` ignores history changes from sessions started after the current one. This command applies those changes immediately.
 
 - `--save` saves all changes in the history file. The shell automatically saves the history file; this option is provided for internal use.
 
 - `--clear` clears the history file. A prompt is displayed before the history is erased.
 
-- `--search` returns history items in keeping with the `--prefix` or `--contains` options.
+- `--search` returns history items in keeping with the `--prefix` or `--contains` options. Without either, `--contains` will be assumed.
 
-- `--delete` deletes history items.
+- `--delete` deletes history items. Without the `--prefix` or `--contains` options, the exact match will be deleted. With either of these options, a prompt will be displayed before any items are deleted.
 
 - `--prefix` searches or deletes items in the history that begin with the specified text string.
 
 - `--contains` searches or deletes items in the history that contain the specified text string.
 
-If `--search` is specified without `--contains` or `--prefix`, `--contains` will be assumed.
-
-If `--delete` is specified without `--contains` or `--prefix`, only a history item which exactly matches the parameter will be erased. No prompt will be given. If `--delete` is specified with either of these parameters, an interactive prompt will be displayed before any items are deleted.
-
+- `--with-time` prefixes the output of each displayed history entry with the time it was recorded in the format "%Y-%m-%d %H:%M:%S" in your local timezone.
 
 \subsection history-examples Example
 

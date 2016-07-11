@@ -1,10 +1,11 @@
 // Generic utilities library.
 //
 // Contains data structures such as automatically growing array lists, priority queues, etc.
+#include "config.h"  // IWYU pragma: keep
+
 #include <errno.h>
 #include <stdlib.h>
 #include <sys/time.h>
-#include <sys/types.h>
 #include <wchar.h>
 #include <wctype.h>
 

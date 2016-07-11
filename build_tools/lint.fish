@@ -48,10 +48,11 @@ if test $all = yes
 else
     # We haven't been asked to lint all the source. If there are uncommitted
     # changes lint those, else lint the files in the most recent commit.
-    set files (git status --porcelain --short --untracked-files=all | sed -e 's/^ *[^ ]* *//')
+    # Select (cached files) (modified but not cached, and untracked files)
+    set files (git diff-index --cached HEAD --name-only) (git ls-files --exclude-standard --others --modified)
     if not set -q files[1]
         # No pending changes so lint the files in the most recent commit.
-        set files (git show --word-diff=porcelain --name-only --pretty=oneline)[2..-1]
+        set files (git diff-tree --no-commit-id --name-only -r HEAD)
     end
 
     # Extract just the C/C++ files that exist.
@@ -64,17 +65,17 @@ end
 # We now have a list of files to check so run the linters.
 if set -q c_files[1]
     if type -q iwyu
+        echo
+        echo ========================================
+        echo Running IWYU
+        echo ========================================
         # The stderr to stdout redirection is because cppcheck, incorrectly IMHO, writes its
         # diagnostic messages to stderr. Anyone running this who wants to capture its output will
         # expect those messages to be written to stdout.
         for c_file in $c_files
-            echo
-            echo ========================================
-            echo Running IWYU on $c_file
-            echo ========================================
             switch $kernel_name
                 case Darwin
-                    include-what-you-use -Xiwyu --no_default_mappings -Xiwyu --mapping_file=build_tools/iwyu.osx.imp $cppcheck_args $c_file 2>&1
+                    include-what-you-use -Xiwyu --no_default_mappings -Xiwyu --mapping_file=build_tools/iwyu.osx.imp $cppcheck_args --std=c++11 $c_file 2>&1
                 case Linux
                     include-what-you-use -Xiwyu --mapping_file=build_tools/iwyu.linux.imp $cppcheck_args $c_file 2>&1
                 case '*' # hope for the best
@@ -91,7 +92,7 @@ if set -q c_files[1]
         # The stderr to stdout redirection is because cppcheck, incorrectly IMHO, writes its
         # diagnostic messages to stderr. Anyone running this who wants to capture its output will
         # expect those messages to be written to stdout.
-        cppcheck -q --verbose --std=posix --std=c11 --language=c++ --template "[{file}:{line}]: {severity} ({id}): {message}" --suppress=missingIncludeSystem --inline-suppr --enable=$cppchecks $cppcheck_args $c_files 2>&1
+        cppcheck -q --verbose --std=posix --language=c++ --template "[{file}:{line}]: {severity} ({id}): {message}" --suppress=missingIncludeSystem --inline-suppr --enable=$cppchecks --rule-file=.cppcheck.rule $cppcheck_args $c_files 2>&1
     end
 
     if type -q oclint

@@ -30,6 +30,8 @@ Ultimately we want lint free code. However, at the moment a lot of cleanup is re
 
 To make linting the code easy there are two make targets: `lint` and `lint-all`. The latter does just what the name implies. The former will lint any modified but not committed `*.cpp` files. If there is no uncommitted work it will lint the files in the most recent commit.
 
+Fish has custom cppcheck rules in the file `.cppcheck.rule`. These help catch mistakes such as using `wcwidth()` rather than `fish_wcwidth()`. Please add a new rule if you find similar mistakes being made.
+
 ### Dealing With Lint Warnings
 
 You are strongly encouraged to address a lint warning by refactoring the code, changing variable names, or whatever action is implied by the warning.
@@ -94,7 +96,12 @@ If you use Emacs: TBD
 
 If you use ViM: TBD
 
-If you use Emacs: TBD
+If you use Emacs: Install [fish-mode](https://github.com/wwwjfy/emacs-fish) (also available in melpa and melpa-stable) and `(setq-default indent-tabs-mode nil)` for it (via a hook or in `use-package`s ":init" block). It can also be made to run fish_indent via e.g.
+
+```elisp
+(add-hook 'fish-mode-hook (lambda ()
+    (add-hook 'before-save-hook 'fish_indent-before-save)))
+```
 
 ### Suppressing Reformatting of C++ Code
 
@@ -159,6 +166,51 @@ You will need to [fork the fish-shell repository on GitHub](https://help.github.
 You'll receive an email when the tests are complete telling you whether or not any tests failed.
 
 You'll find the configuration used to control Travis in the `.travis.yml` file.
+
+### Git hooks
+
+Since developers sometimes forget to run the tests, it can be helpful to use git hooks (see githooks(5)) to automate it.
+
+One possibility is a pre-push hook script like this one:
+
+```sh
+#!/bin/sh
+#### A pre-push hook for the fish-shell project
+# This will run the tests when a push to master is detected, and will stop that if the tests fail
+# Save this as .git/hooks/pre-push and make it executable
+
+protected_branch='master'
+
+# Git gives us lines like "refs/heads/frombranch SOMESHA1 refs/heads/tobranch SOMESHA1"
+# We're only interested in the branches
+while read from _ to _; do
+    if [ "x$to" = "xrefs/heads/$protected_branch" ]; then
+        isprotected=1
+    fi
+done
+if [ "x$isprotected" = x1 ]; then
+    echo "Running tests before push to master"
+    make test
+    RESULT=$?
+    if [ $RESULT -ne 0 ]; then
+        echo "Tests failed for a push to master, we can't let you do that" >&2
+        exit 1
+    fi
+fi
+exit 0
+```
+
+This will check if the push is to the master branch and, if it is, will run `make test` and only allow the push if that succeeds. In some circumstances it might be advisable to circumvent it with `git push --no-verify`, but usually that should not be necessary.
+
+To install the hook, put it in .git/hooks/pre-push and make it executable.
+
+### Coverity Scan
+
+We use Coverity's static analysis tool which offers free access to open source projects. While access to the tool itself is
+restricted, fish-shell organization members should know that they can login
+[here with their GitHub account](https://scan.coverity.com/projects/fish-shell-fish-shell?tab=overview).
+Currently, tests are triggered upon merging the `master` branch into `coverity_scan_master`.
+Even if you are not a fish developer, you can keep an eye on our statistics there.
 
 ## Installing the Required Tools
 

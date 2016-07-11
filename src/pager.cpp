@@ -1,3 +1,5 @@
+#include "config.h"  // IWYU pragma: keep
+
 // IWYU pragma: no_include <cstddef>
 #include <assert.h>
 #include <stddef.h>
@@ -8,6 +10,7 @@
 
 #include "common.h"
 #include "complete.h"
+#include "fallback.h"
 #include "highlight.h"
 #include "pager.h"
 #include "reader.h"
@@ -65,15 +68,15 @@ static int print_max(const wcstring &str, highlight_spec_t color, int max, bool 
     for (size_t i = 0; i < str.size(); i++) {
         wchar_t c = str.at(i);
 
-        if (written + wcwidth(c) > max) break;
-        if ((written + wcwidth(c) == max) && (has_more || i + 1 < str.size())) {
+        if (written + fish_wcwidth(c) > max) break;
+        if ((written + fish_wcwidth(c) == max) && (has_more || i + 1 < str.size())) {
             line->append(ellipsis_char, color);
-            written += wcwidth(ellipsis_char);
+            written += fish_wcwidth(ellipsis_char);
             break;
         }
 
         line->append(c, color);
-        written += wcwidth(c);
+        written += fish_wcwidth(c);
     }
     return written;
 }
@@ -126,9 +129,9 @@ line_t pager_t::completion_print_item(const wcstring &prefix, const comp_t *c, s
         {
             written += print_max(L" ", packed_color, 1, false, &line_data);
         }
-        written += print_max(L"(", packed_color, 1, false, &line_data);
-        written += print_max(c->desc, packed_color, desc_width, false, &line_data);
-        written += print_max(L")", packed_color, 1, false, &line_data);
+        print_max(L"(", packed_color, 1, false, &line_data);
+        print_max(c->desc, packed_color, desc_width, false, &line_data);
+        print_max(L")", packed_color, 1, false, &line_data);
     } else {
         while (written < width) {
             written += print_max(L" ", 0, 1, false, &line_data);
@@ -141,12 +144,12 @@ line_t pager_t::completion_print_item(const wcstring &prefix, const comp_t *c, s
 /// Print the specified part of the completion list, using the specified column offsets and quoting
 /// style.
 ///
-/// \param l The list of completions to print
 /// \param cols number of columns to print in
-/// \param width An array specifying the width of each column
+/// \param width_per_column An array specifying the width of each column
 /// \param row_start The first row to print
 /// \param row_stop the row after the last row to print
 /// \param prefix The string to print before each completion
+/// \param lst The list of completions to print
 void pager_t::completion_print(size_t cols, int *width_per_column, size_t row_start,
                                size_t row_stop, const wcstring &prefix, const comp_info_list_t &lst,
                                page_rendering_t *rendering) const {
@@ -502,9 +505,8 @@ bool pager_t::completion_try_print(size_t cols, const wcstring &prefix, const co
             // We limit the width to term_width - 1.
             int search_field_written = print_max(SEARCH_FIELD_PROMPT, highlight_spec_normal,
                                                  term_width - 1, false, search_field);
-            search_field_written +=
-                print_max(search_field_text, highlight_modifier_force_underline,
-                          term_width - search_field_written - 1, false, search_field);
+            print_max(search_field_text, highlight_modifier_force_underline,
+                      term_width - search_field_written - 1, false, search_field);
         }
     }
     return print;
@@ -609,7 +611,7 @@ bool pager_t::select_next_completion_in_direction(selection_direction_t directio
     }
 
     // Ok, we had something selected already. Select something different.
-    size_t new_selected_completion_idx = selected_completion_idx;
+    size_t new_selected_completion_idx;
     if (!selection_direction_is_cardinal(direction)) {
         // Next, previous, or deselect, all easy.
         if (direction == direction_deselect) {

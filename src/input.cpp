@@ -1,7 +1,6 @@
 // Functions for reading a character of input from stdin.
 #include "config.h"
 
-#include <assert.h>
 #include <errno.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -130,39 +129,6 @@ wcstring describe_char(wint_t c) {
     }
     return format_string(L"%02x", c);
 }
-
-/// Description of each supported input function.
-static const wchar_t *desc_arr[] = {
-    L"Move to beginning of line",
-    L"Move to end of line",
-    L"Move forward one character",
-    L"Move backward one character",
-    L"Move forward one word",
-    L"Move backward one word",
-    L"Search backward through list of previous commands",
-    L"Search forward through list of previous commands",
-    L"Delete one character forward",
-    L"Delete one character backward",
-    L"Move contents from cursor to end of line to killring",
-    L"Paste contents of killring",
-    L"Rotate to previous killring entry",
-    L"Guess the rest of the next input token",
-    L"Move to first item of history",
-    L"Move to last item of history",
-    L"Clear current line",
-    L"Move contents from beginning of line to cursor to killring",
-    L"Move entire line to killring",
-    L"Move next word to killring",
-    L"Move previous word to killring",
-    L"Write out key bindings",
-    L"Clear entire screen",
-    L"Quit the running program",
-    L"Search backward through list of previous commands for matching token",
-    L"Search forward through list of previous commands for matching token",
-    L"Insert the pressed key",
-    L"Do nothing",
-    L"End of file",
-    L"Repeat command"};
 
 /// Internal code for each supported input function.
 static const wchar_t code_arr[] = {R_BEGINNING_OF_LINE,
@@ -372,35 +338,31 @@ void update_fish_color_support(void) {
 
 int input_init() {
     if (is_init) return 1;
-
     is_init = true;
-
     input_common_init(&interrupt_handler);
 
-    const env_var_t term = env_get_string(L"TERM");
-    int errret;
-    if (setupterm(const_cast<char *>(wcs2string(term).c_str()), STDOUT_FILENO, &errret) == ERR) {
-        debug(0, _(L"Could not set up terminal"));
-        if (errret == 0) {
-            debug(0, _(L"Check that your terminal type, '%ls', is supported on this system"),
-                  term.c_str());
-            debug(0, _(L"Attempting to use '%ls' instead"), DEFAULT_TERM);
-            env_set(L"TERM", DEFAULT_TERM, ENV_GLOBAL | ENV_EXPORT);
-            const std::string default_term = wcs2string(DEFAULT_TERM);
-            if (setupterm(const_cast<char *>(default_term.c_str()), STDOUT_FILENO, &errret) ==
-                ERR) {
-                debug(0, _(L"Could not set up terminal"));
-                exit_without_destructors(1);
-            }
+    int err_ret;
+    if (setupterm(NULL, STDOUT_FILENO, &err_ret) == ERR) {
+	debug(0, _(L"Could not set up terminal"));
+        env_var_t term = env_get_string(L"TERM");
+        if (term.missing_or_empty()) {
+            debug(0, _(L"TERM environment variable not set"));
         } else {
+            debug(0, _(L"TERM environment variable set to '%ls'"), term.c_str());
+            debug(0, _(L"Check that this terminal type is supported on this system"));
+        }
+
+        env_set(L"TERM", DEFAULT_TERM, ENV_GLOBAL | ENV_EXPORT);
+        if (setupterm(NULL, STDOUT_FILENO, &err_ret) == ERR) {
+            debug(0, _(L"Could not set up terminal using the fallback terminal type '%ls' - exiting"),
+                  DEFAULT_TERM);
             exit_without_destructors(1);
+        } else {
+            debug(0, _(L"Using fallback terminal type '%ls'"), DEFAULT_TERM);
         }
     }
-    assert(!term.missing());
-    output_set_term(term);
 
     input_terminfo_init();
-
     update_fish_color_support();
 
     // If we have no keybindings, add a few simple defaults.

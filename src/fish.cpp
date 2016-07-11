@@ -24,7 +24,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <limits.h>
 #include <locale.h>
 #include <pwd.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -127,14 +126,14 @@ static struct config_paths_t determine_config_directory_paths(const char *argv0)
         // link CF, use this lame approach to test it: see if the resolved path ends with
         // /Contents/MacOS/fish, case insensitive since HFS+ usually is.
         if (!done) {
-            const char *suffix = "/Contents/MacOS/fish";
+            const char *suffix = "Contents/Resources/base/bin/fish";
             const size_t suffixlen = strlen(suffix);
             if (has_suffix(exec_path, suffix, true)) {
                 // Looks like we're a bundle. Cut the string at the / prefixing /Contents... and
                 // then the rest.
                 wcstring wide_resolved_path = str2wcstring(exec_path);
                 wide_resolved_path.resize(exec_path.size() - suffixlen);
-                wide_resolved_path.append(L"/Contents/Resources/");
+                wide_resolved_path.append(L"Contents/Resources/base/");
 
                 // Append share, etc, doc.
                 paths.data = wide_resolved_path + L"share/fish";
@@ -185,8 +184,6 @@ static struct config_paths_t determine_config_directory_paths(const char *argv0)
         paths.sysconf = L"" SYSCONFDIR "/fish";
         paths.doc = L"" DOCDIR;
         paths.bin = L"" BINDIR;
-
-        done = true;
     }
 
     return paths;
@@ -309,11 +306,12 @@ static int read_init(const struct config_paths_t &paths) {
     return 1;
 }
 
-/// Parse the argument list, return the index of the first non-switch arguments.
+/// Parse the argument list, return the index of the first non-flag arguments.
 static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *cmds) {
-    const char *short_opts = "+hilnvc:p:d:";
+    const char *short_opts = "+hilnvc:p:d:D:";
     const struct option long_opts[] = {{"command", required_argument, NULL, 'c'},
                                        {"debug-level", required_argument, NULL, 'd'},
+                                       {"debug-stack-frames", required_argument, NULL, 'D'},
                                        {"interactive", no_argument, NULL, 'i'},
                                        {"login", no_argument, NULL, 'l'},
                                        {"no-execute", no_argument, NULL, 'n'},
@@ -343,7 +341,7 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *cmds)
                 if (tmp >= 0 && tmp <= 10 && !*end && !errno) {
                     debug_level = (int)tmp;
                 } else {
-                    fwprintf(stderr, _(L"Invalid value '%s' for debug level switch"), optarg);
+                    fwprintf(stderr, _(L"Invalid value '%s' for debug-level flag"), optarg);
                     exit(1);
                 }
                 break;
@@ -373,6 +371,21 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *cmds)
                 fwprintf(stdout, _(L"%s, version %s\n"), PACKAGE_NAME, get_fish_version());
                 exit(0);
             }
+            case 'D': {
+                char *end;
+                long tmp;
+
+                errno = 0;
+                tmp = strtol(optarg, &end, 10);
+
+                if (tmp > 0 && tmp <= 128 && !*end && !errno) {
+                    debug_stack_frames = (int)tmp;
+                } else {
+                    fwprintf(stderr, _(L"Invalid value '%s' for debug-stack-frames flag"), optarg);
+                    exit(1);
+                }
+                break;
+            }
             default: {
                 // We assume getopt_long() has already emitted a diagnostic msg.
                 exit(1);
@@ -393,6 +406,32 @@ static int fish_parse_opt(int argc, char **argv, std::vector<std::string> *cmds)
     return optind;
 }
 
+/// Various things we need to initialize at run-time that don't really fit any of the other init
+/// routines.
+static void misc_init() {
+#ifdef OS_IS_CYGWIN
+    // MS Windows tty devices do not currently have either a read or write timestamp. Those
+    // respective fields of `struct stat` are always the current time. Which means we can't
+    // use them. So we assume no external program has written to the terminal behind our
+    // back. This makes multiline promptusable. See issue #2859 and
+    // https://github.com/Microsoft/BashOnWindows/issues/545
+    has_working_tty_timestamps = false;
+#else
+    // This covers preview builds of Windows Subsystem for Linux (WSL).
+    FILE *procsyskosrel;
+    if ((procsyskosrel = wfopen(L"/proc/sys/kernel/osrelease", "r"))) {
+        wcstring osrelease;
+        fgetws2(&osrelease, procsyskosrel);
+        if (osrelease.find(L"3.4.0-Microsoft") != wcstring::npos) {
+            has_working_tty_timestamps = false;
+        }
+    }
+    if (procsyskosrel) {
+        fclose(procsyskosrel);
+    }
+#endif  // OS_IS_MS_WINDOWS
+}
+
 int main(int argc, char **argv) {
     int res = 1;
     int my_optind = 0;
@@ -402,11 +441,12 @@ int main(int argc, char **argv) {
     assert(ANY_SENTINAL >= WILDCARD_RESERVED_BASE && ANY_SENTINAL <= WILDCARD_RESERVED_END);
     assert(R_SENTINAL >= INPUT_COMMON_BASE && R_SENTINAL <= INPUT_COMMON_END);
 
+    program_name = L"fish";
     set_main_thread();
     setup_fork_guards();
 
-    wsetlocale(LC_ALL, L"");
-    program_name = L"fish";
+    setlocale(LC_ALL, "");
+    fish_setlocale();
 
     // struct stat tmp;
     // stat("----------FISH_HIT_MAIN----------", &tmp);
@@ -437,6 +477,7 @@ int main(int argc, char **argv) {
     history_init();
     // For set_color to support term256 in config.fish (issue #1022).
     update_fish_color_support();
+    misc_init();
 
     parser_t &parser = parser_t::principal_parser();
 

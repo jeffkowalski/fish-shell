@@ -6,20 +6,26 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>  // IWYU pragma: keep
-#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <termios.h>
 #include <wchar.h>
-#include <memory>  // IWYU pragma: keep
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "fallback.h"  // IWYU pragma: keep
 #include "signal.h"    // IWYU pragma: keep
+
+// Define a symbol we can use elsewhere in our code to determine if we're being built on MS Windows
+// under Cygwin.
+#if defined(_WIN32) || defined(_WIN64) || defined(WIN32) || defined(__CYGWIN__) || \
+    defined(__WIN32__)
+#define OS_IS_CYGWIN
+#endif
 
 /// Avoid writing the type name twice in a common "static_cast-initialization". Caveat: This doesn't
 /// work with type names containing commas!
@@ -175,6 +181,9 @@ extern wchar_t omitted_newline_char;
 /// it will not be printed.
 extern int debug_level;
 
+/// How many stack frames to show when a debug() call is made.
+extern int debug_stack_frames;
+
 /// Profiling flag. True if commands should be profiled.
 extern bool g_profiling_active;
 
@@ -185,6 +194,10 @@ extern const wchar_t *program_name;
 void read_ignore(int fd, void *buff, size_t count);
 void write_ignore(int fd, const void *buff, size_t count);
 
+/// Set to false at run-time if it's been determined we can't trust the last modified timestamp on
+/// the tty.
+extern bool has_working_tty_timestamps;
+
 /// This macro is used to check that an input argument is not null. It is a bit lika a non-fatal
 /// form of assert. Instead of exit-ing on failure, the current function is ended at once. The
 /// second parameter is the return value of the current function on failure.
@@ -192,7 +205,7 @@ void write_ignore(int fd, const void *buff, size_t count);
     if (!(arg)) {                                                                         \
         debug(0, "function %s called with null value for argument %s. ", __func__, #arg); \
         bugreport();                                                                      \
-        show_stackframe();                                                                \
+        show_stackframe(L'E');                                                            \
         return retval;                                                                    \
     }
 
@@ -200,7 +213,7 @@ void write_ignore(int fd, const void *buff, size_t count);
 #define FATAL_EXIT()                        \
     {                                       \
         char exit_read_buff;                \
-        show_stackframe();                  \
+        show_stackframe(L'E');              \
         read_ignore(0, &exit_read_buff, 1); \
         exit_without_destructors(1);        \
     }
@@ -219,22 +232,24 @@ void write_ignore(int fd, const void *buff, size_t count);
     if (signal_is_blocked()) {                                             \
         debug(0, "function %s called while blocking signals. ", __func__); \
         bugreport();                                                       \
-        show_stackframe();                                                 \
+        show_stackframe(L'E');                                             \
         return retval;                                                     \
     }
 
-/// Shorthand for wgettext call.
-#define _(wstr) wgettext(wstr)
+/// Shorthand for wgettext call in situations where a C-style string is needed (e.g., fwprintf()).
+#define _(wstr) wgettext(wstr).c_str()
 
-/// Noop, used to tell xgettext that a string should be translated, even though it is not directly
-/// sent to wgettext.
+/// Noop, used to tell xgettext that a string should be translated. Use this when a string cannot be
+/// passed through wgettext() at the point where it is used. For example, when initializing a
+/// static array or structure. You must pass the string through wgettext() when it is used.
+/// See https://developer.gnome.org/glib/stable/glib-I18N.html#N-:CAPS
 #define N_(wstr) wstr
 
 /// Check if the specified string element is a part of the specified string list.
 #define contains(str, ...) contains_internal(str, 0, __VA_ARGS__, NULL)
 
 /// Print a stack trace to stderr.
-void show_stackframe();
+void show_stackframe(const wchar_t msg_level, int frame_count = -1, int skip_levels = 0);
 
 /// Read a line from the stream f into the string. Returns the number of bytes read or -1 on
 /// failure.
@@ -485,8 +500,6 @@ class null_terminated_array_t {
 void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &arr,
                                   null_terminated_array_t<char> *output);
 
-bool is_forked_child();
-
 class mutex_lock_t {
    public:
     pthread_mutex_t mutex;
@@ -626,10 +639,9 @@ wchar_t *quote_end(const wchar_t *in);
 /// interactive command executes, to allow new messages to be printed.
 void error_reset();
 
-/// This function behaves exactly like a wide character equivalent of the C function setlocale,
-/// except that it will also try to detect if the user is using a Unicode character set, and if so,
-/// use the unicode ellipsis character as ellipsis, instead of '$'.
-wcstring wsetlocale(int category, const wchar_t *locale);
+/// This function should be called after calling `setlocale()` to perform fish specific locale
+/// initialization.
+void fish_setlocale();
 
 /// Checks if \c needle is included in the list of strings specified. A warning is printed if needle
 /// is zero.
@@ -668,8 +680,8 @@ ssize_t read_loop(int fd, void *buff, size_t count);
 ///
 /// will print the string 'fish: Pi = 3.141', given that debug_level is 1 or higher, and that
 /// program_name is 'fish'.
-void debug(int level, const char *msg, ...);
-void debug(int level, const wchar_t *msg, ...);
+void __attribute__((noinline)) debug(int level, const char *msg, ...);
+void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...);
 
 /// Replace special characters with backslash escape sequences. Newline is replaced with \n, etc.
 ///
@@ -732,8 +744,7 @@ int create_directory(const wcstring &d);
 void bugreport();
 
 /// Return the number of seconds from the UNIX epoch, with subsecond precision. This function uses
-/// the gettimeofday function, and will have the same precision as that function. If an error
-/// occurs, NAN is returned.
+/// the gettimeofday function and will have the same precision as that function.
 double timef();
 
 /// Call the following function early in main to set the main thread. This is our replacement for
@@ -763,5 +774,9 @@ void assert_is_not_forked_child(const char *who);
 extern "C" {
 __attribute__((noinline)) void debug_thread_error(void);
 }
+
+/// Converts from wide char to digit in the specified base. If d is not a valid digit in the
+/// specified base, return -1.
+long convert_digit(wchar_t d, int base);
 
 #endif

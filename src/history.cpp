@@ -1,4 +1,6 @@
 // History functions, part of the user interface.
+#include "config.h"  // IWYU pragma: keep
+
 #include <assert.h>
 #include <ctype.h>
 #include <errno.h>
@@ -202,11 +204,11 @@ static size_t read_line(const char *base, size_t cursor, size_t len, std::string
     // Locate the newline.
     assert(cursor <= len);
     const char *start = base + cursor;
-    const char *newline = (char *)memchr(start, '\n', len - cursor);
-    if (newline != NULL) {  // we found a newline
-        result.assign(start, newline - start);
+    const char *a_newline = (char *)memchr(start, '\n', len - cursor);
+    if (a_newline != NULL) {  // we found a newline
+        result.assign(start, a_newline - start);
         // Return the amount to advance the cursor; skip over the newline.
-        return newline - start + 1;
+        return a_newline - start + 1;
     }
 
     // We ran off the end.
@@ -541,17 +543,17 @@ static size_t offset_of_next_item_fish_2_0(const char *begin, size_t mmap_length
         const char *line_start = begin + cursor;
 
         // Advance the cursor to the next line.
-        const char *newline = (const char *)memchr(line_start, '\n', mmap_length - cursor);
-        if (newline == NULL) break;
+        const char *a_newline = (const char *)memchr(line_start, '\n', mmap_length - cursor);
+        if (a_newline == NULL) break;
 
         // Advance the cursor past this line. +1 is for the newline.
-        cursor = newline - begin + 1;
+        cursor = a_newline - begin + 1;
 
         // Skip lines with a leading space, since these are in the interior of one of our items.
         if (line_start[0] == ' ') continue;
 
         // Skip very short lines to make one of the checks below easier.
-        if (newline - line_start < 3) continue;
+        if (a_newline - line_start < 3) continue;
 
         // Try to be a little YAML compatible. Skip lines with leading %, ---, or ...
         if (!memcmp(line_start, "%", 1) || !memcmp(line_start, "---", 3) ||
@@ -562,7 +564,7 @@ static size_t offset_of_next_item_fish_2_0(const char *begin, size_t mmap_length
         // leading "- cmd: - cmd: - cmd:". Trim all but one leading "- cmd:".
         const char *double_cmd = "- cmd: - cmd: ";
         const size_t double_cmd_len = strlen(double_cmd);
-        while (newline - line_start > double_cmd_len &&
+        while (a_newline - line_start > double_cmd_len &&
                !memcmp(line_start, double_cmd, double_cmd_len)) {
             // Skip over just one of the - cmd. In the end there will be just one left.
             line_start += strlen("- cmd: ");
@@ -572,7 +574,7 @@ static size_t offset_of_next_item_fish_2_0(const char *begin, size_t mmap_length
         // 123456". Ignore those.
         const char *cmd_when = "- cmd:    when:";
         const size_t cmd_when_len = strlen(cmd_when);
-        if (newline - line_start >= cmd_when_len && !memcmp(line_start, cmd_when, cmd_when_len))
+        if (a_newline - line_start >= cmd_when_len && !memcmp(line_start, cmd_when, cmd_when_len))
             continue;
 
         // At this point, we know line_start is at the beginning of an item. But maybe we want to
@@ -659,23 +661,11 @@ static size_t offset_of_next_item_fish_1_x(const char *begin, size_t mmap_length
 static size_t offset_of_next_item(const char *begin, size_t mmap_length,
                                   history_file_type_t mmap_type, size_t *inout_cursor,
                                   time_t cutoff_timestamp) {
-    size_t result;
-    switch (mmap_type) {
-        case history_type_fish_2_0: {
-            result =
-                offset_of_next_item_fish_2_0(begin, mmap_length, inout_cursor, cutoff_timestamp);
-            break;
-        }
-        case history_type_fish_1_x: {
-            result =
-                offset_of_next_item_fish_1_x(begin, mmap_length, inout_cursor);
-            break;
-        }
-        case history_type_unknown: {
-            // Oh well.
-            result = (size_t)-1;
-            break;
-        }
+    size_t result = (size_t)-1;
+    if (mmap_type == history_type_fish_2_0) {
+        result = offset_of_next_item_fish_2_0(begin, mmap_length, inout_cursor, cutoff_timestamp);
+    } else if (mmap_type == history_type_fish_1_x) {
+        result = offset_of_next_item_fish_1_x(begin, mmap_length, inout_cursor);
     }
     return result;
 }
@@ -753,7 +743,8 @@ void history_t::save_internal_unless_disabled() {
     }
 
     // This might be a good candidate for moving to a background thread.
-    time_profiler_t profiler(vacuum ? "save_internal vacuum" : "save_internal no vacuum");  //!OCLINT(side-effect)
+    time_profiler_t profiler(vacuum ? "save_internal vacuum"
+                                    : "save_internal no vacuum");  //!OCLINT(side-effect)
     this->save_internal(vacuum);
 
     // Update our countdown.
@@ -1396,7 +1387,7 @@ void history_t::save_internal(bool vacuum) {
     }
     if (!ok) {
         // We did not or could not append; rewrite the file ("vacuum" it).
-        ok = this->save_internal_via_rewrite();
+        this->save_internal_via_rewrite();
     }
 }
 
@@ -1412,7 +1403,7 @@ void history_t::disable_automatic_saving() {
 }
 
 void history_t::enable_automatic_saving() {
-    scoped_lock locker(lock);  //!OCLINT(side-effect)
+    scoped_lock locker(lock);                    //!OCLINT(side-effect)
     assert(disable_automatic_save_counter > 0);  // underflow
     disable_automatic_save_counter--;
     save_internal_unless_disabled();
@@ -1525,9 +1516,9 @@ void history_t::populate_from_bash(FILE *stream) {
             success = (bool)fgets(buff, sizeof buff, stream);
             if (success) {
                 // Skip the newline.
-                char *newline = strchr(buff, '\n');
-                if (newline) *newline = '\0';
-                has_newline = (newline != NULL);
+                char *a_newline = strchr(buff, '\n');
+                if (a_newline) *a_newline = '\0';
+                has_newline = (a_newline != NULL);
 
                 // Append what we've got.
                 line.append(buff);
@@ -1557,6 +1548,12 @@ void history_t::incorporate_external_changes() {
     if (new_timestamp > this->boundary_timestamp) {
         this->boundary_timestamp = new_timestamp;
         this->clear_file_state();
+
+        // We also need to erase new_items, since we go through those first, and that means we
+        // will not properly interleave them with items from other instances.
+        // We'll pick them up from the file (#2312)
+        this->save_internal(false);
+        this->new_items.clear();
     }
 }
 
@@ -1612,7 +1609,8 @@ static int threaded_perform_file_detection(file_detection_context_t *ctx) {
     return ctx->perform_file_detection(true /* test all */);
 }
 
-static void perform_file_detection_done(file_detection_context_t *ctx, int success) { //!OCLINT(success is ignored)
+static void perform_file_detection_done(file_detection_context_t *ctx,
+                                        int success) {  //!OCLINT(success is ignored)
     ASSERT_IS_MAIN_THREAD();
 
     // Now that file detection is done, update the history item with the valid file paths.
