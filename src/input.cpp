@@ -16,6 +16,7 @@
 #elif HAVE_NCURSES_TERM_H
 #include <ncurses/term.h>
 #endif
+#include <stdlib.h>
 #include <wctype.h>
 #include <algorithm>
 #include <memory>
@@ -299,33 +300,46 @@ static int interrupt_handler() {
 }
 
 void update_fish_color_support(void) {
-    // Infer term256 support. If fish_term256 is set, we respect it; otherwise try to detect it from
-    // the TERM variable.
+    // Detect or infer term256 support. If fish_term256 is set, we respect it;
+    // otherwise infer it from the TERM variable or use terminfo.
     env_var_t fish_term256 = env_get_string(L"fish_term256");
-    bool support_term256;
+    env_var_t term = env_get_string(L"TERM");
+    bool support_term256 = false;  // default to no support
     if (!fish_term256.missing_or_empty()) {
         support_term256 = from_string<bool>(fish_term256);
-    } else {
-        env_var_t term = env_get_string(L"TERM");
-        if (term.missing()) {
-            support_term256 = false;
-        } else if (term.find(L"256color") != wcstring::npos) {
-            // Explicitly supported.
-            support_term256 = true;
-        } else if (term.find(L"xterm") != wcstring::npos) {
-            // Assume that all xterms are 256, except for OS X SnowLeopard.
-            env_var_t prog = env_get_string(L"TERM_PROGRAM");
-            support_term256 = (prog != L"Apple_Terminal");
+        debug(2, L"256 color support determined by 'fish_term256'");
+    } else if (term.find(L"256color") != wcstring::npos) {
+        // TERM=*256color*: Explicitly supported.
+        support_term256 = true;
+        debug(2, L"256 color support enabled for '256color' in TERM");
+    } else if (term.find(L"xterm") != wcstring::npos) {
+        // Assume that all xterms are 256, except for OS X SnowLeopard
+        const env_var_t prog = env_get_string(L"TERM_PROGRAM");
+        const env_var_t progver = env_get_string(L"TERM_PROGRAM_VERSION");
+        if (prog == L"Apple_Terminal" && !progver.missing_or_empty()) {
+            // OS X Lion is version 300+, it has 256 color support
+            if (strtod(wcs2str(progver), NULL) > 300) {
+                support_term256 = true;
+                debug(2, L"256 color support enabled for TERM=xterm + modern Terminal.app");
+            }
         } else {
-            // Don't know, default to false.
-            support_term256 = false;
+            support_term256 = true;
+            debug(2, L"256 color support enabled for TERM=xterm");
         }
+    } else if (cur_term != NULL) {
+        // See if terminfo happens to identify 256 colors
+        support_term256 = (max_colors >= 256);
+        debug(2, L"256 color support: using %d colors per terminfo", max_colors);
+    } else {
+        debug(2, L"256 color support not enabled (yet)");
     }
 
     env_var_t fish_term24bit = env_get_string(L"fish_term24bit");
     bool support_term24bit;
     if (!fish_term24bit.missing_or_empty()) {
         support_term24bit = from_string<bool>(fish_term24bit);
+        debug(2, L"'fish_term24bit' preference: 24-bit color %s",
+              support_term24bit ? L"enabled" : L"disabled");
     } else {
         // We don't attempt to infer term24 bit support yet.
         support_term24bit = false;
@@ -343,7 +357,7 @@ int input_init() {
 
     int err_ret;
     if (setupterm(NULL, STDOUT_FILENO, &err_ret) == ERR) {
-	debug(0, _(L"Could not set up terminal"));
+        debug(0, _(L"Could not set up terminal"));
         env_var_t term = env_get_string(L"TERM");
         if (term.missing_or_empty()) {
             debug(0, _(L"TERM environment variable not set"));
@@ -354,12 +368,14 @@ int input_init() {
 
         env_set(L"TERM", DEFAULT_TERM, ENV_GLOBAL | ENV_EXPORT);
         if (setupterm(NULL, STDOUT_FILENO, &err_ret) == ERR) {
-            debug(0, _(L"Could not set up terminal using the fallback terminal type '%ls' - exiting"),
+            debug(0,
+                  _(L"Could not set up terminal using the fallback terminal type '%ls' - exiting"),
                   DEFAULT_TERM);
             exit_without_destructors(1);
         } else {
             debug(0, _(L"Using fallback terminal type '%ls'"), DEFAULT_TERM);
         }
+    } else {
     }
 
     input_terminfo_init();
@@ -403,7 +419,7 @@ void input_function_push_args(int code) {
         wchar_t arg;
 
         // Skip and queue up any function codes. See issue #2357.
-        while (((arg = input_common_readch(0)) >= R_MIN) && (arg <= R_MAX)) {
+        while ((arg = input_common_readch(0)) >= R_MIN && arg <= R_MAX) {
             skipped.push_back(arg);
         }
 
@@ -481,7 +497,7 @@ static bool input_mapping_is_match(const input_mapping_t &m) {
     wint_t c = 0;
     int j;
 
-    // debug(0, L"trying mapping %ls\n", escape(m.seq.c_str(), ESCAPE_ALL).c_str());
+    debug(2, L"trying to match mapping %ls", escape(m.seq.c_str(), ESCAPE_ALL).c_str());
     const wchar_t *str = m.seq.c_str();
     for (j = 0; str[j] != L'\0'; j++) {
         bool timed = (j > 0 && iswcntrl(str[0]));
@@ -499,7 +515,8 @@ static bool input_mapping_is_match(const input_mapping_t &m) {
         return true;
     }
 
-    // Return the read characters.
+    // Reinsert the chars we read to be read again since we didn't match the bind sequence (i.e.,
+    // the input mapping).
     input_common_next_ch(c);
     for (int k = j - 1; k >= 0; k--) {
         input_common_next_ch(m.seq[k]);
@@ -538,9 +555,11 @@ static void input_mapping_execute_matching_or_generic(bool allow_commands) {
     if (generic) {
         input_mapping_execute(*generic, allow_commands);
     } else {
-        // debug(0, L"no generic found, ignoring...");
+        debug(2, L"no generic found, ignoring char...");
         wchar_t c = input_common_readch(0);
-        if (c == R_EOF) input_common_next_ch(c);
+        if (c == R_EOF) {
+            input_common_next_ch(c);
+        }
     }
 }
 

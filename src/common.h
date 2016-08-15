@@ -27,10 +27,6 @@
 #define OS_IS_CYGWIN
 #endif
 
-/// Avoid writing the type name twice in a common "static_cast-initialization". Caveat: This doesn't
-/// work with type names containing commas!
-#define CAST_INIT(type, dst, src) type dst = static_cast<type>(src)
-
 // Common string type.
 typedef std::wstring wcstring;
 typedef std::vector<wcstring> wcstring_list_t;
@@ -131,14 +127,19 @@ enum selection_direction_t {
 inline bool selection_direction_is_cardinal(selection_direction_t dir) {
     switch (dir) {
         case direction_north:
-        case direction_page_north:
         case direction_east:
-        case direction_page_south:
         case direction_south:
-        case direction_west: {
+        case direction_west:
+        case direction_page_north:
+        case direction_page_south: {
             return true;
         }
-        default: { return false; }
+        case direction_next:
+        case direction_prev:
+        case direction_deselect: {
+            return false;
+        }
+        default: { abort(); }
     }
 }
 
@@ -216,6 +217,14 @@ extern bool has_working_tty_timestamps;
         show_stackframe(L'E');              \
         read_ignore(0, &exit_read_buff, 1); \
         exit_without_destructors(1);        \
+    }
+
+/// Exit program at once after emitting an error message.
+#define DIE(msg)                                                                      \
+    {                                                                                 \
+        fprintf(stderr, "fish: %s on line %ld of file %s, shutting down fish\n", msg, \
+                (long)__LINE__, __FILE__);                                            \
+        FATAL_EXIT();                                                                 \
     }
 
 /// Exit program at once, leaving an error message about running out of memory.

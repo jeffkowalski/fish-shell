@@ -311,7 +311,7 @@ void env_universal_t::set_internal(const wcstring &key, const wcstring &val, boo
 }
 
 void env_universal_t::set(const wcstring &key, const wcstring &val, bool exportv) {
-    scoped_lock locker(lock);  //!OCLINT(side-effect)
+    scoped_lock locker(lock);
     this->set_internal(key, val, exportv, true /* overwrite */);
 }
 
@@ -331,7 +331,7 @@ bool env_universal_t::remove(const wcstring &key) {
 
 wcstring_list_t env_universal_t::get_names(bool show_exported, bool show_unexported) const {
     wcstring_list_t result;
-    scoped_lock locker(lock);  //!OCLINT(side-effect)
+    scoped_lock locker(lock);
     var_table_t::const_iterator iter;
     for (iter = vars.begin(); iter != vars.end(); ++iter) {
         const wcstring &key = iter->first;
@@ -570,18 +570,16 @@ bool env_universal_t::open_temporary_file(const wcstring &directory, wcstring *o
     assert(!string_suffixes_string(L"/", directory));
 
     bool success = false;
-    int saved_errno;
+    int saved_errno = 0;
     const wcstring tmp_name_template = directory + L"/fishd.tmp.XXXXXX";
     wcstring tmp_name;
 
     for (size_t attempt = 0; attempt < 10 && !success; attempt++) {
-        int result_fd = -1;
         char *narrow_str = wcs2str(tmp_name_template.c_str());
 #if HAVE_MKOSTEMP
-        result_fd = mkostemp(narrow_str, O_CLOEXEC);
+        int result_fd = mkostemp(narrow_str, O_CLOEXEC);
 #else
-        // cppcheck-suppress redundantAssignment
-        result_fd = mkstemp(narrow_str);
+        int result_fd = mkstemp(narrow_str);
         if (result_fd != -1) {
             fcntl(result_fd, F_SETFD, FD_CLOEXEC);
         }
@@ -595,7 +593,7 @@ bool env_universal_t::open_temporary_file(const wcstring &directory, wcstring *o
     }
 
     if (!success) {
-        report_error(saved_errno, L"Unable to open file '%ls'", out_path->c_str());
+        report_error(saved_errno, L"Unable to open temporary file '%ls'", out_path->c_str());
     }
     return success;
 }
@@ -936,7 +934,7 @@ static bool get_mac_address(unsigned char macaddr[MAC_ADDRESS_MAX_LEN],
             if (p->ifa_addr->sa_family == AF_LINK) {
                 if (p->ifa_name && p->ifa_name[0] &&
                     !strcmp((const char *)p->ifa_name, interface)) {
-                    const sockaddr_dl &sdl = *(sockaddr_dl *)p->ifa_addr;
+                    const sockaddr_dl &sdl = *reinterpret_cast<sockaddr_dl *>(p->ifa_addr);
 
                     size_t alen = sdl.sdl_alen;
                     if (alen > MAC_ADDRESS_MAX_LEN) alen = MAC_ADDRESS_MAX_LEN;

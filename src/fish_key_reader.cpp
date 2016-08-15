@@ -16,18 +16,20 @@
 #include <string.h>
 #include <unistd.h>
 #include <wchar.h>
-#include <wctype.h>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "common.h"
 #include "env.h"
 #include "fallback.h"  // IWYU pragma: keep
 #include "input.h"
 #include "input_common.h"
-#include "proc.h"
 #include "print_help.h"
+#include "proc.h"
 #include "reader.h"
 #include "signal.h"
-#include "wutil.h" // IWYU pragma: keep
+#include "wutil.h"  // IWYU pragma: keep
 
 struct config_paths_t determine_config_directory_paths(const char *argv0);
 
@@ -121,10 +123,18 @@ static char *char_to_symbol(wchar_t wc, bool bind_friendly) {
         }
     } else if (wc == ' ') {
         // The "space" character.
-        snprintf(buf, sizeof(buf), "\\x%X  (aka \"space\")", wc);
+        if (bind_friendly) {
+            snprintf(buf, sizeof(buf), "\\x%X", wc);
+        } else {
+            snprintf(buf, sizeof(buf), "\\x%X  (aka \"space\")", wc);
+        }
     } else if (wc == 0x7F) {
         // The "del" character.
-        snprintf(buf, sizeof(buf), "\\x%X  (aka \"del\")", wc);
+        if (bind_friendly) {
+            snprintf(buf, sizeof(buf), "\\x%X", wc);
+        } else {
+            snprintf(buf, sizeof(buf), "\\x%X  (aka \"del\")", wc);
+        }
     } else if (wc < 0x80) {
         // ASCII characters that are not control characters.
         if (bind_friendly && must_escape(wc)) {
@@ -156,7 +166,7 @@ static void output_bind_command(std::vector<wchar_t> &bind_chars) {
 }
 
 static void output_info_about_char(wchar_t wc) {
-   fprintf(stderr, "hex: %4X  char: %s\n", wc, char_to_symbol(wc, false));
+    fprintf(stderr, "hex: %4X  char: %s\n", wc, char_to_symbol(wc, false));
 }
 
 static bool output_matching_key_name(wchar_t wc) {
@@ -192,7 +202,7 @@ static void process_input(bool continuous_mode) {
     fprintf(stderr, "Press a key\n\n");
     while (keep_running) {
         wchar_t wc = input_common_readch(true);
-        if (wc == WEOF) {
+        if (wc == R_TIMEOUT || wc == R_EOF) {
             output_bind_command(bind_chars);
             if (first_char_seen && !continuous_mode) {
                 return;
@@ -263,7 +273,7 @@ static void install_our_signal_handlers() {
 
 /// Setup our environment (e.g., tty modes), process key strokes, then reset the environment.
 static void setup_and_process_keys(bool continuous_mode) {
-    is_interactive_session = 1;    // by definition this program is interactive
+    is_interactive_session = 1;  // by definition this program is interactive
     set_main_thread();
     setup_fork_guards();
     env_init();
