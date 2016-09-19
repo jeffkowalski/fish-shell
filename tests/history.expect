@@ -44,15 +44,6 @@ expect_prompt -re {start2\r\necho start1; builtin history; echo end1\r\nend2\r\n
 }
 
 # ==========
-# Verify asking for two different actions produces an error.
-send "builtin history --search --merge\r"
-expect_prompt -re {\r\nYou cannot do both 'search' and 'merge' in the same 'history' invocation\r\n} {
-    puts "invalid attempt at multiple history commands detected"
-} unmatched {
-    puts stderr "invalid attempt at multiple history commands not detected"
-}
-
-# ==========
 # The following tests verify the behavior of the history function.
 # ==========
 
@@ -78,7 +69,7 @@ expect_prompt -re {\r\necho start1.*\r\necho start2} {
 # ==========
 # Verify implicit searching with a request for timestamps includes the timestamps.
 send "history -t echo start\r"
-expect_prompt -re {\r\n\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d  echo start1; builtin history;.*\r\n\d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d  echo start2; builtin history} {
+expect_prompt -re {\r\n# \d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d\r\necho start1; builtin history;.*\r\n# \d\d\d\d-\d\d-\d\d \d\d:\d\d:\d\d\r\necho start2; builtin history} {
     puts "history function implicit search with timestamps succeeded"
 } unmatched {
     puts stderr "history function implicit search with timestamps failed"
