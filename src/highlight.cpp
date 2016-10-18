@@ -5,9 +5,7 @@
 #include <dirent.h>
 #include <errno.h>
 #include <limits.h>
-#include <inttypes.h>
 #include <sys/stat.h>
-#include <stddef.h>
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
@@ -877,12 +875,12 @@ void highlighter_t::color_redirection(const parse_node_t &redirection_node) {
                 switch (redirect_type) {
                     case TOK_REDIRECT_FD: {
                         // Target should be an fd. It must be all digits, and must not overflow.
-                        // wcstoimax returns INT_MAX on overflow; we could instead check errno to
+                        // fish_wcstoi returns INT_MAX on overflow; we could instead check errno to
                         // disambiguiate this from a real INT_MAX fd, but instead we just disallow
                         // that.
                         const wchar_t *target_cstr = target.c_str();
-                        wchar_t *end;
-                        int fd = wcstoimax(target_cstr, &end, 10);
+                        wchar_t *end = NULL;
+                        int fd = fish_wcstoi(target_cstr, &end, 10);
 
                         // The iswdigit check ensures there's no leading whitespace, the *end check
                         // ensures the entire string was consumed, and the numeric checks ensure the
@@ -1188,6 +1186,7 @@ const highlighter_t::color_array_t &highlighter_t::highlight() {
 
 void highlight_shell(const wcstring &buff, std::vector<highlight_spec_t> &color, size_t pos,
                      wcstring_list_t *error, const env_vars_snapshot_t &vars) {
+    UNUSED(error);
     // Do something sucky and get the current working directory on this background thread. This
     // should really be passed in.
     const wcstring working_directory = env_get_pwd_slash();
@@ -1199,6 +1198,7 @@ void highlight_shell(const wcstring &buff, std::vector<highlight_spec_t> &color,
 
 void highlight_shell_no_io(const wcstring &buff, std::vector<highlight_spec_t> &color, size_t pos,
                            wcstring_list_t *error, const env_vars_snapshot_t &vars) {
+    UNUSED(error);
     // Do something sucky and get the current working directory on this background thread. This
     // should really be passed in.
     const wcstring working_directory = env_get_pwd_slash();
@@ -1293,6 +1293,8 @@ static void highlight_universal_internal(const wcstring &buffstr,
 
 void highlight_universal(const wcstring &buff, std::vector<highlight_spec_t> &color, size_t pos,
                          wcstring_list_t *error, const env_vars_snapshot_t &vars) {
+    UNUSED(error);
+    UNUSED(vars);
     assert(buff.size() == color.size());
     std::fill(color.begin(), color.end(), 0);
     highlight_universal_internal(buff, color, pos);

@@ -161,6 +161,11 @@ static int chdir_set_pwd(const char *path) {
         if (!(e)) err(L"Test failed on line %lu: %s", __LINE__, #e); \
     } while (0)
 
+#define do_test_from(e, from_line)                                                         \
+    do {                                                                                   \
+        if (!(e)) err(L"Test failed on line %lu (from %lu): %s", __LINE__, from_line, #e); \
+    } while (0)
+
 #define do_test1(e, msg)                                                 \
     do {                                                                 \
         if (!(e)) err(L"Test failed on line %lu: %ls", __LINE__, (msg)); \
@@ -1181,7 +1186,7 @@ static void test_expand() {
     expand_test(L"foo\\$bar", EXPAND_SKIP_VARIABLES, L"foo$bar", 0,
                 L"Failed to handle dollar sign in variable-skipping expansion");
 
-    // b
+    // bb
     //    x
     // bar
     // baz
@@ -1193,18 +1198,24 @@ static void test_expand() {
     //    nub
     //       q
     // .foo
+    // aaa
+    // aaa2
+    //    x
     if (system("mkdir -p /tmp/fish_expand_test/")) err(L"mkdir failed");
-    if (system("mkdir -p /tmp/fish_expand_test/b/")) err(L"mkdir failed");
+    if (system("mkdir -p /tmp/fish_expand_test/bb/")) err(L"mkdir failed");
     if (system("mkdir -p /tmp/fish_expand_test/baz/")) err(L"mkdir failed");
     if (system("mkdir -p /tmp/fish_expand_test/bax/")) err(L"mkdir failed");
     if (system("mkdir -p /tmp/fish_expand_test/lol/nub/")) err(L"mkdir failed");
+    if (system("mkdir -p /tmp/fish_expand_test/aaa/")) err(L"mkdir failed");
+    if (system("mkdir -p /tmp/fish_expand_test/aaa2/")) err(L"mkdir failed");
     if (system("touch /tmp/fish_expand_test/.foo")) err(L"touch failed");
-    if (system("touch /tmp/fish_expand_test/b/x")) err(L"touch failed");
+    if (system("touch /tmp/fish_expand_test/bb/x")) err(L"touch failed");
     if (system("touch /tmp/fish_expand_test/bar")) err(L"touch failed");
     if (system("touch /tmp/fish_expand_test/bax/xxx")) err(L"touch failed");
     if (system("touch /tmp/fish_expand_test/baz/xxx")) err(L"touch failed");
     if (system("touch /tmp/fish_expand_test/baz/yyy")) err(L"touch failed");
     if (system("touch /tmp/fish_expand_test/lol/nub/q")) err(L"touch failed");
+    if (system("touch /tmp/fish_expand_test/aaa2/x")) err(L"touch failed");
 
     // This is checking that .* does NOT match . and ..
     // (https://github.com/fish-shell/fish-shell/issues/270). But it does have to match literal
@@ -1228,18 +1239,18 @@ static void test_expand() {
     expand_test(L"/tmp/fish_expand_test////baz/xxx", 0, L"/tmp/fish_expand_test////baz/xxx", wnull,
                 L"Glob did the wrong thing 3");
 
-    expand_test(L"/tmp/fish_expand_test/b**", 0, L"/tmp/fish_expand_test/b",
-                L"/tmp/fish_expand_test/b/x", L"/tmp/fish_expand_test/bar",
+    expand_test(L"/tmp/fish_expand_test/b**", 0, L"/tmp/fish_expand_test/bb",
+                L"/tmp/fish_expand_test/bb/x", L"/tmp/fish_expand_test/bar",
                 L"/tmp/fish_expand_test/bax", L"/tmp/fish_expand_test/bax/xxx",
                 L"/tmp/fish_expand_test/baz", L"/tmp/fish_expand_test/baz/xxx",
                 L"/tmp/fish_expand_test/baz/yyy", wnull, L"Glob did the wrong thing 4");
 
     // A trailing slash should only produce directories.
-    expand_test(L"/tmp/fish_expand_test/b*/", 0, L"/tmp/fish_expand_test/b/",
+    expand_test(L"/tmp/fish_expand_test/b*/", 0, L"/tmp/fish_expand_test/bb/",
                 L"/tmp/fish_expand_test/baz/", L"/tmp/fish_expand_test/bax/", wnull,
                 L"Glob did the wrong thing 5");
 
-    expand_test(L"/tmp/fish_expand_test/b**/", 0, L"/tmp/fish_expand_test/b/",
+    expand_test(L"/tmp/fish_expand_test/b**/", 0, L"/tmp/fish_expand_test/bb/",
                 L"/tmp/fish_expand_test/baz/", L"/tmp/fish_expand_test/bax/", wnull,
                 L"Glob did the wrong thing 6");
 
@@ -1254,10 +1265,10 @@ static void test_expand() {
                 L"/tmp/fish_expand_test/bax/", L"/tmp/fish_expand_test/baz/", wnull,
                 L"Case insensitive test did the wrong thing");
 
-    expand_test(L"/tmp/fish_expand_test/b/yyy", EXPAND_FOR_COMPLETIONS,
+    expand_test(L"/tmp/fish_expand_test/bb/yyy", EXPAND_FOR_COMPLETIONS,
                 /* nothing! */ wnull, L"Wrong fuzzy matching 1");
 
-    expand_test(L"/tmp/fish_expand_test/b/x", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH, L"",
+    expand_test(L"/tmp/fish_expand_test/bb/x", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH, L"",
                 wnull,  // we just expect the empty string since this is an exact match
                 L"Wrong fuzzy matching 2");
 
@@ -1271,6 +1282,12 @@ static void test_expand() {
 
     expand_test(L"/tmp/fish_expand_test/b/yyy", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH,
                 L"/tmp/fish_expand_test/baz/yyy", wnull, L"Wrong fuzzy matching 4");
+
+    expand_test(L"/tmp/fish_expand_test/aa/x", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH,
+                L"/tmp/fish_expand_test/aaa2/x", wnull, L"Wrong fuzzy matching 5");
+
+    expand_test(L"/tmp/fish_expand_test/aaa/x", EXPAND_FOR_COMPLETIONS | EXPAND_FUZZY_MATCH, wnull,
+                L"Wrong fuzzy matching 6 - shouldn't remove valid directory names (#3211)");
 
     if (!expand_test(L"/tmp/fish_expand_test/.*", 0, L"/tmp/fish_expand_test/.foo", 0)) {
         err(L"Expansion not correctly handling dotfiles");
@@ -2153,8 +2170,7 @@ static void test_autosuggest_suggest_special() {
     if (system("rm -Rf ~/test_autosuggest_suggest_special/")) err(L"rm failed");
 }
 
-static void perform_one_autosuggestion_should_ignore_test(const wcstring &command,
-                                                          const wcstring &wd, long line) {
+static void perform_one_autosuggestion_should_ignore_test(const wcstring &command, long line) {
     completion_list_t comps;
     complete(command, &comps, COMPLETION_REQUEST_AUTOSUGGESTION, env_vars_snapshot_t::current());
     do_test(comps.empty());
@@ -2167,12 +2183,11 @@ static void perform_one_autosuggestion_should_ignore_test(const wcstring &comman
 
 static void test_autosuggestion_ignores() {
     say(L"Testing scenarios that should produce no autosuggestions");
-    const wcstring wd = L"/tmp/autosuggest_test/";
     // Do not do file autosuggestions immediately after certain statement terminators - see #1631.
-    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST|", wd, __LINE__);
-    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST&", wd, __LINE__);
-    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST#comment", wd, __LINE__);
-    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST;", wd, __LINE__);
+    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST|", __LINE__);
+    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST&", __LINE__);
+    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST#comment", __LINE__);
+    perform_one_autosuggestion_should_ignore_test(L"echo PIPE_TEST;", __LINE__);
 }
 
 static void test_autosuggestion_combining() {
@@ -2190,18 +2205,20 @@ static void test_autosuggestion_combining() {
     do_test(combine_command_and_autosuggestion(L"alpha", L"ALPHA") == L"alpha");
 }
 
-static void test_history_matches(history_search_t &search, size_t matches) {
+static void test_history_matches(history_search_t &search, size_t matches, unsigned from_line) {
     size_t i;
     for (i = 0; i < matches; i++) {
         do_test(search.go_backwards());
         wcstring item = search.current_string();
     }
-    do_test(!search.go_backwards());
+    // do_test_from(!search.go_backwards(), from_line);
+    bool result = search.go_backwards();
+    do_test_from(!result, from_line);
 
     for (i = 1; i < matches; i++) {
-        do_test(search.go_forwards());
+        do_test_from(search.go_forwards(), from_line);
     }
-    do_test(!search.go_forwards());
+    do_test_from(!search.go_forwards(), from_line);
 }
 
 static bool history_contains(history_t *history, const wcstring &txt) {
@@ -2507,28 +2524,64 @@ static wcstring random_string(void) {
 }
 
 void history_tests_t::test_history(void) {
+    history_search_t searcher;
     say(L"Testing history");
 
     history_t &history = history_t::history_with_name(L"test_history");
     history.clear();
     history.add(L"Gamma");
+    history.add(L"beta");
+    history.add(L"BetA");
     history.add(L"Beta");
+    history.add(L"alpha");
+    history.add(L"AlphA");
     history.add(L"Alpha");
+    history.add(L"alph");
+    history.add(L"ALPH");
+    history.add(L"ZZZ");
 
-    // All three items match "a".
-    history_search_t search1(history, L"a");
-    test_history_matches(search1, 3);
-    do_test(search1.current_string() == L"Alpha");
+    // Items matching "a", case-sensitive.
+    searcher = history_search_t(history, L"a");
+    test_history_matches(searcher, 6, __LINE__);
+    do_test(searcher.current_string() == L"alph");
 
-    // One item matches "et".
-    history_search_t search2(history, L"et");
-    test_history_matches(search2, 1);
-    do_test(search2.current_string() == L"Beta");
+    // Items matching "alpha", case-insensitive. Note that HISTORY_SEARCH_TYPE_CONTAINS but we have
+    // to explicitly specify it in order to be able to pass false for the case_sensitive parameter.
+    searcher = history_search_t(history, L"AlPhA", HISTORY_SEARCH_TYPE_CONTAINS, false);
+    test_history_matches(searcher, 3, __LINE__);
+    do_test(searcher.current_string() == L"Alpha");
 
-    // Test item removal.
+    // Items matching "et", case-sensitive.
+    searcher = history_search_t(history, L"et");
+    test_history_matches(searcher, 3, __LINE__);
+    do_test(searcher.current_string() == L"Beta");
+
+    // Items starting with "be", case-sensitive.
+    searcher = history_search_t(history, L"be", HISTORY_SEARCH_TYPE_PREFIX, true);
+    test_history_matches(searcher, 1, __LINE__);
+    do_test(searcher.current_string() == L"beta");
+
+    // Items starting with "be", case-insensitive.
+    searcher = history_search_t(history, L"be", HISTORY_SEARCH_TYPE_PREFIX, false);
+    test_history_matches(searcher, 3, __LINE__);
+    do_test(searcher.current_string() == L"Beta");
+
+    // Items exactly matchine "alph", case-sensitive.
+    searcher = history_search_t(history, L"alph", HISTORY_SEARCH_TYPE_EXACT, true);
+    test_history_matches(searcher, 1, __LINE__);
+    do_test(searcher.current_string() == L"alph");
+
+    // Items exactly matchine "alph", case-insensitive.
+    searcher = history_search_t(history, L"alph", HISTORY_SEARCH_TYPE_EXACT, false);
+    test_history_matches(searcher, 2, __LINE__);
+    do_test(searcher.current_string() == L"ALPH");
+
+    // Test item removal case-sensitive.
+    searcher = history_search_t(history, L"Alpha");
+    test_history_matches(searcher, 1, __LINE__);
     history.remove(L"Alpha");
-    history_search_t search3(history, L"Alpha");
-    test_history_matches(search3, 0);
+    searcher = history_search_t(history, L"Alpha");
+    test_history_matches(searcher, 0, __LINE__);
 
     // Test history escaping and unescaping, yaml, etc.
     history_item_list_t before, after;
@@ -3832,6 +3885,7 @@ static void test_env_vars(void) {
 
 /// Main test.
 int main(int argc, char **argv) {
+    UNUSED(argc);
     // Look for the file tests/test.fish. We expect to run in a directory containing that file.
     // If we don't find it, walk up the directory hierarchy until we do, or error.
     while (access("./tests/test.fish", F_OK) != 0) {

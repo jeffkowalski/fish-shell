@@ -545,12 +545,11 @@ expression *test_parser::parse_args(const wcstring_list_t &args, wcstring &err) 
     expression *result = parser.parse_expression(0, (unsigned int)args.size());
 
     // Handle errors.
-    for (size_t i = 0; i < parser.errors.size(); i++) {
+    // For now we only show the first error.
+    if (!parser.errors.empty()) {
         err.append(L"test: ");
-        err.append(parser.errors.at(i));
+        err.append(parser.errors.at(0));
         err.push_back(L'\n');
-        // For now we only show the first error.
-        break;
     }
 
     if (result) {
@@ -772,6 +771,7 @@ static bool unary_primary_evaluate(test_expressions::token_t token, const wcstri
 ///
 /// Return status is the final shell status, i.e. 0 for true, 1 for false and 2 for error.
 int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
+    UNUSED(parser);
     using namespace test_expressions;
 
     // The first argument should be the name of the command ('test').

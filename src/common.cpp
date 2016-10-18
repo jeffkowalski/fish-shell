@@ -118,7 +118,7 @@ show_stackframe(const wchar_t msg_level, int frame_count, int skip_levels) {
     if (frame_count < 1) frame_count = 999;
     debug_shared(msg_level, L"Backtrace:");
     std::vector<wcstring> bt = demangled_backtrace(frame_count, skip_levels + 2);
-    for (int i = 0; i < bt.size(); i++) {
+    for (int i = 0; (size_t)i < bt.size(); i++) {
         debug_shared(msg_level, bt[i]);
     }
 }
@@ -427,26 +427,6 @@ void append_format(wcstring &str, const wchar_t *format, ...) {
     append_formatv(str, format, va);
     va_end(va);
 }
-
-const wchar_t *wcsvarname(const wchar_t *str) {
-    while (*str) {
-        if ((!iswalnum(*str)) && (*str != L'_')) {
-            return str;
-        }
-        str++;
-    }
-    return NULL;
-}
-
-const wchar_t *wcsvarname(const wcstring &str) { return wcsvarname(str.c_str()); }
-
-const wchar_t *wcsfuncname(const wcstring &str) { return wcschr(str.c_str(), L'/'); }
-
-bool wcsvarchr(wchar_t chr) { return iswalnum(chr) || chr == L'_'; }
-
-int fish_wcswidth(const wchar_t *str) { return fish_wcswidth(str, wcslen(str)); }
-
-int fish_wcswidth(const wcstring &str) { return fish_wcswidth(str.c_str(), str.size()); }
 
 wchar_t *quote_end(const wchar_t *pos) {
     wchar_t c = *pos;
@@ -1360,6 +1340,7 @@ bool unescape_string(const wcstring &input, wcstring *output, unescape_flags_t e
 
 void common_handle_winch(int signal) {
     // Don't run ioctl() here, it's not safe to use in signals.
+    UNUSED(signal);
     termsize_valid = false;
 }
 
@@ -1953,4 +1934,18 @@ long convert_digit(wchar_t d, int base) {
     }
 
     return res;
+}
+
+// Test if the specified character is in a range that fish uses interally to store special tokens.
+//
+// NOTE: This is used when tokenizing the input. It is also used when reading input, before
+// tokenization, to replace such chars with REPLACEMENT_WCHAR if they're not part of a quoted
+// string. We don't want external input to be able to feed reserved characters into our lexer/parser
+// or code evaluator.
+//
+// TODO: Actually implement the replacement as documented above.
+bool fish_reserved_codepoint(wchar_t c) {
+    return (c >= RESERVED_CHAR_BASE && c < RESERVED_CHAR_END) ||
+           (c >= ENCODE_DIRECT_BASE && c < ENCODE_DIRECT_END) ||
+           (c >= INPUT_COMMON_BASE && c < INPUT_COMMON_END);
 }

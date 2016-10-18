@@ -13,8 +13,6 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stddef.h>
-#include <inttypes.h>
 #include <termios.h>
 #include <unistd.h>
 #include <wchar.h>
@@ -1002,8 +1000,8 @@ bool parse_execution_context_t::determine_io_chain(const parse_node_t &statement
                 } else {
                     wchar_t *end = NULL;
                     errno = 0;
-                    int old_fd = wcstoimax(target.c_str(), &end, 10);
-                    if (old_fd < 0 || errno || *end != L'\0') {
+                    int old_fd = fish_wcstoi(target.c_str(), &end, 10);
+                    if (old_fd < 0 || errno || *end) {
                         errored =
                             report_error(redirect_node, _(L"Requested redirection to '%ls', which "
                                                           L"is not a valid file descriptor"),
@@ -1078,6 +1076,7 @@ parse_execution_result_t parse_execution_context_t::populate_block_process(
     job_t *job, process_t *proc, const parse_node_t &statement_node) {
     // We handle block statements by creating INTERNAL_BLOCK_NODE, that will bounce back to us when
     // it's time to execute them.
+    UNUSED(job);
     assert(statement_node.type == symbol_block_statement ||
            statement_node.type == symbol_if_statement ||
            statement_node.type == symbol_switch_statement);
@@ -1135,6 +1134,7 @@ parse_execution_result_t parse_execution_context_t::populate_job_process(
 
 parse_execution_result_t parse_execution_context_t::populate_job_from_job_node(
     job_t *j, const parse_node_t &job_node, const block_t *associated_block) {
+    UNUSED(associated_block);
     assert(job_node.type == symbol_job);
 
     // Tell the job what its command is.

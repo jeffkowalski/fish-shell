@@ -5,7 +5,7 @@
 #define HAVE_BACKTRACE_SYMBOLS 1
 
 /* Define to 1 if you have the `clock_gettime' function. */
-/* #undef HAVE_CLOCK_GETTIME */
+#define HAVE_CLOCK_GETTIME 1
 
 /* Define to 1 if you have the <curses.h> header file. */
 #define HAVE_CURSES_H 1
@@ -29,6 +29,9 @@
 /* Define to 1 if you have the <getopt.h> header file. */
 #define HAVE_GETOPT_H 1
 
+/* Define to 1 if you have the `getpwent' function. */
+#define HAVE_GETPWENT 1
+
 /* Define to 1 if you have the `gettext' function. */
 /* #undef HAVE_GETTEXT */
 
@@ -48,10 +51,7 @@
 #define HAVE_MEMORY_H 1
 
 /* Define to 1 if you have the `mkostemp' function. */
-/* #undef HAVE_MKOSTEMP */
-
-/* Define to 1 if you have the nan function */
-#define HAVE_NAN 1
+#define HAVE_MKOSTEMP 1
 
 /* Define to 1 if you have the <ncurses/curses.h> header file. */
 /* #undef HAVE_NCURSES_CURSES_H */
@@ -64,9 +64,6 @@
 
 /* Define to 1 if you have the <ndir.h> header file, and it defines `DIR'. */
 /* #undef HAVE_NDIR_H */
-
-/* Define to 1 if realpath accepts null for its second argument. */
-#define HAVE_REALPATH_NULL 1
 
 /* Define to 1 if you have the <siginfo.h> header file. */
 /* #undef HAVE_SIGINFO_H */
@@ -91,6 +88,9 @@
 
 /* Define to 1 if `d_type' is a member of `struct dirent'. */
 #define HAVE_STRUCT_DIRENT_D_TYPE 1
+
+/* Define to 1 if `st_ctime_nsec' is a member of `struct stat'. */
+/* #undef HAVE_STRUCT_STAT_ST_CTIME_NSEC */
 
 /* Define to 1 if `st_mtimespec.tv_nsec' is a member of `struct stat'. */
 #define HAVE_STRUCT_STAT_ST_MTIMESPEC_TV_NSEC 1

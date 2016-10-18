@@ -52,8 +52,8 @@ typedef std::vector<wcstring> wcstring_list_t;
 // Use Unicode "noncharacters" for internal characters as much as we can. This
 // gives us 32 "characters" for internal use that we can guarantee should not
 // appear in our input stream. See http://www.unicode.org/faq/private_use.html.
-#define RESERVED_CHAR_BASE 0xFDD0u
-#define RESERVED_CHAR_END 0xFDF0u
+#define RESERVED_CHAR_BASE (wchar_t)0xFDD0
+#define RESERVED_CHAR_END (wchar_t)0xFDF0
 // Split the available noncharacter values into two ranges to ensure there are
 // no conflicts among the places we use these special characters.
 #define EXPAND_RESERVED_BASE RESERVED_CHAR_BASE
@@ -63,9 +63,9 @@ typedef std::vector<wcstring> wcstring_list_t;
 // Make sure the ranges defined above don't exceed the range for noncharacters.
 // This is to make sure we didn't do something stupid in subdividing the
 // Unicode range for our needs.
-#if WILDCARD_RESERVED_END > RESERVED_CHAR_END
-#error
-#endif
+//#if WILDCARD_RESERVED_END > RESERVED_CHAR_END
+//#error
+//#endif
 
 // These are in the Unicode private-use range. We really shouldn't use this
 // range but have little choice in the matter given how our lexer/parser works.
@@ -79,9 +79,9 @@ typedef std::vector<wcstring> wcstring_list_t;
 // Note: We don't use the highest 8 bit range (0xF800 - 0xF8FF) because we know
 // of at least one use of a codepoint in that range: the Apple symbol (0xF8FF)
 // on Mac OS X. See http://www.unicode.org/faq/private_use.html.
-#define ENCODE_DIRECT_BASE 0xF600u
+#define ENCODE_DIRECT_BASE (wchar_t)0xF600
 #define ENCODE_DIRECT_END (ENCODE_DIRECT_BASE + 256)
-#define INPUT_COMMON_BASE 0xF700u
+#define INPUT_COMMON_BASE (wchar_t)0xF700
 #define INPUT_COMMON_END (INPUT_COMMON_BASE + 64)
 
 // Flags for unescape_string functions.
@@ -614,28 +614,6 @@ wcstring vformat_string(const wchar_t *format, va_list va_orig);
 void append_format(wcstring &str, const wchar_t *format, ...);
 void append_formatv(wcstring &str, const wchar_t *format, va_list ap);
 
-/// Test if the given string is a valid variable name.
-///
-/// \return null if this is a valid name, and a pointer to the first invalid character otherwise.
-const wchar_t *wcsvarname(const wchar_t *str);
-const wchar_t *wcsvarname(const wcstring &str);
-
-/// Test if the given string is a valid function name.
-///
-/// \return null if this is a valid name, and a pointer to the first invalid character otherwise.
-const wchar_t *wcsfuncname(const wcstring &str);
-
-/// Test if the given string is valid in a variable name.
-///
-/// \return true if this is a valid name, false otherwise.
-bool wcsvarchr(wchar_t chr);
-
-/// Convenience variants on fish_wcwswidth().
-///
-/// See fallback.h for the normal definitions.
-int fish_wcswidth(const wchar_t *str);
-int fish_wcswidth(const wcstring &str);
-
 /// This functions returns the end of the quoted substring beginning at \c in. The type of quoting
 /// character is detemrined by examining \c in. Returns 0 on error.
 ///
@@ -788,4 +766,16 @@ __attribute__((noinline)) void debug_thread_error(void);
 /// specified base, return -1.
 long convert_digit(wchar_t d, int base);
 
+/// This is a macro that can be used to silence "unused parameter" warnings from the compiler for
+/// functions which need to accept parameters they do not use because they need to be compatible
+/// with an interface. It's similar to the Python idiom of doing `_ = expr` at the top of a
+/// function in the same situation.
+#define UNUSED(expr)  \
+    do {              \
+        (void)(expr); \
+    } while (0)
+
 #endif
+
+// Return true if the character is in a range reserved for fish's private use.
+bool fish_reserved_codepoint(wchar_t c);
