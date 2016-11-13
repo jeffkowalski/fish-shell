@@ -1,4 +1,20 @@
-# next-2.x
+# fish next-2.x (released ???)
+
+---
+
+# fish 2.4.0 (released November 8, 2016)
+
+There are no major changes between 2.4b1 and 2.4.0.
+
+## Notable fixes and improvements
+- The documentation is now generated properly and with the correct version identifier.
+- Automatic cursor changes are now only enabled on the subset of XTerm versions known to support them, resolving a problem where older versions printed garbage to the terminal before and after every prompt (#3499).
+- Improved the title set in Apple Terminal.app.
+- Added completions for `defaults` and improved completions for `diskutil` (#3478).
+
+---
+
+# fish 2.4b1 (released October 18, 2016)
 
 ## Significant changes
 - The clipboard integration has been revamped with explicit bindings. The killring commands no longer copy from, or paste to, the X11 clipboard - use the new copy (`C-x`) and paste (`C-v`) bindings instead. The clipboard is now available on OS X as well as systems using X11 (e.g. Linux). (#3061)
@@ -7,14 +23,14 @@
 - `history search` is now case-insensitive by default (which also affects `history delete`) (#3236).
 - `history delete` now correctly handles multiline commands (#31).
 - Vi-style bindings no longer include all of the default emacs-style bindings; instead, they share some definitions (#3068).
-- If there is no locale set in the environment, various known system configuration files will be checked for a default, otherwise forcing en_US-UTF.8 (#277).
+- If there is no locale set in the environment, various known system configuration files will be checked for a default. If no locale can be found, `en_US-UTF.8` will be used (#277).
 - A number followed by a caret (e.g. `5^`) is no longer treated as a redirection (#1873).
 - The `$version` special variable can be overwritten, so that it can be used for other purposes if required.
 
 ## Notable fixes and improvements
 - The `fish_realpath` builtin has been renamed to `realpath` and made compatible with GNU `realpath` when run without arguments (#3400). It is used only for systems without a `realpath` or `grealpath` utility (#3374).
-- Improved color handling on terminals/consoles with 8-16 colors. Particularly bright named color usability has improved. (#3176, #3260).
-- `fish_indent` can now read from named files, rather than just standard input (#3037).
+- Improved color handling on terminals/consoles with 8-16 colors, particularly the use of bright named color (#3176, #3260).
+- `fish_indent` can now read from files given as arguments, rather than just standard input (#3037).
 - Fuzzy tab completions behave in a less surprising manner (#3090, #3211).
 - `jobs` should only print its header line once (#3127).
 - Wildcards in redirections are highlighted appropriately (#2789).
@@ -37,7 +53,7 @@
   -  `p4`, the Perforce client (#3314)
   -  `pygmentize` (#3378)
   -  `ranger` (#3378)
-- Improved completions for `aura` (#3297), `abbr` (#3267), `brew` (#3309), `chown` (#3380, #3383),`cygport` (#3392), `git` (#3274, #3226, #3225, #3094, #3087, #3035, #3021, #2982, #3230), `kill & `pkill` (#3200) `screen` (#3271), and `xz` (#3378).
+- Improved completions for `aura` (#3297), `abbr` (#3267), `brew` (#3309), `chown` (#3380, #3383),`cygport` (#3392), `git` (#3274, #3226, #3225, #3094, #3087, #3035, #3021, #2982, #3230), `kill & `pkill` (#3200), `screen` (#3271), `wget` (#3470), and `xz` (#3378).
 - Distributors, packagers and developers will notice that the build process produces more succinct output by default; use `make V=1` to get verbose output (#3248).
 - Improved compatibility with minor platforms including musl (#2988), Cygwin (#2993), Android (#3441, #3442), Haiku (#3322) and Solaris .
 
