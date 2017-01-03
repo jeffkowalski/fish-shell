@@ -14,29 +14,30 @@
 #include "config.h"
 
 // IWYU pragma: no_include <type_traits>
+#include <assert.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/time.h>
-#include <termios.h>
-#include <time.h>
-#include <unistd.h>
-#include <wctype.h>
-#include <algorithm>
-#include <stack>
 #ifdef HAVE_SIGINFO_H
 #include <siginfo.h>
 #endif
+#include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
 #endif
-#include <assert.h>
-#include <fcntl.h>
-#include <signal.h>
+#include <sys/time.h>
 #include <sys/types.h>
+#include <termios.h>
+#include <time.h>
+#include <unistd.h>
 #include <wchar.h>
+#include <wctype.h>
+
+#include <algorithm>
+#include <stack>
 #include <memory>
 
 #include "color.h"
@@ -312,7 +313,8 @@ static void term_donate() {
     set_color(rgb_color_t::normal(), rgb_color_t::normal());
 
     while (1) {
-        if (tcsetattr(0, TCSANOW, &tty_modes_for_external_cmds)) {
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &tty_modes_for_external_cmds) == -1) {
+            if (errno == ENOTTY) redirect_tty_output();
             if (errno != EINTR) {
                 debug(1, _(L"Could not set terminal mode for new job"));
                 wperror(L"tcsetattr");
@@ -340,10 +342,11 @@ static void update_buff_pos(editable_line_t *el, size_t buff_pos) {
 /// Grab control of terminal.
 static void term_steal() {
     while (1) {
-        if (tcsetattr(0, TCSANOW, &shell_modes)) {
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &shell_modes) == -1) {
+            if (errno == ENOTTY) redirect_tty_output();
             if (errno != EINTR) {
                 debug(1, _(L"Could not set terminal mode for shell"));
-                wperror(L"tcsetattr");
+                perror("tcsetattr");
                 break;
             }
         } else
@@ -412,7 +415,7 @@ static void reader_repaint() {
 
     if (data->sel_active) {
         highlight_spec_t selection_color = highlight_make_background(highlight_spec_selection);
-        for (size_t i = data->sel_start_pos; i <= std::min(len - 1, data->sel_stop_pos); i++) {
+        for (size_t i = data->sel_start_pos; i < std::min(len, data->sel_stop_pos); i++) {
             colors[i] = selection_color;
         }
     }
@@ -695,17 +698,17 @@ void reader_write_title(const wcstring &cmd, bool reset_cursor_position) {
     proc_push_interactive(0);
     if (exec_subshell(fish_title_command, lst, false /* ignore exit status */) != -1 &&
         !lst.empty()) {
-        writestr(L"\x1b]0;");
+        fputws(L"\e]0;", stdout);
         for (size_t i = 0; i < lst.size(); i++) {
-            writestr(lst.at(i).c_str());
+            fputws(lst.at(i).c_str(), stdout);
         }
-        writestr(L"\7");
+        fputwc(L'\a', stdout);
     }
     proc_pop_interactive();
     set_color(rgb_color_t::reset(), rgb_color_t::reset());
     if (reset_cursor_position && !lst.empty()) {
         // Put the cursor back at the beginning of the line (issue #2453).
-        writestr(L"\r");
+        fputwc(L'\r', stdout);
     }
 }
 
@@ -808,7 +811,9 @@ void restore_term_mode() {
     // Restore the term mode if we own the terminal. It's important we do this before
     // restore_foreground_process_group, otherwise we won't think we own the terminal.
     if (getpid() == tcgetpgrp(STDIN_FILENO)) {
-        tcsetattr(STDIN_FILENO, TCSANOW, &terminal_mode_on_startup);
+        if (tcsetattr(STDIN_FILENO, TCSANOW, &terminal_mode_on_startup) == -1 && errno == ENOTTY) {
+            redirect_tty_output();
+        }
     }
 }
 
@@ -1295,7 +1300,7 @@ static void reader_flash() {
     }
 
     reader_repaint();
-    writestr(L"\a");
+    fputwc(L'\a', stdout);
 
     pollint.tv_sec = 0;
     pollint.tv_nsec = 100 * 1000000;
@@ -1375,7 +1380,7 @@ static bool handle_completions(const std::vector<completion_t> &comp,
     const wcstring tok(begin, end - begin);
 
     // Check trivial cases.
-    int size = comp.size();
+    size_t size = comp.size();
     if (size == 0) {
         // No suitable completions found, flash screen and return.
         reader_flash();
@@ -1638,22 +1643,24 @@ static void reader_interactive_init() {
     // Put ourselves in our own process group.
     shell_pgid = getpid();
     if (getpgrp() != shell_pgid && setpgid(shell_pgid, shell_pgid) < 0) {
-        debug(1, _(L"Couldn't put the shell in its own process group"));
+        debug(0, _(L"Couldn't put the shell in its own process group"));
         wperror(L"setpgid");
         exit_without_destructors(1);
     }
 
     // Grab control of the terminal.
-    if (tcsetpgrp(STDIN_FILENO, shell_pgid)) {
-        debug(1, _(L"Couldn't grab control of terminal"));
+    if (tcsetpgrp(STDIN_FILENO, shell_pgid) == -1) {
+        if (errno == ENOTTY) redirect_tty_output();
+        debug(0, _(L"Couldn't grab control of terminal"));
         wperror(L"tcsetpgrp");
         exit_without_destructors(1);
     }
 
     common_handle_winch(0);
 
-    if (tcsetattr(0, TCSANOW, &shell_modes))  // set the new modes
-    {
+    // Set the new modes.
+    if (tcsetattr(0, TCSANOW, &shell_modes) == -1) {
+        if (errno == ENOTTY) redirect_tty_output();
         wperror(L"tcsetattr");
     }
 
@@ -1663,7 +1670,6 @@ static void reader_interactive_init() {
 /// Destroy data for interactive use.
 static void reader_interactive_destroy() {
     kill_destroy();
-    writestr(L"\n");
     set_color(rgb_color_t::reset(), rgb_color_t::reset());
     input_destroy();
 }
@@ -1916,7 +1922,7 @@ bool reader_get_selection(size_t *start, size_t *len) {
     bool result = false;
     if (data != NULL && data->sel_active) {
         *start = data->sel_start_pos;
-        *len = std::min(data->sel_stop_pos - data->sel_start_pos + 1, data->command_line.size());
+        *len = std::min(data->sel_stop_pos - data->sel_start_pos, data->command_line.size());
         result = true;
     }
     return result;
@@ -2217,46 +2223,40 @@ bool shell_is_exiting() {
 /// This function is called when the main loop notices that end_loop has been set while in
 /// interactive mode. It checks if it is ok to exit.
 static void handle_end_loop() {
-    job_t *j;
-    int stopped_jobs_count = 0;
-    int is_breakpoint = 0;
-    const parser_t &parser = parser_t::principal_parser();
-
-    for (size_t i = 0; i < parser.block_count(); i++) {
-        if (parser.block_at_index(i)->type() == BREAKPOINT) {
-            is_breakpoint = 1;
-            break;
+    if (!reader_exit_forced()) {
+        const parser_t &parser = parser_t::principal_parser();
+        for (size_t i = 0; i < parser.block_count(); i++) {
+            if (parser.block_at_index(i)->type() == BREAKPOINT) {
+                // We're executing within a breakpoint so we do not want to terminate the shell and
+                // kill background jobs.
+                return;
+            }
         }
     }
 
+    bool bg_jobs = false;
     job_iterator_t jobs;
-    while ((j = jobs.next())) {
-        if (!job_is_completed(j) && (job_is_stopped(j))) {
-            stopped_jobs_count++;
+    while (job_t *j = jobs.next()) {
+        if (!job_is_completed(j)) {
+            bg_jobs = true;
             break;
         }
     }
 
-    if (!reader_exit_forced() && !data->prev_end_loop && stopped_jobs_count && !is_breakpoint) {
-        writestr(_(
-            L"There are stopped jobs. A second attempt to exit will enforce their termination.\n"));
-
+    if (!data->prev_end_loop && bg_jobs) {
+        fputws(_(L"There are stopped or running jobs.\n"), stdout);
+	fputws(_(L"A second attempt to exit will force their termination.\n"), stdout);
         reader_exit(0, 0);
         data->prev_end_loop = 1;
-    } else {
-        // PCA: We used to only hangup jobs if stdin was closed. This prevented child processes from
-        // exiting. It's unclear to my why it matters if stdin is closed, but it seems to me if
-        // we're forcing an exit, we definitely want to hang up our processes. See issue #138.
-        if (reader_exit_forced() || !isatty(0)) {
-            // We already know that stdin is a tty since we're in interactive mode. If isatty
-            // returns false, it means stdin must have been closed.
-            job_iterator_t jobs;
-            while ((j = jobs.next())) {
-                // Send SIGHUP only to foreground processes. See issue #1771.
-                if (!job_is_completed(j) && job_get_flag(j, JOB_FOREGROUND)) {
-                    job_signal(j, SIGHUP);
-                }
-            }
+        return;
+    }
+
+    // Kill remaining jobs before exiting.
+    jobs.reset();
+    while (job_t *j = jobs.next()) {
+        if (!job_is_completed(j)) {
+            if (job_is_stopped(j)) job_signal(j, SIGCONT);
+            job_signal(j, SIGHUP);
         }
     }
 }
@@ -2402,9 +2402,10 @@ const wchar_t *reader_readline(int nchars) {
     reader_repaint();
 
     // Get the current terminal modes. These will be restored when the function returns.
-    tcgetattr(0, &old_modes);
+    tcgetattr(STDIN_FILENO, &old_modes);
     // Set the new modes.
-    if (tcsetattr(0, TCSANOW, &shell_modes)) {
+    if (tcsetattr(0, TCSANOW, &shell_modes) == -1) {
+        if (errno == ENOTTY) redirect_tty_output();
         wperror(L"tcsetattr");
     }
 
@@ -2718,7 +2719,7 @@ const wchar_t *reader_readline(int nchars) {
                 break;
             }
             // Escape was pressed.
-            case L'\x1b': {
+            case L'\e': {
                 if (data->search_mode) {
                     data->search_mode = NO_SEARCH;
 
@@ -2747,6 +2748,9 @@ const wchar_t *reader_readline(int nchars) {
                 if (el->position < el->size()) {
                     update_buff_pos(el, el->position + 1);
                     remove_backward();
+                    if (el->position > 0 && el->position == el->size()) {
+                        update_buff_pos(el, el->position - 1);
+                    }
                 }
                 break;
             }
@@ -3256,7 +3260,7 @@ const wchar_t *reader_readline(int nchars) {
         reader_repaint_if_needed();
     }
 
-    writestr(L"\n");
+    fputwc(L'\n', stdout);
 
     // Ensure we have no pager contents when we exit.
     if (!data->pager.empty()) {
@@ -3267,7 +3271,8 @@ const wchar_t *reader_readline(int nchars) {
     }
 
     if (!reader_exit_forced()) {
-        if (tcsetattr(0, TCSANOW, &old_modes)) {
+        if (tcsetattr(0, TCSANOW, &old_modes) == -1) {
+            if (errno == ENOTTY) redirect_tty_output();
             wperror(L"tcsetattr");  // return to previous mode
         }
         set_color(rgb_color_t::reset(), rgb_color_t::reset());

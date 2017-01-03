@@ -8,15 +8,19 @@
 #include <pwd.h>
 #include <stddef.h>
 #include <stdlib.h>
-#ifdef HAVE__NL_MSG_CAT_CNTR
 #include <string.h>
-#endif
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 #include <wchar.h>
-#include <wctype.h>
+
+#if HAVE_TERM_H
+#include <term.h>
+#elif HAVE_NCURSES_TERM_H
+#include <ncurses/term.h>
+#endif
+
 #include <algorithm>
 #include <map>
 #include <set>
@@ -52,6 +56,9 @@
 extern char **environ;
 
 bool g_use_posix_spawn = false;  // will usually be set to true
+
+/// Does the terminal have the "eat_newline_glitch".
+bool term_has_xn = false;
 
 /// Struct representing one level in the function variable stack.
 struct env_node_t {
@@ -248,6 +255,7 @@ static void handle_curses(const wchar_t *env_var_name) {
     // changed. At the present time it can be called just once. Also, we should really only do this
     // if the TERM var is set.
     // input_init();
+    term_has_xn = tgetflag((char *)"xn") == 1;  // does terminal have the eat_newline_glitch
 }
 
 /// React to modifying the given variable.
@@ -336,6 +344,17 @@ static bool variable_is_colon_delimited_array(const wcstring &str) {
     return contains(str, L"PATH", L"MANPATH", L"CDPATH");
 }
 
+/// Set up the USER variable.
+static void setup_user(bool force) {
+    if (env_get_string(L"USER").missing_or_empty() || force) {
+        const struct passwd *pw = getpwuid(getuid());
+        if (pw && pw->pw_name) {
+            const wcstring uname = str2wcstring(pw->pw_name);
+            env_set(L"USER", uname.c_str(), ENV_GLOBAL | ENV_EXPORT);
+        }
+    }
+}
+
 void env_init(const struct config_paths_t *paths /* or NULL */) {
     // These variables can not be altered directly by the user.
     const wchar_t *const ro_keys[] = {
@@ -394,17 +413,9 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
         env_set(FISH_BIN_DIR, paths->bin.c_str(), ENV_GLOBAL);
     }
 
-    // Set up the PATH variable.
+    // Set up the USER and PATH variables
     setup_path();
-
-    // Set up the USER variable.
-    if (env_get_string(L"USER").missing_or_empty()) {
-        const struct passwd *pw = getpwuid(getuid());
-        if (pw && pw->pw_name) {
-            const wcstring uname = str2wcstring(pw->pw_name);
-            env_set(L"USER", uname.c_str(), ENV_GLOBAL | ENV_EXPORT);
-        }
-    }
+    setup_user(false);
 
     // Set up the version variable.
     wcstring version = str2wcstring(get_fish_version());
@@ -414,10 +425,10 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     const env_var_t shlvl_str = env_get_string(L"SHLVL");
     wcstring nshlvl_str = L"1";
     if (!shlvl_str.missing()) {
-        wchar_t *end;
-        long shlvl_i = wcstol(shlvl_str.c_str(), &end, 10);
-        while (iswspace(*end)) ++end;  // skip trailing whitespace
-        if (shlvl_i >= 0 && *end == '\0') {
+        const wchar_t *end;
+        // TODO: Figure out how to handle invalid numbers better. Shouldn't we issue a diagnostic?
+        long shlvl_i = fish_wcstol(shlvl_str.c_str(), &end);
+        if (!errno && shlvl_i >= 0) {
             nshlvl_str = to_string<long>(shlvl_i + 1);
         }
     }
@@ -429,7 +440,14 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
         const env_var_t unam = env_get_string(L"USER");
         char *unam_narrow = wcs2str(unam.c_str());
         struct passwd *pw = getpwnam(unam_narrow);
-        if (pw->pw_dir != NULL) {
+        if (pw == NULL) {
+            // Maybe USER is set but it's bogus. Reset USER from the db and try again.
+            setup_user(true);
+            const env_var_t unam = env_get_string(L"USER");
+            unam_narrow = wcs2str(unam.c_str());
+            pw = getpwnam(unam_narrow);
+        }
+        if (pw && pw->pw_dir) {
             const wcstring dir = str2wcstring(pw->pw_dir);
             env_set(L"HOME", dir.c_str(), ENV_GLOBAL | ENV_EXPORT);
         }
@@ -516,14 +534,10 @@ int env_set(const wcstring &key, const wchar_t *val, env_mode_flags_t var_mode) 
     }
 
     if (key == L"umask") {
-        wchar_t *end;
-
         // Set the new umask.
         if (val && wcslen(val)) {
-            errno = 0;
-            long mask = wcstol(val, &end, 8);
-
-            if (!errno && (!*end) && (mask <= 0777) && (mask >= 0)) {
+            long mask = fish_wcstol(val, NULL, 8);
+            if (!errno && mask <= 0777 && mask >= 0) {
                 umask(mask);
                 // Do not actually create a umask variable, on env_get, it will be calculated
                 // dynamically.
@@ -745,9 +759,12 @@ env_var_t env_get_string(const wcstring &key, env_mode_flags_t mode) {
     // that in env_set().
     if (is_electric(key)) {
         if (!search_global) return env_var_t::missing_var();
-        // Big hack. We only allow getting the history on the main thread. Note that history_t may
-        // ask for an environment variable, so don't take the lock here (we don't need it).
-        if (key == L"history" && is_main_thread()) {
+        if (key == L"history") {
+            // Big hack. We only allow getting the history on the main thread. Note that history_t
+            // may ask for an environment variable, so don't take the lock here (we don't need it).
+            if (!is_main_thread()) {
+                return env_var_t::missing_var();
+            }
             env_var_t result;
 
             history_t *history = reader_get_history();
@@ -765,7 +782,8 @@ env_var_t env_get_string(const wcstring &key, env_mode_flags_t mode) {
         } else if (key == L"umask") {
             return format_string(L"0%0.3o", get_umask());
         }
-        // We should never get here unless the electric var list is out of sync.
+        // We should never get here unless the electric var list is out of sync with the above code.
+        DIE("unerecognized electric var name");
     }
 
     if (search_local || search_global) {

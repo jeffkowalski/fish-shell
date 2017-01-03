@@ -5,6 +5,7 @@
 #include <cxxabi.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -533,11 +534,15 @@ ssize_t read_loop(int fd, void *buff, size_t count) {
     return result;
 }
 
+bool should_suppress_stderr_for_tests() {
+    // Hack to not print error messages in the tests.
+    return program_name && !wcscmp(program_name, TESTS_PROGRAM_NAME);
+}
+
 static bool should_debug(int level) {
     if (level > debug_level) return false;
 
-    // Hack to not print error messages in the tests.
-    if (program_name && !wcscmp(program_name, L"(ignore)")) return false;
+    if (should_suppress_stderr_for_tests()) return false;
 
     return true;
 }
@@ -828,7 +833,7 @@ static void escape_string_internal(const wchar_t *orig_in, size_t in_len, wcstri
                     need_escape = need_complex_escape = 1;
                     break;
                 }
-                case L'\x1b': {
+                case L'\e': {
                     out += L'\\';
                     out += L'e';
                     need_escape = need_complex_escape = 1;
@@ -1061,9 +1066,9 @@ size_t read_unquoted_escape(const wchar_t *input, wcstring *result, bool allow_i
             }
             break;
         }
-        // \x1b means escape.
+        // \e means escape.
         case L'e': {
-            result_char_or_none = L'\x1b';
+            result_char_or_none = L'\e';
             break;
         }
         // \f means form feed.
@@ -1931,16 +1936,27 @@ long convert_digit(wchar_t d, int base) {
     return res;
 }
 
-// Test if the specified character is in a range that fish uses interally to store special tokens.
-//
-// NOTE: This is used when tokenizing the input. It is also used when reading input, before
-// tokenization, to replace such chars with REPLACEMENT_WCHAR if they're not part of a quoted
-// string. We don't want external input to be able to feed reserved characters into our lexer/parser
-// or code evaluator.
+/// Test if the specified character is in a range that fish uses interally to store special tokens.
+///
+/// NOTE: This is used when tokenizing the input. It is also used when reading input, before
+/// tokenization, to replace such chars with REPLACEMENT_WCHAR if they're not part of a quoted
+/// string. We don't want external input to be able to feed reserved characters into our
+/// lexer/parser or code evaluator.
 //
 // TODO: Actually implement the replacement as documented above.
 bool fish_reserved_codepoint(wchar_t c) {
     return (c >= RESERVED_CHAR_BASE && c < RESERVED_CHAR_END) ||
            (c >= ENCODE_DIRECT_BASE && c < ENCODE_DIRECT_END) ||
            (c >= INPUT_COMMON_BASE && c < INPUT_COMMON_END);
+}
+
+/// Reopen stdout and/or stderr on /dev/null. This is invoked when we find that our tty has become
+/// invalid.
+void redirect_tty_output() {
+    struct termios t;
+    int fd = open("/dev/null", O_WRONLY);
+    if (tcgetattr(STDIN_FILENO, &t) == -1) dup2(fd, STDIN_FILENO);
+    if (tcgetattr(STDOUT_FILENO, &t) == -1) dup2(fd, STDOUT_FILENO);
+    if (tcgetattr(STDERR_FILENO, &t) == -1) dup2(fd, STDERR_FILENO);
+    close(fd);
 }

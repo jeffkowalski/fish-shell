@@ -2,8 +2,12 @@
 #include "config.h"
 
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
 #include <unistd.h>
 #include <wchar.h>
+#include <wctype.h>
 #if HAVE_NCURSES_H
 #include <ncurses.h>
 #elif HAVE_NCURSES_CURSES_H
@@ -16,8 +20,7 @@
 #elif HAVE_NCURSES_TERM_H
 #include <ncurses/term.h>
 #endif
-#include <stdlib.h>
-#include <wctype.h>
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -289,8 +292,7 @@ static int interrupt_handler() {
     if (job_reap(1)) reader_repaint_needed();
     // Tell the reader an event occured.
     if (reader_reading_interrupted()) {
-        // Return 3, i.e. the character read by a Control-C.
-        return 3;
+        return shell_modes.c_cc[VINTR];
     }
 
     return R_NULL;
@@ -372,6 +374,7 @@ int input_init() {
         } else {
             debug(0, _(L"Using fallback terminal type '%ls'"), DEFAULT_TERM);
         }
+        putc('\n', stderr);
     }
 
     input_terminfo_init();

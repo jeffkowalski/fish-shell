@@ -4,6 +4,7 @@
 #include "config.h"  // IWYU pragma: keep
 
 #include <assert.h>
+#include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <sys/stat.h>
@@ -166,7 +167,8 @@ class test_parser {
     expression *parse_binary_primary(unsigned int start, unsigned int end);
     expression *parse_just_a_string(unsigned int start, unsigned int end);
 
-    static expression *parse_args(const wcstring_list_t &args, wcstring &err);
+    static expression *parse_args(const wcstring_list_t &args, wcstring &err,
+                                  wchar_t *program_name);
 };
 
 struct range_t {
@@ -537,7 +539,8 @@ expression *test_parser::parse_expression(unsigned int start, unsigned int end) 
     }
 }
 
-expression *test_parser::parse_args(const wcstring_list_t &args, wcstring &err) {
+expression *test_parser::parse_args(const wcstring_list_t &args, wcstring &err,
+                                    wchar_t *program_name) {
     // Empty list and one-arg list should be handled by caller.
     assert(args.size() > 1);
 
@@ -547,7 +550,8 @@ expression *test_parser::parse_args(const wcstring_list_t &args, wcstring &err) 
     // Handle errors.
     // For now we only show the first error.
     if (!parser.errors.empty()) {
-        err.append(L"test: ");
+        err.append(program_name);
+        err.append(L": ");
         err.append(parser.errors.at(0));
         err.push_back(L'\n');
     }
@@ -558,7 +562,7 @@ expression *test_parser::parse_args(const wcstring_list_t &args, wcstring &err) 
         assert(result->range.end <= args.size());
         if (result->range.end < args.size()) {
             if (err.empty()) {
-                append_format(err, L"test: unexpected argument at index %lu: '%ls'\n",
+                append_format(err, L"%ls: unexpected argument at index %lu: '%ls'\n", program_name,
                               (unsigned long)result->range.end, args.at(result->range.end).c_str());
             }
 
@@ -636,12 +640,14 @@ bool parenthetical_expression::evaluate(wcstring_list_t &errors) {
 
 // IEEE 1003.1 says nothing about what it means for two strings to be "algebraically equal". For
 // example, should we interpret 0x10 as 0, 10, or 16? Here we use only base 10 and use wcstoll,
-// which allows for leading + and -, and leading whitespace. This matches bash.
-static bool parse_number(const wcstring &arg, long long *out) {
-    const wchar_t *str = arg.c_str();
-    wchar_t *endptr = NULL;
-    *out = wcstoll(str, &endptr, 10);
-    return endptr && *endptr == L'\0';
+// which allows for leading + and -, and whitespace. This is consistent, albeit a bit more lenient
+// since we allow trailing whitespace, with other implementations such as bash.
+static bool parse_number(const wcstring &arg, long long *out, wcstring_list_t &errors) {
+    *out = fish_wcstoll(arg.c_str());
+    if (errno) {
+        errors.push_back(format_string(_(L"invalid integer '%ls'"), arg.c_str()));
+    }
+    return !errno;
 }
 
 static bool binary_primary_evaluate(test_expressions::token_t token, const wcstring &left,
@@ -656,28 +662,28 @@ static bool binary_primary_evaluate(test_expressions::token_t token, const wcstr
             return left != right;
         }
         case test_number_equal: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num == right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num == right_num;
         }
         case test_number_not_equal: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num != right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num != right_num;
         }
         case test_number_greater: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num > right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num > right_num;
         }
         case test_number_greater_equal: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num >= right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num >= right_num;
         }
         case test_number_lesser: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num < right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num < right_num;
         }
         case test_number_lesser_equal: {
-            return parse_number(left, &left_num) && parse_number(right, &right_num) &&
-                   left_num <= right_num;
+            return parse_number(left, &left_num, errors) &&
+                   parse_number(right, &right_num, errors) && left_num <= right_num;
         }
         default: {
             errors.push_back(format_string(L"Unknown token type in %s", __func__));
@@ -730,7 +736,7 @@ static bool unary_primary_evaluate(test_expressions::token_t token, const wcstri
             return !wstat(arg, &buf) && buf.st_size > 0;
         }
         case test_filedesc_t: {  // "-t", whether the fd is associated with a terminal
-            return parse_number(arg, &num) && num == (int)num && isatty((int)num);
+            return parse_number(arg, &num, errors) && num == (int)num && isatty((int)num);
         }
         case test_fileperm_r: {  // "-r", read permission
             return !waccess(arg, R_OK);
@@ -771,7 +777,8 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     if (!argv[0]) return BUILTIN_TEST_FAIL;
 
     // Whether we are invoked with bracket '[' or not.
-    const bool is_bracket = !wcscmp(argv[0], L"[");
+    wchar_t *program_name = argv[0];
+    const bool is_bracket = !wcscmp(program_name, L"[");
 
     size_t argc = 0;
     while (argv[argc + 1]) argc++;
@@ -780,7 +787,7 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     // of arguments after the command name; thus argv[argc] is the last argument.
     if (is_bracket) {
         if (!wcscmp(argv[argc], L"]")) {
-            // Ignore the closing bracketp.
+            // Ignore the closing bracket from now on.
             argc--;
         } else {
             streams.err.append(L"[: the last argument must be ']'\n");
@@ -800,7 +807,7 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
     // Try parsing. If expr is not nil, we are responsible for deleting it.
     wcstring err;
-    expression *expr = test_parser::parse_args(args, err);
+    expression *expr = test_parser::parse_args(args, err, program_name);
     if (!expr) {
 #if 0
         printf("Oops! test was given args:\n");
@@ -815,7 +822,7 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
     wcstring_list_t eval_errors;
     bool result = expr->evaluate(eval_errors);
-    if (!eval_errors.empty()) {
+    if (!eval_errors.empty() && !should_suppress_stderr_for_tests()) {
         printf("test returned eval errors:\n");
         for (size_t i = 0; i < eval_errors.size(); i++) {
             printf("\t%ls\n", eval_errors.at(i).c_str());

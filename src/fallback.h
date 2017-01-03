@@ -75,7 +75,26 @@ int wcscasecmp(const wchar_t *a, const wchar_t *b);
 int wcsncasecmp(const wchar_t *s1, const wchar_t *s2, size_t n);
 wchar_t *wcsndup(const wchar_t *in, size_t c);
 #endif
-#endif  //__APPLE__
+#else  //__APPLE__
+
+/// These functions are missing from Solaris 10
+#ifndef HAVE_WCSDUP
+wchar_t *wcsdup(const wchar_t *in);
+#endif
+#ifndef HAVE_WCSCASECMP
+int wcscasecmp(const wchar_t *a, const wchar_t *b);
+#endif
+#ifndef HAVE_WCSNCASECMP
+int wcsncasecmp(const wchar_t *s1, const wchar_t *s2, size_t n);
+#endif
+#ifndef HAVE_DIRFD
+#ifndef __XOPEN_OR_POSIX
+#define dirfd(d) (d->dd_fd)
+#else
+#define dirfd(d) (d->d_fd)
+#endif
+#endif
+#endif
 
 #ifndef HAVE_WCSNDUP
 /// Fallback for wcsndup function. Returns a copy of \c in, truncated to a maximum length of \c c.
@@ -123,6 +142,22 @@ char *fish_textdomain(const char *domainname);
 #ifndef HAVE_KILLPG
 /// Send specified signal to specified process group.
 int killpg(int pgr, int sig);
+#endif
+
+#ifndef HAVE_FLOCK
+/// Fallback implementation of flock in terms of fcntl
+/// Danger! The semantics of flock and fcntl locking are very different.
+/// Use with caution.
+// Ignore the cppcheck warning as this is the implementation that it is
+// warning about!
+// cppcheck-suppress flockSemanticsWarning
+int flock(int fd, int op);
+
+#define LOCK_SH 1  // Shared lock.
+#define LOCK_EX 2  // Exclusive lock.
+#define LOCK_UN 8  // Unlock.
+#define LOCK_NB 4  // Don't block when locking.
+
 #endif
 
 #endif

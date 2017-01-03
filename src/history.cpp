@@ -1,5 +1,4 @@
 // History functions, part of the user interface.
-//
 #include "config.h"  // IWYU pragma: keep
 
 #include <assert.h>
@@ -10,6 +9,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+// We need the sys/file.h for the flock() declaration on Linux but not OS X.
+#include <sys/file.h>  // IWYU pragma: keep
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
@@ -17,6 +18,7 @@
 #include <wchar.h>
 #include <wctype.h>
 #include <algorithm>
+#include <cwchar>
 #include <iterator>
 #include <map>
 
@@ -121,14 +123,21 @@ class time_profiler_t {
     }
 };
 
-/// Lock a file via fcntl; returns true on success, false on failure.
-static bool history_file_lock(int fd, short type) {
-    assert(type == F_RDLCK || type == F_WRLCK);
-    struct flock flk = {};
-    flk.l_type = type;
-    flk.l_whence = SEEK_SET;
-    int ret = fcntl(fd, F_SETLKW, (void *)&flk);
-    return ret != -1;
+/// Lock the history file.
+/// Returns true on success, false on failure.
+static bool history_file_lock(int fd, int lock_type) {
+    static bool do_locking = true;
+    if (!do_locking) return false;
+
+    double start_time = timef();
+    int retval = flock(fd, lock_type);
+    double duration = timef() - start_time;
+    if (duration > 0.25) {
+        debug(1, _(L"Locking the history file took too long (%.3f seconds)."), duration);
+        do_locking = false;
+        return false;
+    }
+    return retval != -1;
 }
 
 /// Our LRU cache is used for restricting the amount of history we have, and limiting how long we
@@ -308,16 +317,10 @@ static history_item_t decode_item_fish_1_x(const char *begin, size_t length) {
             if (timestamp_mode) {
                 const wchar_t *time_string = out.c_str();
                 while (*time_string && !iswdigit(*time_string)) time_string++;
-                errno = 0;
 
                 if (*time_string) {
-                    time_t tm;
-                    wchar_t *end;
-
-                    errno = 0;
-                    tm = (time_t)wcstol(time_string, &end, 10);
-
-                    if (tm && !errno && !*end) {
+                    time_t tm = (time_t)fish_wcstol(time_string);
+                    if (!errno && tm >= 0) {
                         timestamp = tm;
                     }
                 }
@@ -791,15 +794,6 @@ void history_t::add(const wcstring &str, history_identifier_t ident, bool pendin
     this->add(history_item_t(str, when, ident), pending);
 }
 
-bool icompare_pred(wchar_t a, wchar_t b) { return std::tolower(a) == std::tolower(b); }
-
-bool icompare(wcstring const &a, wcstring const &b) {
-    if (a.length() != b.length()) {
-        return false;
-    }
-    return std::equal(b.begin(), b.end(), a.begin(), icompare_pred);
-}
-
 // Remove matching history entries from our list of new items. This only supports literal,
 // case-sensitive, matches.
 void history_t::remove(const wcstring &str_to_remove) {
@@ -962,20 +956,21 @@ bool history_t::map_file(const wcstring &name, const char **out_map_start, size_
     // unlikely because we only treat an item as valid if it has a terminating newline.
     //
     // Simulate a failing lock in chaos_mode.
-    if (!chaos_mode) history_file_lock(fd, F_RDLCK);
+    if (!chaos_mode) history_file_lock(fd, LOCK_SH);
     off_t len = lseek(fd, 0, SEEK_END);
     if (len != (off_t)-1) {
         size_t mmap_length = (size_t)len;
         if (lseek(fd, 0, SEEK_SET) == 0) {
             char *mmap_start;
-            if ((mmap_start = (char *)mmap(0, mmap_length, PROT_READ, MAP_PRIVATE, fd,
-                                            0)) != MAP_FAILED) {
+            if ((mmap_start = (char *)mmap(0, mmap_length, PROT_READ, MAP_PRIVATE, fd, 0)) !=
+                MAP_FAILED) {
                 result = true;
                 *out_map_start = mmap_start;
                 *out_map_len = mmap_length;
             }
         }
     }
+    if (!chaos_mode) history_file_lock(fd, LOCK_UN);
     close(fd);
     return result;
 }
@@ -1353,7 +1348,7 @@ bool history_t::save_internal_via_appending() {
         // by writing with O_APPEND.
         //
         // Simulate a failing lock in chaos_mode
-        if (!chaos_mode) history_file_lock(out_fd, F_WRLCK);
+        if (!chaos_mode) history_file_lock(out_fd, LOCK_EX);
 
         // We (hopefully successfully) took the exclusive lock. Append to the file.
         // Note that this is sketchy for a few reasons:
@@ -1393,6 +1388,7 @@ bool history_t::save_internal_via_appending() {
             ok = true;
         }
 
+        if (!chaos_mode) history_file_lock(out_fd, LOCK_UN);
         close(out_fd);
     }
 
@@ -1450,7 +1446,11 @@ static bool format_history_record(const history_item_t &item, const wchar_t *sho
         streams.out.append(timestamp_string);
     }
     streams.out.append(item.str());
-    streams.out.append(null_terminate ? L'\0' : L'\n');
+    if (null_terminate) {
+        streams.out.append(L'\0');
+    } else {
+        streams.out.append(L'\n');
+    }
     return true;
 }
 
@@ -1648,6 +1648,7 @@ void history_t::incorporate_external_changes() {
         // We'll pick them up from the file (#2312)
         this->save_internal(false);
         this->new_items.clear();
+        this->first_unwritten_new_item_index = 0;
     }
 }
 
