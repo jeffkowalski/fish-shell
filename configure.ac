@@ -217,11 +217,12 @@ CXXFLAGS="$CXXFLAGS -fno-exceptions"
 
 
 #
-# -Wall is there to keep me on my toes
-# But signed comparison warnings are way too aggressive
+# Set some warning flags
+# Don't warn about missing field initializers, it has too many
+# false positives for code like `struct termios tmodes = {};`
 #
 
-CXXFLAGS="$CXXFLAGS -Wextra"
+CXXFLAGS="$CXXFLAGS -Wextra -Wno-missing-field-initializers"
 
 #
 # This is needed in order to get the really cool backtraces on Linux
@@ -270,7 +271,6 @@ esac
 #
 
 # Check for os dependant libraries for all binaries.
-AC_SEARCH_LIBS( connect, [socket network], , [AC_MSG_ERROR([Cannot find the socket library, needed to build this package.] )] )
 AC_SEARCH_LIBS( nanosleep, rt, , [AC_MSG_ERROR([Cannot find the rt library, needed to build this package.] )] )
 AC_SEARCH_LIBS( shm_open, rt, [AC_DEFINE([HAVE_SHM_OPEN], [1], [Define to 1 if the shm_open() function exists])] )
 AC_SEARCH_LIBS( pthread_create, pthread, , [AC_MSG_ERROR([Cannot find the pthread library, needed to build this package.] )] )
@@ -326,6 +326,25 @@ AC_CHECK_FUNCS( getpwent flock )
 AC_CHECK_FUNCS( dirfd )
 
 AC_CHECK_DECL( [mkostemp], [ AC_CHECK_FUNCS([mkostemp]) ] )
+
+#
+# Although setupterm is linkable thanks to SEARCH_LIBS above, some
+# builds of ncurses include the actual headers in a different package
+#
+AC_CHECK_DECL( [setupterm], , [AC_MSG_ERROR([Could not find a curses implementation, needed to build fish. If this is Linux, try running 'sudo apt-get install libncurses5-dev' or 'sudo yum install ncurses-devel'])], [
+#if HAVE_NCURSES_H
+#include <ncurses.h>
+#elif HAVE_NCURSES_CURSES_H
+#include <ncurses/curses.h>
+#else
+#include <curses.h>
+#endif
+#if HAVE_TERM_H
+#include <term.h>
+#elif HAVE_NCURSES_TERM_H
+#include <ncurses/term.h>
+#endif
+] )
 
 dnl AC_CHECK_FUNCS uses C linkage, but sometimes (Solaris!) the behaviour is
 dnl different with C++.
@@ -660,7 +679,7 @@ if test "x$included_pcre2" = "xyes"; then
   AC_MSG_NOTICE([using included PCRE2 library])
   # unfortunately these get added to the global configuration
   ac_configure_args="$ac_configure_args --disable-pcre2-8 --enable-pcre2-$WCHAR_T_BITS --disable-shared"
-  AC_CONFIG_SUBDIRS([pcre2-10.21])
+  AC_CONFIG_SUBDIRS([pcre2-10.22])
 
   PCRE2_CXXFLAGS='-I$(PCRE2_DIR)/src'
   PCRE2_LIBS='-L$(PCRE2_LIBDIR) -lpcre2-$(PCRE2_WIDTH)'

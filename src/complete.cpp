@@ -5,18 +5,20 @@
 ///
 #include "config.h"  // IWYU pragma: keep
 
-#include <assert.h>
 #include <pthread.h>
 #include <pwd.h>
 #include <stddef.h>
 #include <wchar.h>
 #include <wctype.h>
+
 #include <algorithm>
+#include <functional>
 #include <list>
 #include <map>
 #include <memory>
 #include <set>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "autoload.h"
@@ -346,22 +348,13 @@ class completer_t {
     }
 };
 
-/// Autoloader for completions.
-class completion_autoload_t : public autoload_t {
-   public:
-    completion_autoload_t();
-    virtual void command_removed(const wcstring &cmd);
-};
-
-static completion_autoload_t completion_autoloader;
-
-// Constructor
-completion_autoload_t::completion_autoload_t() : autoload_t(L"fish_complete_path", NULL, 0) {}
-
-/// Callback when an autoloaded completion is removed.
-void completion_autoload_t::command_removed(const wcstring &cmd) {
+// Callback when an autoloaded completion is removed.
+static void autoloaded_completion_removed(const wcstring &cmd) {
     complete_remove_all(cmd, false /* not a path */);
 }
+
+// Autoloader for completions
+static autoload_t completion_autoloader(L"fish_complete_path", autoloaded_completion_removed);
 
 /// Create a new completion entry.
 void append_completion(std::vector<completion_t> *completions, const wcstring &comp,
@@ -479,7 +472,6 @@ void complete_remove(const wcstring &cmd, bool cmd_is_path, const wcstring &opti
 
         bool delete_it = entry.remove_option(option, type);
         if (delete_it) {
-            // Delete this entry.
             completion_set.erase(iter);
         }
     }
@@ -672,8 +664,10 @@ void completer_t::complete_cmd(const wcstring &str_cmd, bool use_function, bool 
     if (use_implicit_cd) {
         // We don't really care if this succeeds or fails. If it succeeds this->completions will be
         // updated with choices for the user.
-        (void)expand_string(str_cmd, &this->completions,
-                            EXPAND_FOR_COMPLETIONS | DIRECTORIES_ONLY | this->expand_flags(), NULL);
+        expand_error_t ignore =
+            expand_string(str_cmd, &this->completions,
+                          EXPAND_FOR_COMPLETIONS | DIRECTORIES_ONLY | this->expand_flags(), NULL);
+        UNUSED(ignore);
     }
 
     if (str_cmd.find(L'/') == wcstring::npos && str_cmd.at(0) != L'~') {
@@ -836,14 +830,6 @@ static void complete_load(const wcstring &name, bool reload) {
     completion_autoloader.load(name, reload);
 }
 
-/// Performed on main thread, from background thread. Return type is ignored.
-static int complete_load_no_reload(wcstring *name) {
-    assert(name != NULL);
-    ASSERT_IS_MAIN_THREAD();
-    complete_load(*name, false);
-    return 0;
-}
-
 /// complete_param: Given a command, find completions for the argument str of command cmd_orig with
 /// previous option popt.
 ///
@@ -869,8 +855,8 @@ bool completer_t::complete_param(const wcstring &scmd_orig, const wcstring &spop
         complete_load(cmd, true);
     } else if (this->type() == COMPLETE_AUTOSUGGEST &&
                !completion_autoloader.has_tried_loading(cmd)) {
-        // Load this command (on the main thread).
-        iothread_perform_on_main(complete_load_no_reload, &cmd);
+        // Load this command (on the main thread)
+        iothread_perform_on_main([&]() { complete_load(cmd, false); });
     }
 
     // Make a list of lists of all options that we care about.
@@ -1285,9 +1271,10 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
 
     if (!done) {
         parse_node_tree_t tree;
-        parse_tree_from_string(cmd, parse_flag_continue_after_error |
-                                        parse_flag_accept_incomplete_tokens |
-                                        parse_flag_include_comments,
+        parse_tree_from_string(cmd,
+                               parse_flag_continue_after_error |
+                                   parse_flag_accept_incomplete_tokens |
+                                   parse_flag_include_comments,
                                &tree, NULL);
 
         // Find the plain statement to operate on. The cursor may be past it (#1261), so backtrack
@@ -1450,7 +1437,7 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
                             // transient commandline for builtin_commandline. But not for
                             // COMPLETION_REQUEST_AUTOSUGGESTION, which may occur on background
                             // threads.
-                            builtin_commandline_scoped_transient_t *transient_cmd = NULL;
+                            std::unique_ptr<builtin_commandline_scoped_transient_t> transient_cmd;
                             if (i == 0) {
                                 assert(wrap_chain.at(i) == current_command_unescape);
                             } else if (!(flags & COMPLETION_REQUEST_AUTOSUGGESTION)) {
@@ -1458,15 +1445,14 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
                                 wcstring faux_cmdline = cmd;
                                 faux_cmdline.replace(cmd_node->source_start,
                                                      cmd_node->source_length, wrap_chain.at(i));
-                                transient_cmd =
-                                    new builtin_commandline_scoped_transient_t(faux_cmdline);
+                                transient_cmd = make_unique<builtin_commandline_scoped_transient_t>(
+                                    faux_cmdline);
                             }
                             if (!completer.complete_param(wrap_chain.at(i),
                                                           previous_argument_unescape,
                                                           current_argument_unescape, !had_ddash)) {
                                 do_file = false;
                             }
-                            delete transient_cmd;  // may be null
                         }
                     }
 
@@ -1633,7 +1619,7 @@ wcstring_list_t complete_get_wrap_chain(const wcstring &command) {
     wcstring target;
     while (!to_visit.empty()) {
         // Grab the next command to visit, put it in target.
-        target.swap(to_visit.back());
+        target = std::move(to_visit.back());
         to_visit.pop_back();
 
         // Try inserting into visited. If it was already present, we skip it; this is how we avoid

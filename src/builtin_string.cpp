@@ -5,16 +5,18 @@
 #ifdef _WIN32
 #define PCRE2_STATIC
 #endif
-#include <assert.h>
 #include <errno.h>
 #include <limits.h>
 #include <stdarg.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
-#include <sys/types.h>
 #include <wchar.h>
 #include <wctype.h>
+
 #include <algorithm>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -135,7 +137,7 @@ static int string_escape(parser_t &parser, io_streams_t &streams, int argc, wcha
     wcstring storage;
     const wchar_t *arg;
     while ((arg = string_get_arg(&i, argv, &storage, streams)) != 0) {
-        streams.out.append(escape(arg, flags));
+        streams.out.append(escape_string(arg, flags));
         streams.out.append(L'\n');
         nesc++;
     }
@@ -367,9 +369,7 @@ struct compiled_regex_t {
         }
 
         match = pcre2_match_data_create_from_pattern(code, 0);
-        if (match == 0) {
-            DIE_MEM();
-        }
+        assert(match);
     }
 
     ~compiled_regex_t() {
@@ -570,25 +570,22 @@ static int string_match(parser_t &parser, io_streams_t &streams, int argc, wchar
         return BUILTIN_STRING_ERROR;
     }
 
-    string_matcher_t *matcher;
+    std::unique_ptr<string_matcher_t> matcher;
     if (regex) {
-        matcher = new pcre2_matcher_t(argv[0], pattern, opts, streams);
+        matcher = make_unique<pcre2_matcher_t>(argv[0], pattern, opts, streams);
     } else {
-        matcher = new wildcard_matcher_t(argv[0], pattern, opts, streams);
+        matcher = make_unique<wildcard_matcher_t>(argv[0], pattern, opts, streams);
     }
 
     const wchar_t *arg;
     wcstring storage;
     while ((arg = string_get_arg(&i, argv, &storage, streams)) != 0) {
         if (!matcher->report_matches(arg)) {
-            delete matcher;
             return BUILTIN_STRING_ERROR;
         }
     }
 
-    int rc = matcher->match_count() > 0 ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
-    delete matcher;
-    return rc;
+    return matcher->match_count() > 0 ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
 }
 
 struct replace_options_t {
@@ -705,9 +702,8 @@ bool regex_replacer_t::replace_matches(const wchar_t *arg) {
 
     bool done = false;
     while (!done) {
-        if (output == NULL) {
-            DIE_MEM();
-        }
+        assert(output);
+
         PCRE2_SIZE outlen = bufsize;
         pcre2_rc = pcre2_substitute(regex.code, PCRE2_SPTR(arg), arglen,
                                     0,  // start offset
@@ -806,25 +802,22 @@ static int string_replace(parser_t &parser, io_streams_t &streams, int argc, wch
         return BUILTIN_STRING_ERROR;
     }
 
-    string_replacer_t *replacer;
+    std::unique_ptr<string_replacer_t> replacer;
     if (regex) {
-        replacer = new regex_replacer_t(argv[0], pattern, replacement, opts, streams);
+        replacer = make_unique<regex_replacer_t>(argv[0], pattern, replacement, opts, streams);
     } else {
-        replacer = new literal_replacer_t(argv[0], pattern, replacement, opts, streams);
+        replacer = make_unique<literal_replacer_t>(argv[0], pattern, replacement, opts, streams);
     }
 
     const wchar_t *arg;
     wcstring storage;
     while ((arg = string_get_arg(&i, argv, &storage, streams)) != 0) {
         if (!replacer->replace_matches(arg)) {
-            delete replacer;
             return BUILTIN_STRING_ERROR;
         }
     }
 
-    int rc = replacer->replace_count() > 0 ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
-    delete replacer;
-    return rc;
+    return replacer->replace_count() > 0 ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
 }
 
 /// Given iterators into a string (forward or reverse), splits the haystack iterators
@@ -954,6 +947,119 @@ static int string_split(parser_t &parser, io_streams_t &streams, int argc, wchar
 
     // We split something if we have more split values than args.
     return splits.size() > arg_count ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
+}
+
+// Helper function to abstract the repeat logic from string_repeat
+// returns the to_repeat string, repeated count times.
+static wcstring wcsrepeat(const wcstring &to_repeat, size_t count) {
+    wcstring repeated;
+    repeated.reserve(to_repeat.length() * count);
+
+    for (size_t j = 0; j < count; j++) {
+        repeated += to_repeat;
+    }
+
+    return repeated;
+}
+
+// Helper function to abstract the repeat until logic from string_repeat
+// returns the to_repeat string, repeated until max char has been reached.
+static wcstring wcsrepeat_until(const wcstring &to_repeat, size_t max) {
+    size_t count = max / to_repeat.length();
+    size_t mod = max % to_repeat.length();
+
+    return wcsrepeat(to_repeat, count) + to_repeat.substr(0, mod);
+}
+
+static int string_repeat(parser_t &parser, io_streams_t &streams, int argc, wchar_t **argv) {
+    const wchar_t *short_options = L":n:m:Nq";
+    const struct woption long_options[] = {{L"count", required_argument, 0, 'n'},
+                                           {L"max", required_argument, 0, 'm'},
+                                           {L"no-newline", no_argument, 0, 'N'},
+                                           {L"quiet", no_argument, 0, 'q'},
+                                           {0, 0, 0, 0}};
+
+    size_t count = 0;
+    size_t max = 0;
+    bool newline = true;
+    bool quiet = false;
+    int opt;
+    wgetopter_t w;
+
+    while ((opt = w.wgetopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
+        switch (opt) {
+            case 'n': {
+                long lcount = fish_wcstol(w.woptarg);
+                if (lcount < 0 || errno == ERANGE) {
+                    string_error(streams, _(L"%ls: Invalid count value '%ls'\n"), argv[0],
+                                 w.woptarg);
+                    return BUILTIN_STRING_ERROR;
+                } else if (errno) {
+                    string_error(streams, BUILTIN_ERR_NOT_NUMBER, argv[0], w.woptarg);
+                    return BUILTIN_STRING_ERROR;
+                }
+                count = static_cast<size_t>(lcount);
+                break;
+            }
+            case 'm': {
+                long lmax = fish_wcstol(w.woptarg);
+                if (lmax < 0 || errno == ERANGE) {
+                    string_error(streams, _(L"%ls: Invalid max value '%ls'\n"), argv[0], w.woptarg);
+                    return BUILTIN_STRING_ERROR;
+                } else if (errno) {
+                    string_error(streams, BUILTIN_ERR_NOT_NUMBER, argv[0], w.woptarg);
+                    return BUILTIN_STRING_ERROR;
+                }
+                max = static_cast<size_t>(lmax);
+                break;
+            }
+            case 'N': {
+                newline = false;
+                break;
+            }
+            case 'q': {
+                quiet = true;
+                break;
+            }
+            case ':': {
+                string_error(streams, STRING_ERR_MISSING, argv[0]);
+                return BUILTIN_STRING_ERROR;
+            }
+            case '?': {
+                string_unknown_option(parser, streams, argv[0], argv[w.woptind - 1]);
+                return BUILTIN_STRING_ERROR;
+            }
+            default: {
+                DIE("unexpected opt");
+                break;
+            }
+        }
+    }
+
+    int i = w.woptind;
+
+    if (string_args_from_stdin(streams) && argc > i) {
+        string_error(streams, BUILTIN_ERR_TOO_MANY_ARGUMENTS, argv[0]);
+        return BUILTIN_STRING_ERROR;
+    }
+
+    const wchar_t *to_repeat;
+    wcstring storage;
+    bool is_empty = true;
+
+    if ((to_repeat = string_get_arg(&i, argv, &storage, streams)) != NULL && *to_repeat) {
+        const wcstring word(to_repeat);
+        const bool rep_until = (0 < max && word.length() * count > max) || !count;
+        const wcstring repeated = rep_until ? wcsrepeat_until(word, max) : wcsrepeat(word, count);
+        is_empty = repeated.empty();
+
+        if (!quiet && !is_empty) {
+            streams.out.append(repeated);
+            if (newline) streams.out.append(L"\n");
+        }
+    }
+
+    return !is_empty ? BUILTIN_STRING_OK : BUILTIN_STRING_NONE;
 }
 
 static int string_sub(parser_t &parser, io_streams_t &streams, int argc, wchar_t **argv) {
@@ -1161,10 +1267,11 @@ static const struct string_subcommand {
                    wchar_t **argv);                       //!OCLINT(unused param)
 }
 
-string_subcommands[] = {
-    {L"escape", &string_escape}, {L"join", &string_join},       {L"length", &string_length},
-    {L"match", &string_match},   {L"replace", &string_replace}, {L"split", &string_split},
-    {L"sub", &string_sub},       {L"trim", &string_trim},       {0, 0}};
+string_subcommands[] = {{L"escape", &string_escape},   {L"join", &string_join},
+                        {L"length", &string_length},   {L"match", &string_match},
+                        {L"replace", &string_replace}, {L"split", &string_split},
+                        {L"sub", &string_sub},         {L"trim", &string_trim},
+                        {L"repeat", &string_repeat},   {0, 0}};
 
 /// The string builtin, for manipulating strings.
 int builtin_string(parser_t &parser, io_streams_t &streams, wchar_t **argv) {

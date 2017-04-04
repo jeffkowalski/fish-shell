@@ -6,15 +6,17 @@
 #include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>  // IWYU pragma: keep
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/types.h>
 #include <termios.h>
 #include <wchar.h>
+
 #include <memory>
 #include <sstream>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "fallback.h"  // IWYU pragma: keep
@@ -92,7 +94,7 @@ enum {
 };
 typedef unsigned int unescape_flags_t;
 
-// Flags for the escape() and escape_string() functions.
+// Flags for the escape_string() and escape_string() functions.
 enum {
     /// Escape all characters, including magic characters like the semicolon.
     ESCAPE_ALL = 1 << 0,
@@ -124,46 +126,25 @@ enum selection_direction_t {
     direction_deselect
 };
 
-inline bool selection_direction_is_cardinal(selection_direction_t dir) {
-    switch (dir) {
-        case direction_north:
-        case direction_east:
-        case direction_south:
-        case direction_west:
-        case direction_page_north:
-        case direction_page_south: {
-            return true;
-        }
-        case direction_next:
-        case direction_prev:
-        case direction_deselect: {
-            return false;
-        }
-        default: { abort(); }
-    }
-}
-
-/// Helper macro for errors.
-#define VOMIT_ON_FAILURE(a)         \
-    do {                            \
-        if (0 != (a)) {             \
-            VOMIT_ABORT(errno, #a); \
-        }                           \
-    } while (0)
-#define VOMIT_ON_FAILURE_NO_ERRNO(a) \
-    do {                             \
-        int err = (a);               \
-        if (0 != err) {              \
-            VOMIT_ABORT(err, #a);    \
-        }                            \
-    } while (0)
-#define VOMIT_ABORT(err, str)                                                                  \
-    do {                                                                                       \
-        int code = (err);                                                                      \
-        fprintf(stderr, "%s failed on line %d in file %s: %d (%s)\n", str, __LINE__, __FILE__, \
-                code, strerror(code));                                                         \
-        abort();                                                                               \
-    } while (0)
+/// Issue a debug message with printf-style string formating and automatic line breaking. The string
+/// will begin with the string \c program_name, followed by a colon and a whitespace.
+///
+/// Because debug is often called to tell the user about an error, before using wperror to give a
+/// specific error message, debug will never ever modify the value of errno.
+///
+/// \param level the priority of the message. Lower number means higher priority. Messages with a
+/// priority_number higher than \c debug_level will be ignored..
+/// \param msg the message format string.
+///
+/// Example:
+///
+/// <code>debug( 1, L"Pi = %.3f", M_PI );</code>
+///
+/// will print the string 'fish: Pi = 3.141', given that debug_level is 1 or higher, and that
+/// program_name is 'fish'.
+void __attribute__((noinline)) debug(int level, const char *msg, ...)
+    __attribute__((format(printf, 2, 3)));
+void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...);
 
 /// Exits without invoking destructors (via _exit), useful for code after fork.
 [[noreturn]] void exit_without_destructors(int code);
@@ -223,24 +204,34 @@ extern bool has_working_tty_timestamps;
         exit_without_destructors(1);        \
     }
 
-/// Exit program at once after emitting an error message.
-#define DIE(msg)                                                                      \
-    {                                                                                 \
-        fprintf(stderr, "fish: %s on line %ld of file %s, shutting down fish\n", msg, \
-                (long)__LINE__, __FILE__);                                            \
-        FATAL_EXIT();                                                                 \
-    }
+/// Exit the program at once after emitting an error message and stack trace if possible.
+/// We use our own private implementation of `assert()` for two reasons. First, some implementations
+/// are subtly broken. For example, using `printf()` which can cause problems when mixed with wide
+/// stdio functions and should be writing the message to stderr rather than stdout. Second, if
+/// possible it is useful to provide additional context such as a stack backtrace.
+#undef assert
+#undef __assert
+//#define assert(e)  do {(void)((e) ? ((void)0) : __assert(#e, __FILE__, __LINE__)); } while(false)
+#define assert(e) (e) ? ((void)0) : __assert(#e, __FILE__, __LINE__, 0)
+#define assert_with_errno(e) (e) ? ((void)0) : __assert(#e, __FILE__, __LINE__, errno)
+#define DIE(msg) __assert(msg, __FILE__, __LINE__, 0)
+#define DIE_WITH_ERRNO(msg) __assert(msg, __FILE__, __LINE__, errno)
+/// This macro is meant to be used with functions that return zero on success otherwise return an
+/// errno value. Most notably the pthread family of functions which we never expect to fail.
+#define DIE_ON_FAILURE(e)                             \
+    do {                                              \
+        int status = e;                               \
+        if (status != 0) {                            \
+            __assert(#e, __FILE__, __LINE__, status); \
+        }                                             \
+    } while (0)
 
-/// Exit program at once, leaving an error message about running out of memory.
-#define DIE_MEM()                                                                             \
-    {                                                                                         \
-        fwprintf(stderr, L"fish: Out of memory on line %ld of file %s, shutting down fish\n", \
-                 (long)__LINE__, __FILE__);                                                   \
-        FATAL_EXIT();                                                                         \
-    }
+[[noreturn]] void __assert(const char *msg, const char *file, size_t line, int error);
 
 /// Check if signals are blocked. If so, print an error message and return from the function
 /// performing this check.
+#define CHECK_BLOCK(retval)
+#if 0
 #define CHECK_BLOCK(retval)                                                \
     if (signal_is_blocked()) {                                             \
         debug(0, "function %s called while blocking signals. ", __func__); \
@@ -248,6 +239,7 @@ extern bool has_working_tty_timestamps;
         show_stackframe(L'E');                                             \
         return retval;                                                     \
     }
+#endif
 
 /// Shorthand for wgettext call in situations where a C-style string is needed (e.g., fwprintf()).
 #define _(wstr) wgettext(wstr).c_str()
@@ -457,15 +449,6 @@ inline wcstring to_string(const int &x) {
     return to_string(static_cast<long>(x));
 }
 
-// A hackish thing to simulate rvalue references in C++98. The idea is that you can define a
-// constructor to take a moved_ref<T> and then swap() out of it.
-template <typename T>
-struct moved_ref {
-    T &val;
-
-    explicit moved_ref(T &v) : val(v) {}
-};
-
 wchar_t **make_null_terminated_array(const wcstring_list_t &lst);
 char **make_null_terminated_array(const std::vector<std::string> &lst);
 
@@ -520,9 +503,9 @@ void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &arr,
 class mutex_lock_t {
    public:
     pthread_mutex_t mutex;
-    mutex_lock_t() { VOMIT_ON_FAILURE_NO_ERRNO(pthread_mutex_init(&mutex, NULL)); }
+    mutex_lock_t() { DIE_ON_FAILURE(pthread_mutex_init(&mutex, NULL)); }
 
-    ~mutex_lock_t() { VOMIT_ON_FAILURE_NO_ERRNO(pthread_mutex_destroy(&mutex)); }
+    ~mutex_lock_t() { DIE_ON_FAILURE(pthread_mutex_destroy(&mutex)); }
 };
 
 // Basic scoped lock class.
@@ -531,10 +514,16 @@ class scoped_lock {
     bool locked;
 
     // No copying.
-    scoped_lock &operator=(const scoped_lock &);
-    scoped_lock(const scoped_lock &);
+    scoped_lock &operator=(const scoped_lock &) = delete;
+    scoped_lock(const scoped_lock &) = delete;
 
    public:
+    scoped_lock(scoped_lock &&rhs) : lock_obj(rhs.lock_obj), locked(rhs.locked) {
+        // we acquire any locked state
+        // ensure the rhs doesn't try to unlock
+        rhs.locked = false;
+    }
+
     void lock(void);
     void unlock(void);
     explicit scoped_lock(pthread_mutex_t &mutex);
@@ -545,9 +534,12 @@ class scoped_lock {
 class rwlock_t {
    public:
     pthread_rwlock_t rwlock;
-    rwlock_t() { VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_init(&rwlock, NULL)); }
+    rwlock_t() { DIE_ON_FAILURE(pthread_rwlock_init(&rwlock, NULL)); }
 
-    ~rwlock_t() { VOMIT_ON_FAILURE_NO_ERRNO(pthread_rwlock_destroy(&rwlock)); }
+    ~rwlock_t() { DIE_ON_FAILURE(pthread_rwlock_destroy(&rwlock)); }
+
+    rwlock_t &operator=(const rwlock_t &) = delete;
+    rwlock_t(const rwlock_t &) = delete;
 };
 
 // Scoped lock class for rwlocks.
@@ -557,8 +549,8 @@ class scoped_rwlock {
     bool locked_shared;
 
     // No copying.
-    scoped_rwlock &operator=(const scoped_lock &);
-    explicit scoped_rwlock(const scoped_lock &);
+    scoped_rwlock &operator=(const scoped_lock &) = delete;
+    explicit scoped_rwlock(const scoped_lock &) = delete;
 
    public:
     void lock(void);
@@ -570,6 +562,54 @@ class scoped_rwlock {
     explicit scoped_rwlock(pthread_rwlock_t &rwlock, bool shared = false);
     explicit scoped_rwlock(rwlock_t &rwlock, bool shared = false);
     ~scoped_rwlock();
+};
+
+// An object wrapping a scoped lock and a value
+// This is returned from owning_lock.acquire()
+// Sample usage:
+//   owning_lock<string> locked_name;
+//   acquired_lock<string> name = name.acquire();
+//   name.value = "derp"
+//
+// Or for simple cases:
+//   name.acquire().value = "derp"
+//
+template <typename DATA>
+class acquired_lock {
+    scoped_lock lock;
+    acquired_lock(mutex_lock_t &lk, DATA *v) : lock(lk), value(*v) {}
+
+    template <typename T>
+    friend class owning_lock;
+
+   public:
+    // No copying, move only
+    acquired_lock &operator=(const acquired_lock &) = delete;
+    acquired_lock(const acquired_lock &) = delete;
+    acquired_lock(acquired_lock &&) = default;
+    acquired_lock &operator=(acquired_lock &&) = default;
+
+    DATA &value;
+};
+
+// A lock that owns a piece of data
+// Access to the data is only provided by taking the lock
+template <typename DATA>
+class owning_lock {
+    // No copying
+    owning_lock &operator=(const scoped_lock &) = delete;
+    owning_lock(const scoped_lock &) = delete;
+    owning_lock(owning_lock &&) = default;
+    owning_lock &operator=(owning_lock &&) = default;
+
+    mutex_lock_t lock;
+    DATA data;
+
+   public:
+    owning_lock(DATA &&d) : data(std::move(d)) {}
+    owning_lock() : data() {}
+
+    acquired_lock<DATA> acquire() { return {lock, &data}; }
 };
 
 /// A scoped manager to save the current value of some variable, and optionally set it to a new
@@ -585,33 +625,19 @@ class scoped_push {
    public:
     explicit scoped_push(T *r) : ref(r), saved_value(*r), restored(false) {}
 
-    scoped_push(T *r, const T &new_value) : ref(r), saved_value(*r), restored(false) {
-        *r = new_value;
+    scoped_push(T *r, T new_value) : ref(r), restored(false) {
+        saved_value = std::move(*ref);
+        *ref = std::move(new_value);
     }
 
     ~scoped_push() { restore(); }
 
     void restore() {
         if (!restored) {
-            std::swap(*ref, saved_value);
+            *ref = std::move(saved_value);
             restored = true;
         }
     }
-};
-
-/// Wrapper around wcstok.
-class wcstokenizer {
-    wchar_t *buffer, *str, *state;
-    const wcstring sep;
-
-    // No copying.
-    wcstokenizer &operator=(const wcstokenizer &);
-    wcstokenizer(const wcstokenizer &);
-
-   public:
-    wcstokenizer(const wcstring &s, const wcstring &separator);
-    bool next(wcstring &result);
-    ~wcstokenizer();
 };
 
 /// Appends a path component, with a / if necessary.
@@ -621,6 +647,16 @@ wcstring format_string(const wchar_t *format, ...);
 wcstring vformat_string(const wchar_t *format, va_list va_orig);
 void append_format(wcstring &str, const wchar_t *format, ...);
 void append_formatv(wcstring &str, const wchar_t *format, va_list ap);
+
+#ifdef __cpp_lib_make_unique
+using std::make_unique;
+#else
+/// make_unique implementation
+template <typename T, typename... Args>
+std::unique_ptr<T> make_unique(Args &&... args) {
+    return std::unique_ptr<T>(new T(std::forward<Args>(args)...));
+}
+#endif
 
 /// This functions returns the end of the quoted substring beginning at \c in. The type of quoting
 /// character is detemrined by examining \c in. Returns 0 on error.
@@ -659,32 +695,12 @@ ssize_t write_loop(int fd, const char *buff, size_t count);
 /// error.
 ssize_t read_loop(int fd, void *buff, size_t count);
 
-/// Issue a debug message with printf-style string formating and automatic line breaking. The string
-/// will begin with the string \c program_name, followed by a colon and a whitespace.
-///
-/// Because debug is often called to tell the user about an error, before using wperror to give a
-/// specific error message, debug will never ever modify the value of errno.
-///
-/// \param level the priority of the message. Lower number means higher priority. Messages with a
-/// priority_number higher than \c debug_level will be ignored..
-/// \param msg the message format string.
-///
-/// Example:
-///
-/// <code>debug( 1, L"Pi = %.3f", M_PI );</code>
-///
-/// will print the string 'fish: Pi = 3.141', given that debug_level is 1 or higher, and that
-/// program_name is 'fish'.
-void __attribute__((noinline)) debug(int level, const char *msg, ...)
-    __attribute__((format(printf, 2, 3)));
-void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...);
-
 /// Replace special characters with backslash escape sequences. Newline is replaced with \n, etc.
 ///
 /// \param in The string to be escaped
 /// \param flags Flags to control the escaping
 /// \return The escaped string
-wcstring escape(const wchar_t *in, escape_flags_t flags);
+wcstring escape_string(const wchar_t *in, escape_flags_t flags);
 wcstring escape_string(const wcstring &in, escape_flags_t flags);
 
 /// Expand backslashed escapes and substitute them with their unescaped counterparts. Also
@@ -764,9 +780,6 @@ void assert_is_not_forked_child(const char *who);
 #define ASSERT_IS_NOT_FORKED_CHILD_TRAMPOLINE(x) assert_is_not_forked_child(x)
 #define ASSERT_IS_NOT_FORKED_CHILD() ASSERT_IS_NOT_FORKED_CHILD_TRAMPOLINE(__FUNCTION__)
 
-/// Macro to help suppress potentially unused variable warnings.
-#define USE(var) (void)(var)
-
 extern "C" {
 __attribute__((noinline)) void debug_thread_error(void);
 }
@@ -830,18 +843,15 @@ static const wchar_t *enum_to_str(T enum_val, const enum_map<T> map[]) {
     return NULL;
 };
 
-#if !defined(HAVE_WCSDUP) && defined(HAVE_STD__WCSDUP)
-using std::wcsdup;
-#endif
+void redirect_tty_output();
 
-#if !defined(HAVE_WCSCASECMP) && defined(HAVE_STD__WCSCASECMP)
-using std::wcscasecmp;
+// Minimum allowed terminal size and default size if the detected size is not reasonable.
+#define MIN_TERM_COL 20
+#define MIN_TERM_ROW 2
+#define DFLT_TERM_COL 80
+#define DFLT_TERM_ROW 24
+#define DFLT_TERM_COL_STR L"80"
+#define DFLT_TERM_ROW_STR L"24"
+void invalidate_termsize(bool invalidate_vars = false);
+struct winsize get_current_winsize();
 #endif
-
-#if !defined(HAVE_WCSNCASECMP) && defined(HAVE_STD__WCSNCASECMP)
-using std::wcsncasecmp;
-#endif
-
-#endif
-
-void redirect_tty_output(void);

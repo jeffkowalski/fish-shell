@@ -64,11 +64,12 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     # Add way to kill current command line while in insert mode.
     bind -M insert \cc __fish_cancel_commandline
     # Add a way to switch from insert to normal (command) mode.
-    bind -M insert -m default \e backward-char force-repaint
+    # Note if we are paging, we want to stay in insert mode
+    # See #2871
+    bind -M insert \e "if commandline -P; commandline -f cancel; else; set fish_bind_mode default; commandline -f backward-char force-repaint; end"
 
     # Default (command) mode
     bind :q exit
-    bind \cd exit
     bind -m insert \cc __fish_cancel_commandline
     bind -M default h backward-char
     bind -M default l forward-char
@@ -110,10 +111,17 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     bind e forward-char forward-word backward-char
     bind E forward-bigword backward-char
 
-    bind x delete-char
-    bind X backward-delete-char
+    # OS X SnowLeopard doesn't have these keys. Don't show an annoying error message.
+    # Vi/Vim doesn't support these keys in insert mode but that seems silly so we do so anyway.
+    bind -M insert -k home beginning-of-line 2>/dev/null
+    bind -M default -k home beginning-of-line 2>/dev/null
+    bind -M insert -k end end-of-line 2>/dev/null
+    bind -M default -k end end-of-line 2>/dev/null
 
-    bind -k dc delete-char
+    bind -M default x delete-char
+    bind -M default X backward-delete-char
+    bind -M insert -k dc delete-char
+    bind -M default -k dc delete-char
 
     # Backspace deletes a char in insert mode, but not in normal/default mode.
     bind -M insert -k backspace backward-delete-char
@@ -122,7 +130,8 @@ function fish_vi_key_bindings --description 'vi-like key bindings for fish'
     bind -M default \ch backward-char
     bind -M insert \x7f backward-delete-char
     bind -M default \x7f backward-char
-    bind \e\[3\;2~ backward-delete-char # Mavericks Terminal.app shift-delete
+    bind -M insert \e\[3\;2~ backward-delete-char # Mavericks Terminal.app shift-ctrl-delete
+    bind -M default \e\[3\;2~ backward-delete-char # Mavericks Terminal.app shift-ctrl-delete
 
     bind dd kill-whole-line
     bind D kill-line

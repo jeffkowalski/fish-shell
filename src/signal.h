@@ -27,10 +27,10 @@ void signal_set_handlers();
 void signal_handle(int sig, int do_handle);
 
 /// Block all signals.
-void signal_block();
+void signal_block(bool force = false);
 
 /// Unblock all signals.
-void signal_unblock();
+void signal_unblock(bool force = false);
 
 /// Returns true if signals are being blocked.
 bool signal_is_blocked();
@@ -38,4 +38,5 @@ bool signal_is_blocked();
 /// Returns signals with non-default handlers.
 void get_signals_with_handlers(sigset_t *set);
 
+extern bool ignore_signal_block;
 #endif

@@ -2,12 +2,20 @@
 #include "config.h"  // IWYU pragma: keep
 
 #include <arpa/inet.h>  // IWYU pragma: keep
-#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+// We need the sys/file.h for the flock() declaration on Linux but not OS X.
+#include <sys/file.h>  // IWYU pragma: keep
+// We need the ioctl.h header so we can check if SIOCGIFHWADDR is defined by it so we know if we're
+// on a Linux system.
 #include <limits.h>
 #include <netinet/in.h>  // IWYU pragma: keep
+#include <sys/ioctl.h>   // IWYU pragma: keep
+#if !defined(__APPLE__) && !defined(__CYGWIN__)
 #include <pwd.h>
+#endif
+#include <stddef.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __CYGWIN__
@@ -16,19 +24,16 @@
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>  // IWYU pragma: keep
 #endif
-#include <sys/socket.h>
 #include <sys/stat.h>
-#include <sys/time.h>  // IWYU pragma: keep
-#include <sys/types.h>
-// We need the sys/file.h for the flock() declaration on Linux but not OS X.
-#include <sys/file.h>  // IWYU pragma: keep
-// We need the ioctl.h header so we can check if SIOCGIFHWADDR is defined by it so we know if we're
-// on a Linux system.
-#include <sys/ioctl.h>  // IWYU pragma: keep
+#include <sys/time.h>   // IWYU pragma: keep
+#include <sys/types.h>  // IWYU pragma: keep
 #include <unistd.h>
 #include <wchar.h>
+
+#include <atomic>
 #include <map>
 #include <string>
+#include <type_traits>
 #include <utility>
 
 #include "common.h"
@@ -48,7 +53,7 @@
 #ifdef __HAIKU__
 #define _BSD_SOURCE
 #include <bsd/ifaddrs.h>
-#endif //Haiku
+#endif  // Haiku
 
 // NAME_MAX is not defined on Solaris and suggests the use of pathconf()
 // There is no obvious sensible pathconf() for shared memory and _XPG_NAME_MAX
@@ -95,7 +100,8 @@ static const wcstring default_vars_path() {
     return vars_filename_in_directory(path);
 }
 
-/// Check, and create if necessary, a secure runtime path Derived from tmux.c in tmux
+#if !defined(__APPLE__) && !defined(__CYGWIN__)
+/// Check, and create if necessary, a secure runtime path. Derived from tmux.c in tmux
 /// (http://tmux.sourceforge.net/).
 static int check_runtime_path(const char *path) {
     // Copyright (c) 2007 Nicholas Marriott <nicm@users.sourceforge.net>
@@ -143,9 +149,8 @@ static wcstring get_runtime_path() {
         std::string tmpdir = "/tmp/fish.";
         tmpdir.append(uname);
         if (check_runtime_path(tmpdir.c_str()) != 0) {
-            debug(0,
-                  L"Runtime path not available. Try deleting the directory %s and restarting fish.",
-                  tmpdir.c_str());
+            debug(0, L"Runtime path not available.");
+            debug(0, L"Try deleting the directory %s and restarting fish.", tmpdir.c_str());
         } else {
             result = str2wcstring(tmpdir);
         }
@@ -159,6 +164,7 @@ static wcstring default_named_pipe_path() {
     // Note that vars_filename_in_directory returns empty string when passed the empty string.
     return vars_filename_in_directory(get_runtime_path());
 }
+#endif
 
 /// Test if the message msg contains the command cmd.
 static bool match(const wchar_t *msg, const wchar_t *cmd) {
@@ -258,7 +264,7 @@ static bool append_file_entry(fish_message_type_t type, const wcstring &key_in,
 
 env_universal_t::env_universal_t(const wcstring &path)
     : explicit_vars_path(path), tried_renaming(false), last_read_file(kInvalidFileID) {
-    VOMIT_ON_FAILURE(pthread_mutex_init(&lock, NULL));
+    DIE_ON_FAILURE(pthread_mutex_init(&lock, NULL));
 }
 
 env_universal_t::~env_universal_t() { pthread_mutex_destroy(&lock); }
@@ -390,13 +396,13 @@ void env_universal_t::acquire_variables(var_table_t *vars_to_acquire) {
             // source entry in vars since we are about to get rid of this->vars entirely.
             var_entry_t &src = src_iter->second;
             var_entry_t &dst = (*vars_to_acquire)[key];
-            dst.val.swap(src.val);
+            dst.val = std::move(src.val);
             dst.exportv = src.exportv;
         }
     }
 
     // We have constructed all the callbacks and updated vars_to_acquire. Acquire it!
-    this->vars.swap(*vars_to_acquire);
+    this->vars = std::move(*vars_to_acquire);
 }
 
 void env_universal_t::load_from_fd(int fd, callback_data_list_t *callbacks) {
@@ -499,10 +505,10 @@ bool env_universal_t::move_new_vars_file_into_place(const wcstring &src, const w
 }
 
 bool env_universal_t::load() {
-    scoped_lock locker(lock);
     callback_data_list_t callbacks;
     const wcstring vars_path =
         explicit_vars_path.empty() ? default_vars_path() : explicit_vars_path;
+    scoped_lock locker(lock);
     bool success = load_from_path(vars_path, &callbacks);
     if (!success && !tried_renaming && errno == ENOENT) {
         // We failed to load, because the file was not found. Older fish used the hostname only. Try
@@ -534,15 +540,7 @@ bool env_universal_t::open_temporary_file(const wcstring &directory, wcstring *o
 
     for (size_t attempt = 0; attempt < 10 && !success; attempt++) {
         char *narrow_str = wcs2str(tmp_name_template.c_str());
-#if HAVE_MKOSTEMP
-        int result_fd = mkostemp(narrow_str, O_CLOEXEC);
-#else
-        int result_fd = mkstemp(narrow_str);
-        if (result_fd != -1) {
-            fcntl(result_fd, F_SETFD, FD_CLOEXEC);
-        }
-#endif
-
+        int result_fd = fish_mkstemp_cloexec(narrow_str);
         saved_errno = errno;
         success = result_fd != -1;
         *out_fd = result_fd;
@@ -586,7 +584,7 @@ bool env_universal_t::open_and_acquire_lock(const wcstring &path, int *out_fd) {
     //
     // We pass O_RDONLY with O_CREAT; this creates a potentially empty file. We do this so that we
     // have something to lock on.
-    static bool do_locking = true;
+    static std::atomic<bool> do_locking(true);
     bool needs_lock = true;
     int flags = O_RDWR | O_CREAT;
 
@@ -853,7 +851,7 @@ void env_universal_t::parse_message_internal(const wcstring &msgstr, var_table_t
             if (unescape_string(tmp + 1, &val, 0)) {
                 var_entry_t &entry = (*vars)[key];
                 entry.exportv = exportv;
-                entry.val.swap(val);  // acquire the value
+                entry.val = std::move(val);  // acquire the value
             }
         } else {
             debug(1, PARSE_ERR, msg);
@@ -874,6 +872,7 @@ void env_universal_t::parse_message_internal(const wcstring &msgstr, var_table_t
 
 // Linux
 #include <net/if.h>
+#include <sys/socket.h>
 static bool get_mac_address(unsigned char macaddr[MAC_ADDRESS_MAX_LEN],
                             const char *interface = "eth0") {
     bool result = false;
@@ -896,6 +895,7 @@ static bool get_mac_address(unsigned char macaddr[MAC_ADDRESS_MAX_LEN],
 // OS X and BSD
 #include <ifaddrs.h>
 #include <net/if_dl.h>
+#include <sys/socket.h>
 static bool get_mac_address(unsigned char macaddr[MAC_ADDRESS_MAX_LEN],
                             const char *interface = "en0") {
     // BSD, Mac OS X
@@ -1121,10 +1121,8 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
         uint32_t status =
             notify_register_file_descriptor(name.c_str(), &this->notify_fd, 0, &this->token);
         if (status != NOTIFY_STATUS_OK) {
-            fprintf(stderr,
-                    "Warning: notify_register_file_descriptor() failed with status %u. Universal "
-                    "variable notifications may not be received.",
-                    status);
+            debug(1, "notify_register_file_descriptor() failed with status %u.", status);
+            debug(1, "Universal variable notifications may not be received.");
         }
         if (this->notify_fd >= 0) {
             // Mark us for non-blocking reads, and CLO_EXEC.
@@ -1184,8 +1182,10 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
 #endif
 };
 
-#define NAMED_PIPE_FLASH_DURATION_USEC (1000000 / 10)
-#define SUSTAINED_READABILITY_CLEANUP_DURATION_USEC (1000000 * 5)
+#if !defined(__APPLE__) && !defined(__CYGWIN__)
+#define NAMED_PIPE_FLASH_DURATION_USEC (1e5)
+#define SUSTAINED_READABILITY_CLEANUP_DURATION_USEC (5 * 1e6)
+#endif
 
 // Named-pipe based notifier. All clients open the same named pipe for reading and writing. The
 // pipe's readability status is a trigger to enter polling mode.
@@ -1347,7 +1347,7 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
 #else  // this class isn't valid on this system
    public:
     universal_notifier_named_pipe_t(const wchar_t *test_path) {
-        auto x = test_path;  // silence "unused parameter" warning
+        static_cast<void>(test_path);
         DIE("universal_notifier_named_pipe_t cannot be used on this system");
     }
 #endif
@@ -1364,22 +1364,22 @@ universal_notifier_t::notifier_strategy_t universal_notifier_t::resolve_default_
 }
 
 universal_notifier_t &universal_notifier_t::default_notifier() {
-    static universal_notifier_t *result =
+    static std::unique_ptr<universal_notifier_t> result =
         new_notifier_for_strategy(universal_notifier_t::resolve_default_strategy());
     return *result;
 }
 
-universal_notifier_t *universal_notifier_t::new_notifier_for_strategy(
+std::unique_ptr<universal_notifier_t> universal_notifier_t::new_notifier_for_strategy(
     universal_notifier_t::notifier_strategy_t strat, const wchar_t *test_path) {
     switch (strat) {
         case strategy_notifyd: {
-            return new universal_notifier_notifyd_t();
+            return make_unique<universal_notifier_notifyd_t>();
         }
         case strategy_shmem_polling: {
-            return new universal_notifier_shmem_poller_t();
+            return make_unique<universal_notifier_shmem_poller_t>();
         }
         case strategy_named_pipe: {
-            return new universal_notifier_named_pipe_t(test_path);
+            return make_unique<universal_notifier_named_pipe_t>(test_path);
         }
         default: {
             debug(0, "Unsupported universal notifier strategy %d\n", strat);

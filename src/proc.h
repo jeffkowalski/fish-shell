@@ -5,13 +5,15 @@
 #define FISH_PROC_H
 #include "config.h"  // IWYU pragma: keep
 
-#include <assert.h>
 #include <signal.h>
 #include <stddef.h>
 #include <sys/time.h>  // IWYU pragma: keep
 #include <termios.h>
 #include <unistd.h>
+
 #include <list>
+#include <memory>
+#include <vector>
 
 #include "common.h"
 #include "io.h"
@@ -20,17 +22,20 @@
 /// The status code use when a command was not found.
 #define STATUS_UNKNOWN_COMMAND 127
 
-/// The status code use when an unknown error occured during execution of a command.
+/// The status code used when an unknown error occured during execution of a command.
 #define STATUS_NOT_EXECUTABLE 126
 
-/// The status code use when an unknown error occured during execution of a command.
+/// The status code used when an unknown error occured during execution of a command.
 #define STATUS_EXEC_FAIL 125
 
-/// The status code use when a wildcard had no matches.
+/// The status code used when a wildcard had no matches.
 #define STATUS_UNMATCHED_WILDCARD 124
 
-/// The status code use when illegal command name is encountered.
+/// The status code used when illegal command name is encountered.
 #define STATUS_ILLEGAL_CMD 123
+
+/// The status code used when `read` is asked to consume too much data.
+#define STATUS_READ_TOO_MUCH 122
 
 /// The status code used for normal exit in a  builtin.
 #define STATUS_BUILTIN_OK 0
@@ -90,7 +95,10 @@ class process_t {
 
    public:
     process_t();
-    ~process_t();
+
+    // Note whether we are the first and/or last in the job
+    bool is_first_in_job;
+    bool is_last_in_job;
 
     /// Type of process. Can be one of \c EXTERNAL, \c INTERNAL_BUILTIN, \c INTERNAL_FUNCTION, \c
     /// INTERNAL_EXEC.
@@ -140,8 +148,6 @@ class process_t {
     volatile int status;
     /// Special flag to tell the evaluation function for count to print the help information.
     int count_help_magic;
-    /// Next process in pipeline. We own this and we are responsible for deleting it.
-    process_t *next;
 #ifdef HAVE__PROC_SELF_STAT
     /// Last time of cpu time check.
     struct timeval last_time;
@@ -150,8 +156,11 @@ class process_t {
 #endif
 };
 
+typedef std::unique_ptr<process_t> process_ptr_t;
+typedef std::vector<process_ptr_t> process_list_t;
+
 /// Constants for the flag variable in the job struct.
-enum {
+enum job_flag_t {
     /// Whether the user has been told about stopped job.
     JOB_NOTIFIED = 1 << 0,
     /// Whether this job is in the foreground.
@@ -185,8 +194,8 @@ class job_t {
     const io_chain_t block_io;
 
     // No copying.
-    job_t(const job_t &rhs);
-    void operator=(const job_t &);
+    job_t(const job_t &rhs) = delete;
+    void operator=(const job_t &) = delete;
 
    public:
     job_t(job_id_t jobid, const io_chain_t &bio);
@@ -204,9 +213,9 @@ class job_t {
     /// Sets the command.
     void set_command(const wcstring &cmd) { command_str = cmd; }
 
-    /// A linked list of all the processes in this job. We are responsible for deleting this when we
-    /// are deallocated.
-    process_t *first_process;
+    /// All the processes in this job.
+    process_list_t processes;
+
     /// Process group ID for the process group that this job is running in.
     pid_t pgid;
     /// The saved terminal modes of this job. This needs to be saved so that we can restore the
@@ -218,6 +227,10 @@ class job_t {
     const job_id_t job_id;
     /// Bitset containing information about the job. A combination of the JOB_* constants.
     unsigned int flags;
+
+    // Get and set flags
+    bool get_flag(job_flag_t flag) const;
+    void set_flag(job_flag_t flag, bool set);
 
     /// Returns the block IO redirections associated with the job. These are things like the IO
     /// redirections associated with the begin...end statement.
@@ -245,12 +258,12 @@ extern int is_login;
 /// Whether we are running an event handler.
 extern int is_event;
 
-typedef std::list<job_t *> job_list_t;
+// List of jobs. We sometimes mutate this while iterating - hence it must be a list, not a vector
+typedef std::list<shared_ptr<job_t>> job_list_t;
 
 bool job_list_is_empty(void);
 
-/// A class to aid iteration over jobs list. Note this is used from a signal handler, so it must be
-/// careful to not allocate memory.
+/// A class to aid iteration over jobs list
 class job_iterator_t {
     job_list_t *const job_list;
     job_list_t::iterator current, end;
@@ -261,7 +274,7 @@ class job_iterator_t {
     job_t *next() {
         job_t *job = NULL;
         if (current != end) {
-            job = *current;
+            job = current->get();
             ++current;
         }
         return job;
@@ -294,20 +307,11 @@ extern int job_control_mode;
 /// anything.
 extern int no_exec;
 
-/// Add the specified flag to the bitset of flags for the specified job.
-void job_set_flag(job_t *j, unsigned int flag, int set);
-
-/// Returns one if the specified flag is set in the specified job, 0 otherwise.
-int job_get_flag(const job_t *j, unsigned int flag);
-
 /// Sets the status of the last process to exit.
 void proc_set_last_status(int s);
 
 /// Returns the status of the last process to exit.
 int proc_get_last_status();
-
-/// Remove the specified job.
-void job_free(job_t *j);
 
 /// Promotes a job to the front of the job list.
 void job_promote(job_t *job);
@@ -343,7 +347,7 @@ void job_handle_signal(int signal, siginfo_t *info, void *con);
 int job_signal(job_t *j, int signal);
 
 /// Mark a process as failed to execute (and therefore completed).
-void job_mark_process_as_failed(const job_t *job, process_t *p);
+void job_mark_process_as_failed(job_t *job, const process_t *p);
 
 #ifdef HAVE__PROC_SELF_STAT
 /// Use the procfs filesystem to look up how many jiffies of cpu time was used by this process. This

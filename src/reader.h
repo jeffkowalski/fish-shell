@@ -5,6 +5,7 @@
 #define FISH_READER_H
 
 #include <stddef.h>
+
 #include <string>
 #include <vector>
 
@@ -195,7 +196,7 @@ bool shell_is_exiting();
 void reader_handle_sigint();
 
 /// This function returns true if fish is exiting by force, i.e. because stdin died.
-int reader_exit_forced();
+bool reader_exit_forced();
 
 /// Test if the given shell command contains errors. Uses parser_test for testing. Suitable for
 /// reader_set_test_function().

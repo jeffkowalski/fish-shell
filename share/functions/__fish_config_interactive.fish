@@ -38,7 +38,7 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # bump this to 2_4_0 when rolling release if anything changes after 9/10/2016
     if not set -q __fish_init_2_39_8
         # Regular syntax highlighting colors
-        # XXX - not quite the same as default colors in web config. Sync these up. 
+        # XXX - not quite the same as default colors in web config. Sync these up.
         set -q fish_color_normal
         or set -U fish_color_normal normal
         set -q fish_color_command
@@ -109,10 +109,25 @@ function __fish_config_interactive -d "Initializations that should be performed 
     #
     # Generate man page completions if not present.
     #
-    if not test -d $userdatadir/fish/generated_completions
-        command -s python >/dev/null # feature needs python, don't try this on launch without it (#3588)
-        # fish_update_completions is a function, so it can not be directly run in background.
-        and eval (string escape "$__fish_bin_dir/fish") "-c 'fish_update_completions >/dev/null ^/dev/null' &"
+    # Don't do this if we're being invoked as part of running unit tests.
+    if not set -q FISH_UNIT_TESTS_RUNNING
+        if not test -d $userdatadir/fish/generated_completions
+            # Generating completions from man pages needs python (see issue #3588).
+
+            # We cannot simply do `fish_update_completions &` because it is a function.
+            # We cannot do `eval` since it is a function.
+            # We don't want to call `fish -c` since that is unnecessary and sources config.fish again.
+            # Hence we'll call python directly.
+            # c_m_p.py should work with any python version.
+            set -l update_args -B $__fish_datadir/tools/create_manpage_completions.py --manpath --cleanup-in '~/.config/fish/completions' --cleanup-in '~/.config/fish/generated_completions'
+            if command -qs python
+                python $update_args >/dev/null ^/dev/null &
+            else if command -qs python2
+                python2 $update_args >/dev/null ^/dev/null &
+            else if command -qs python3
+                python3 $update_args >/dev/null ^/dev/null &
+            end
+        end
     end
 
     #
@@ -217,6 +232,23 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # Load key bindings
     __fish_reload_key_bindings
 
+    if not set -q FISH_UNIT_TESTS_RUNNING
+        # Enable bracketed paste before every prompt (see __fish_shared_bindings for the bindings).
+        # Disable it for unit tests so we don't have to add the sequences to bind.expect
+        function __fish_enable_bracketed_paste --on-event fish_prompt
+            printf "\e[?2004h"
+        end
+
+        # Disable BP before every command because that might not support it.
+        function __fish_disable_bracketed_paste --on-event fish_preexec
+            printf "\e[?2004l"
+        end
+
+        # Tell the terminal we support BP. Since we are in __f_c_i, the first fish_prompt
+        # has already fired.
+        __fish_enable_bracketed_paste
+    end
+
     function __fish_winch_handler --on-signal WINCH -d "Repaint screen when window changes size"
         commandline -f repaint
     end
@@ -229,14 +261,6 @@ function __fish_config_interactive -d "Initializations that should be performed 
             or test -n "$INSIDE_EMACS"
             and return
             printf \e\]7\;file://\%s\%s\a (hostname) (echo -n $PWD | __fish_urlencode)
-        end
-        if test "$TERM_PROGRAM" = "Apple_Terminal"
-            # Suppress duplicative title display on Terminal.app
-            if not functions -q fish_title
-                echo -n \e\]0\;\a # clear existing title
-                function fish_title -d 'no-op terminal title'
-                end
-            end
         end
         __update_cwd_osc # Run once because we might have already inherited a PWD from an old tab
     end

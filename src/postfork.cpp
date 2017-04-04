@@ -11,6 +11,7 @@
 #if FISH_USE_POSIX_SPAWN
 #include <spawn.h>
 #endif
+#include <wchar.h>
 
 #include "common.h"
 #include "exec.h"
@@ -68,7 +69,7 @@ static void debug_safe_int(int level, const char *format, int val) {
 bool set_child_group(job_t *j, process_t *p, int print_errors) {
     bool retval = true;
 
-    if (job_get_flag(j, JOB_CONTROL)) {
+    if (j->get_flag(JOB_CONTROL)) {
         if (!j->pgid) {
             j->pgid = p->pid;
         }
@@ -103,8 +104,14 @@ bool set_child_group(job_t *j, process_t *p, int print_errors) {
         j->pgid = getpid();
     }
 
-    if (job_get_flag(j, JOB_TERMINAL) && job_get_flag(j, JOB_FOREGROUND)) {  //!OCLINT(early exit)
-        int result = tcsetpgrp(STDIN_FILENO, j->pgid);  // to avoid "collapsible if statements" warn
+    if (j->get_flag(JOB_TERMINAL) && j->get_flag(JOB_FOREGROUND)) {  //!OCLINT(early exit)
+        int result = -1;
+        errno = EINTR;
+        while (result == -1 && errno == EINTR) {
+            signal_block(true);
+            result = tcsetpgrp(STDIN_FILENO, j->pgid);
+            signal_unblock(true);
+        }
         if (result == -1) {
             if (errno == ENOTTY) redirect_tty_output();
             if (print_errors) {
@@ -141,7 +148,7 @@ static int handle_child_io(const io_chain_t &io_chain) {
 
         switch (io->io_mode) {
             case IO_CLOSE: {
-                if (log_redirections) fprintf(stderr, "%d: close %d\n", getpid(), io->fd);
+                if (log_redirections) fwprintf(stderr, L"%d: close %d\n", getpid(), io->fd);
                 if (close(io->fd)) {
                     debug_safe_int(0, "Failed to close file descriptor %s", io->fd);
                     safe_perror("close");
@@ -180,7 +187,7 @@ static int handle_child_io(const io_chain_t &io_chain) {
             case IO_FD: {
                 int old_fd = static_cast<const io_fd_t *>(io)->old_fd;
                 if (log_redirections)
-                    fprintf(stderr, "%d: fd dup %d to %d\n", getpid(), old_fd, io->fd);
+                    fwprintf(stderr, L"%d: fd dup %d to %d\n", getpid(), old_fd, io->fd);
 
                 // This call will sometimes fail, but that is ok, this is just a precausion.
                 close(io->fd);
@@ -200,14 +207,14 @@ static int handle_child_io(const io_chain_t &io_chain) {
                 // fd). If it's 1, we're connecting to the write end (second pipe fd).
                 unsigned int write_pipe_idx = (io_pipe->is_input ? 0 : 1);
 #if 0
-                debug( 0, L"%ls %ls on fd %d (%d %d)", write_pipe?L"write":L"read",
-                        (io->io_mode == IO_BUFFER)?L"buffer":L"pipe", io->fd, io->pipe_fd[0],
-                        io->pipe_fd[1]);
+                debug(0, L"%ls %ls on fd %d (%d %d)", write_pipe?L"write":L"read",
+                      (io->io_mode == IO_BUFFER)?L"buffer":L"pipe", io->fd, io->pipe_fd[0],
+                      io->pipe_fd[1]);
 #endif
                 if (log_redirections)
-                    fprintf(stderr, "%d: %s dup %d to %d\n", getpid(),
-                            io->io_mode == IO_BUFFER ? "buffer" : "pipe",
-                            io_pipe->pipe_fd[write_pipe_idx], io->fd);
+                    fwprintf(stderr, L"%d: %s dup %d to %d\n", getpid(),
+                             io->io_mode == IO_BUFFER ? "buffer" : "pipe",
+                             io_pipe->pipe_fd[write_pipe_idx], io->fd);
                 if (dup2(io_pipe->pipe_fd[write_pipe_idx], io->fd) != io->fd) {
                     debug_safe(1, LOCAL_PIPE_ERROR);
                     safe_perror("dup2");
@@ -312,7 +319,7 @@ bool fork_actions_make_spawn_properties(posix_spawnattr_t *attr,
 
     bool should_set_parent_group_id = false;
     int desired_parent_group_id = 0;
-    if (job_get_flag(j, JOB_CONTROL)) {
+    if (j->get_flag(JOB_CONTROL)) {
         should_set_parent_group_id = true;
 
         // PCA: I'm quite fuzzy on process groups, but I believe that the default value of 0 means
@@ -498,15 +505,23 @@ void safe_report_exec_error(int err, const char *actual_cmd, const char *const *
 /// Perform output from builtins. May be called from a forked child, so don't do anything that may
 /// allocate memory, etc.
 bool do_builtin_io(const char *out, size_t outlen, const char *err, size_t errlen) {
+    int saved_errno = 0;
     bool success = true;
     if (out && outlen && write_loop(STDOUT_FILENO, out, outlen) < 0) {
-        int e = errno;
-        debug_safe(0, "Error while writing to stdout");
-        safe_perror("write_loop");
+        saved_errno = errno;
+        if (errno != EPIPE) {
+            debug_safe(0, "Error while writing to stdout");
+            errno = saved_errno;
+            safe_perror("write_loop");
+        }
         success = false;
-        errno = e;
     }
 
-    if (err && errlen && write_loop(STDERR_FILENO, err, errlen) < 0) success = false;
+    if (err && errlen && write_loop(STDERR_FILENO, err, errlen) < 0) {
+        saved_errno = errno;
+        success = false;
+    }
+
+    errno = saved_errno;
     return success;
 }

@@ -1,8 +1,9 @@
 // Functions used for implementing the complete builtin.
 #include "config.h"  // IWYU pragma: keep
 
-#include <stdlib.h>
+#include <stddef.h>
 #include <wchar.h>
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -184,13 +185,11 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 break;
             }
             case 'u': {
-                streams.err.append_format(
-                    _(L"%ls: -u / --unauthoritative flags have been removed\n"), cmd);
+                // This option was removed in commit 1911298 and is now a no-op.
                 break;
             }
             case 'A': {
-                streams.err.append_format(_(L"%ls: -A / --authoritative flags have been removed\n"),
-                                          cmd);
+                // This option was removed in commit 1911298 and is now a no-op.
                 break;
             }
             case 's': {

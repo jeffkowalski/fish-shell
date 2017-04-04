@@ -7,6 +7,7 @@
 // compiling several modules that include this header because they use symbols which are defined as
 // macros in <term.h>.
 // IWYU pragma: no_include <term.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <unistd.h>
 // The following include must be kept despite what IWYU says. That's because of the interaction
@@ -22,6 +23,11 @@
 /// the system one is busted.
 int fish_wcwidth(wchar_t wc);
 int fish_wcswidth(const wchar_t *str, size_t n);
+
+// Replacement for mkostemp(str, O_CLOEXEC)
+// This uses mkostemp if available,
+// otherwise it uses mkstemp followed by fcntl
+int fish_mkstemp_cloexec(char *);
 
 #ifndef WCHAR_MAX
 /// This _should_ be defined by wchar.h, but e.g. OpenBSD doesn't.
@@ -63,6 +69,12 @@ char *tparm_solaris_kludge(char *str, ...);
 /// On other platforms, use what's detected at build time.
 #if __APPLE__
 #if __DARWIN_C_LEVEL >= 200809L
+// We have to explicitly redeclare these as weak,
+// since we are forced to set the MIN_REQUIRED availability macro to 10.7
+// to use libc++, which in turn exposes these as strong
+wchar_t *wcsdup(const wchar_t *) __attribute__((weak_import));
+int wcscasecmp(const wchar_t *, const wchar_t *) __attribute__((weak_import));
+int wcsncasecmp(const wchar_t *, const wchar_t *, size_t n) __attribute__((weak_import));
 wchar_t *wcsdup_use_weak(const wchar_t *);
 int wcscasecmp_use_weak(const wchar_t *, const wchar_t *);
 int wcsncasecmp_use_weak(const wchar_t *s1, const wchar_t *s2, size_t n);
@@ -77,16 +89,32 @@ wchar_t *wcsndup(const wchar_t *in, size_t c);
 #endif
 #else  //__APPLE__
 
-/// These functions are missing from Solaris 10
+/// These functions are missing from Solaris 10, and only accessible from
+/// Solaris 11 in the std:: namespace.
 #ifndef HAVE_WCSDUP
+#ifdef HAVE_STD__WCSDUP
+using std::wcsdup;
+#else
 wchar_t *wcsdup(const wchar_t *in);
-#endif
+#endif  // HAVE_STD__WCSDUP
+#endif  // HAVE_WCSDUP
+
 #ifndef HAVE_WCSCASECMP
+#ifdef HAVE_STD__WCSCASECMP
+using std::wcscasecmp;
+#else
 int wcscasecmp(const wchar_t *a, const wchar_t *b);
-#endif
+#endif  // HAVE_STD__WCSCASECMP
+#endif  // HAVE_WCSCASECMP
+
 #ifndef HAVE_WCSNCASECMP
+#ifdef HAVE_STD__WCSNCASECMP
+using std::wcsncasecmp;
+#else
 int wcsncasecmp(const wchar_t *s1, const wchar_t *s2, size_t n);
-#endif
+#endif  // HAVE_STD__WCSNCASECMP
+#endif  // HAVE_WCSNCASECMP
+
 #ifndef HAVE_DIRFD
 #ifndef __XOPEN_OR_POSIX
 #define dirfd(d) (d->dd_fd)

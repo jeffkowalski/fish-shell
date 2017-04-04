@@ -2,7 +2,6 @@
 #define FISH_NO_ISW_WRAPPERS
 #include "config.h"
 
-#include <assert.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -17,8 +16,8 @@
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
+
 #include <map>
-#include <memory>
 #include <string>
 
 #include "common.h"
@@ -38,12 +37,8 @@ const file_id_t kInvalidFileID = {(dev_t)-1LL, (ino_t)-1LL, (uint64_t)-1LL, -1, 
 #endif
 #endif
 
-/// Lock to protect wgettext.
-static pthread_mutex_t wgettext_lock;
-
 /// Map used as cache by wgettext.
-typedef std::map<wcstring, wcstring> wgettext_map_t;
-static wgettext_map_t wgettext_map;
+static owning_lock<std::map<wcstring, wcstring>> wgettext_map;
 
 bool wreaddir_resolving(DIR *dir, const std::wstring &dir_path, std::wstring &out_name,
                         bool *out_is_dir) {
@@ -357,7 +352,7 @@ wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path) {
             if (pathsep_idx == cstring::npos) {
                 // No pathsep means a single path component relative to pwd.
                 narrow_res = realpath(".", NULL);
-                if (!narrow_res) DIE("unexpected realpath(\".\") failure");
+                assert(narrow_res != NULL);
                 pathsep_idx = 0;
             } else {
                 // Only call realpath() on the portion up to the last component.
@@ -405,7 +400,6 @@ wcstring wbasename(const wcstring &path) {
 
 // Really init wgettext.
 static void wgettext_really_init() {
-    pthread_mutex_init(&wgettext_lock, NULL);
     fish_bindtextdomain(PACKAGE_NAME, LOCALEDIR);
     fish_textdomain(PACKAGE_NAME);
 }
@@ -423,8 +417,8 @@ const wcstring &wgettext(const wchar_t *in) {
     wcstring key = in;
 
     wgettext_init_if_necessary();
-    scoped_lock locker(wgettext_lock);
-    wcstring &val = wgettext_map[key];
+    auto wmap = wgettext_map.acquire();
+    wcstring &val = wmap.value[key];
     if (val.empty()) {
         cstring mbs_in = wcs2string(key);
         char *out = fish_gettext(mbs_in.c_str());
@@ -688,7 +682,7 @@ file_id_t file_id_t::file_id_from_stat(const struct stat *buf) {
 file_id_t file_id_for_fd(int fd) {
     file_id_t result = kInvalidFileID;
     struct stat buf = {};
-    if (0 == fstat(fd, &buf)) {
+    if (fd >= 0 && 0 == fstat(fd, &buf)) {
         result = file_id_t::file_id_from_stat(&buf);
     }
     return result;

@@ -17,7 +17,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
 #include "config.h"  // IWYU pragma: keep
 
-#include <assert.h>
 #include <errno.h>
 #include <getopt.h>
 #include <locale.h>
@@ -27,6 +26,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <string.h>
 #include <wchar.h>
 #include <wctype.h>
+
 #include <memory>
 #include <string>
 #include <vector>
@@ -36,7 +36,6 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "env.h"
 #include "fish_version.h"
 #include "highlight.h"
-#include "input.h"
 #include "output.h"
 #include "parse_constants.h"
 #include "parse_tree.h"
@@ -347,7 +346,6 @@ int main(int argc, char *argv[]) {
     // (e.g., "# -*- coding: <encoding-name> -*-").
     setlocale(LC_ALL, "");
     env_init();
-    input_init();
 
     // Types of output we support.
     enum {
@@ -491,7 +489,7 @@ int main(int argc, char *argv[]) {
         case output_type_file: {
             FILE *fh = fopen(output_location, "w");
             if (fh) {
-                fputs(wcs2str(output_wtext), fh);
+                fputws(output_wtext.c_str(), fh);
                 fclose(fh);
                 exit(0);
             } else {
@@ -511,6 +509,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    fputs(colored_output.c_str(), stdout);
+    fputws(str2wcstring(colored_output).c_str(), stdout);
     return 0;
 }

@@ -17,7 +17,7 @@
 
 \section introduction Introduction
 
-This is the documentation for `fish`, the friendly interactive shell. `fish` is a user friendly commandline shell intended mostly for interactive use. A shell is a program used to execute other programs. For the latest information on `fish`, please visit the <a href="http://fishshell.com/">`fish` homepage</a>.
+This is the documentation for `fish`, the friendly interactive shell. `fish` is a user friendly commandline shell intended mostly for interactive use. A shell is a program used to execute other programs. For the latest information on `fish`, please visit the <a href="https://fishshell.com/">`fish` homepage</a>.
 
 
 \section syntax Syntax overview
@@ -849,11 +849,9 @@ The user can change the settings of `fish` by changing the values of certain var
 
 - `FISH_VERSION`, the version of the currently running fish
 
-- `COLUMNS`, the current width of the terminal
-
-- `LINES`, the current height of the terminal
-
 - `SHLVL`, the level of nesting of shells
+
+- `COLUMNS` and `LINES`, the current size of the terminal in height and width. These values are only used by fish if the operating system does not report the size of the terminal. Both variables must be set in that case otherwise a default of 80x24 will be used. They are updated when the window size changes.
 
 The names of these variables are mostly derived from the csh family of shells and differ from the ones used by Bourne style shells such as bash.
 
@@ -979,7 +977,7 @@ Some bindings are shared between emacs- and vi-mode because they aren't text edi
 
 - @key{Alt,&larr;,Left} and @key{Alt,&rarr;,Right} move the cursor one word left or right, or moves forward/backward in the directory history if the command line is empty. If the cursor is already at the end of the line, and an autosuggestion is available, @key{Alt,&rarr;,Right} (or @key{Alt,F}) accepts the first word in the suggestion.
 
-- @cursor_key{&uarr;,Up} and @cursor_key{&darr;,Down} search the command history for the previous/next command containing the string that was specified on the commandline before the search was started. If the commandline was empty when the search started, all commands match. See the <a href='#history'>history</a> section for more information on history searching.
+- @cursor_key{&uarr;,Up} and @cursor_key{&darr;,Down} (or @key{Control,P} and @key{Control,N} for emacs aficionados) search the command history for the previous/next command containing the string that was specified on the commandline before the search was started. If the commandline was empty when the search started, all commands match. See the <a href='#history'>history</a> section for more information on history searching.
 
 - @key{Alt,&uarr;,Up} and @key{Alt,&darr;,Down} search the command history for the previous/next token containing the token under the cursor before the search was started. If the commandline was not on a token when the search started, all tokens match. See the <a href='#history'>history</a> section for more information on history searching.
 
@@ -1050,7 +1048,7 @@ function fish_user_key_bindings
 end
 \endfish
 
-When in vi-mode, the <a href="fish_mode_prompt.html">`fish_mode_prompt`</a> function will display a mode indicator to the left of the prompt. The `fish_vi_cursor` function will be used to change the cursor's shape depending on the mode in supported terminals. To disable this feature, override it with an empty function.
+When in vi-mode, the <a href="fish_mode_prompt.html">`fish_mode_prompt`</a> function will display a mode indicator to the left of the prompt. The `fish_vi_cursor` function will be used to change the cursor's shape depending on the mode in supported terminals. To disable this feature, override it with an empty function. To display the mode elsewhere (like in your right prompt), use the output of the `fish_default_mode_prompt` function.
 
 \subsubsection vi-mode-command Command mode
 
@@ -1160,12 +1158,15 @@ Configuration files are evaluated in the following order:
   - `/usr/share/fish/vendor_conf.d` (set at compile time; by default, `$__fish_datadir/conf.d`)
 
   If there are multiple files with the same name in these directories, only the first will be executed.
+  They are executed in order of their filename, sorted (like globs) in a natural order (i.e. "01" sorts before "2").
 
 - User initialization, usually in `~/.config/fish/config.fish` (controlled by the `XDG_CONFIG_HOME` environment variable).
 
 These paths are controlled by parameters set at build, install, or run time, and may vary from the defaults listed above.
 
 This wide search may be confusing. If you are unsure where to put your own customisations, use `~/.config/fish/config.fish`.
+
+Note that ~/.config/fish/config.fish is sourced _after_ the snippets. This is so users can copy snippets and override some of their behavior.
 
 These files are all executed on the startup of every shell. If you want to run a command only on starting an interactive shell, use the exit status of the command `status --is-interactive` to determine if the shell is interactive. If you want to run a command only when using a login shell, use `status --is-login` instead. This will speed up the starting of non-interactive or non-login shells.
 

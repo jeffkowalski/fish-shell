@@ -1,14 +1,16 @@
 #
-# Load common ssh options
+# Load completions shared by ssh and scp.
 #
-
 __fish_complete_ssh scp
 
 #
 # scp specific completions
 #
 
-complete -c scp -d Hostname -a "
+#
+# Hostname
+#
+complete -c scp -d Hostname -n "commandline --cut-at-cursor --current-token | string match -v '*:*'" -a "
 
 (__fish_print_hostnames):
 
@@ -16,15 +18,17 @@ complete -c scp -d Hostname -a "
 	#Prepend any username specified in the completion to the hostname
 	commandline -ct |sed -ne 's/\(.*@\).*/\1/p'
 )(__fish_print_hostnames):
-
-(__fish_print_users)@\tUsername
-
 "
+
+#
+# Local path
+#
+complete -c scp -d "Local Path" -n "commandline -ct | string match ':'"
 
 #
 # Remote path
 #
-complete -c scp -d "Remote Path" -n "commandline -ct| __fish_sgrep -o '.*:'" -a "
+complete -c scp -d "Remote Path" -f -n "commandline --cut-at-cursor --current-token | string match -r '.+:'" -a "
 
 (
 	#Prepend any user@host information supplied before the remote completion
@@ -35,12 +39,10 @@ complete -c scp -d "Remote Path" -n "commandline -ct| __fish_sgrep -o '.*:'" -a 
 )
 
 "
-
-complete -c scp -s B --description "Batch mode"
-complete -c scp -s l -x --description "Bandwidth limit"
-complete -c scp -s P -x --description "Port"
-complete -c scp -s p --description "Preserves modification times, access times, and modes from the original file"
-complete -c scp -s q --description "Do not display progress bar"
-complete -c scp -s r --description "Recursively copy"
-complete -c scp -s S --description "Encryption program"
-
+complete -c scp -s B -d "Batch mode"
+complete -c scp -s l -x -d "Bandwidth limit"
+complete -c scp -s P -x -d "Port"
+complete -c scp -s p -d "Preserves modification times, access times, and modes from the original file"
+complete -c scp -s q -d "Do not display progress bar"
+complete -c scp -s r -d "Recursively copy"
+complete -c scp -s S -d "Encryption program"

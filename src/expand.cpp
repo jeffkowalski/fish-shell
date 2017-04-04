@@ -11,23 +11,25 @@
 #include <unistd.h>
 #include <wchar.h>
 #include <wctype.h>
-#include <algorithm>
+
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>  // IWYU pragma: keep
 #endif
-#include <assert.h>
-#include <vector>
 #ifdef SunOS
 #include <procfs.h>
 #endif
-#include <stdio.h>
-#include <memory>  // IWYU pragma: keep
 #if __APPLE__
 #include <sys/proc.h>
 #else
 #include <dirent.h>
 #include <sys/stat.h>
 #endif
+
+#include <algorithm>
+#include <functional>
+#include <memory>  // IWYU pragma: keep
+#include <type_traits>
+#include <vector>
 
 #include "common.h"
 #include "complete.h"
@@ -429,25 +431,14 @@ bool process_iterator_t::next_process(wcstring *out_str, pid_t *out_pid) {
 
 #endif
 
-// Helper function to do a job search.
-struct find_job_data_t {
-    const wchar_t *proc;  // the process to search for - possibly numeric, possibly a name
-    expand_flags_t flags;
-    std::vector<completion_t> *completions;
-};
-
 /// The following function is invoked on the main thread, because the job list is not thread safe.
-/// It should search the job list for something matching the given proc, and then return 1 to stop
-/// the search, 0 to continue it.
-static int find_job(const struct find_job_data_t *info) {
+/// It should search the job list for something matching the given proc, and then return true to
+/// stop the search, false to continue it.
+static bool find_job(const wchar_t *proc, expand_flags_t flags,
+                     std::vector<completion_t> *completions) {
     ASSERT_IS_MAIN_THREAD();
 
-    const wchar_t *const proc = info->proc;
-    const expand_flags_t flags = info->flags;
-    std::vector<completion_t> &completions = *info->completions;
-
-    const job_t *j;
-    int found = 0;
+    bool found = false;
     // If we are not doing tab completion, we first check for the single '%' character, because an
     // empty string will pass the numeric check below. But if we are doing tab completion, we want
     // all of the job IDs as completion options, not just the last job backgrounded, so we pass this
@@ -455,20 +446,20 @@ static int find_job(const struct find_job_data_t *info) {
     if (wcslen(proc) == 0 && !(flags & EXPAND_FOR_COMPLETIONS)) {
         // This is an empty job expansion: '%'. It expands to the last job backgrounded.
         job_iterator_t jobs;
-        while ((j = jobs.next())) {
+        while (const job_t *j = jobs.next()) {
             if (!j->command_is_empty()) {
-                append_completion(&completions, to_string<long>(j->pgid));
+                append_completion(completions, to_string<long>(j->pgid));
                 break;
             }
         }
         // You don't *really* want to flip a coin between killing the last process backgrounded and
         // all processes, do you? Let's not try other match methods with the solo '%' syntax.
-        found = 1;
+        found = true;
     } else if (iswnumeric(proc)) {
         // This is a numeric job string, like '%2'.
         if (flags & EXPAND_FOR_COMPLETIONS) {
             job_iterator_t jobs;
-            while ((j = jobs.next())) {
+            while (const job_t *j = jobs.next()) {
                 wchar_t jid[16];
                 if (j->command_is_empty()) continue;
 
@@ -476,21 +467,21 @@ static int find_job(const struct find_job_data_t *info) {
 
                 if (wcsncmp(proc, jid, wcslen(proc)) == 0) {
                     wcstring desc_buff = format_string(COMPLETE_JOB_DESC_VAL, j->command_wcstr());
-                    append_completion(&completions, jid + wcslen(proc), desc_buff, 0);
+                    append_completion(completions, jid + wcslen(proc), desc_buff, 0);
                 }
             }
         } else {
             int jid = fish_wcstoi(proc);
             if (!errno && jid > 0) {
-                j = job_get(jid);
-                if ((j != 0) && (j->command_wcstr() != 0) && (!j->command_is_empty())) {
-                    append_completion(&completions, to_string<long>(j->pgid));
+                const job_t *j = job_get(jid);
+                if (j && !j->command_is_empty()) {
+                    append_completion(completions, to_string<long>(j->pgid));
                 }
             }
         }
         // Stop here so you can't match a random process name when you're just trying to use job
         // control.
-        found = 1;
+        found = true;
     }
 
     if (found) {
@@ -498,16 +489,16 @@ static int find_job(const struct find_job_data_t *info) {
     }
 
     job_iterator_t jobs;
-    while ((j = jobs.next())) {
+    while (const job_t *j = jobs.next()) {
         if (j->command_is_empty()) continue;
 
         size_t offset;
         if (match_pid(j->command(), proc, &offset)) {
             if (flags & EXPAND_FOR_COMPLETIONS) {
-                append_completion(&completions, j->command_wcstr() + offset + wcslen(proc),
+                append_completion(completions, j->command_wcstr() + offset + wcslen(proc),
                                   COMPLETE_JOB_DESC, 0);
             } else {
-                append_completion(&completions, to_string<long>(j->pgid));
+                append_completion(completions, to_string<long>(j->pgid));
                 found = 1;
             }
         }
@@ -518,19 +509,18 @@ static int find_job(const struct find_job_data_t *info) {
     }
 
     jobs.reset();
-    while ((j = jobs.next())) {
-        process_t *p;
+    while (const job_t *j = jobs.next()) {
         if (j->command_is_empty()) continue;
-        for (p = j->first_process; p; p = p->next) {
+        for (const process_ptr_t &p : j->processes) {
             if (p->actual_cmd.empty()) continue;
 
             size_t offset;
             if (match_pid(p->actual_cmd, proc, &offset)) {
                 if (flags & EXPAND_FOR_COMPLETIONS) {
-                    append_completion(&completions, wcstring(p->actual_cmd, offset + wcslen(proc)),
+                    append_completion(completions, wcstring(p->actual_cmd, offset + wcslen(proc)),
                                       COMPLETE_CHILD_PROCESS_DESC, 0);
                 } else {
-                    append_completion(&completions, to_string<long>(p->pid), L"", 0);
+                    append_completion(completions, to_string<long>(p->pid), L"", 0);
                     found = 1;
                 }
             }
@@ -552,8 +542,8 @@ static int find_job(const struct find_job_data_t *info) {
 static void find_process(const wchar_t *proc, expand_flags_t flags,
                          std::vector<completion_t> *out) {
     if (!(flags & EXPAND_SKIP_JOBS)) {
-        const struct find_job_data_t data = {proc, flags, out};
-        int found = iothread_perform_on_main(find_job, &data);
+        bool found = false;
+        iothread_perform_on_main([&]() { found = find_job(proc, flags, out); });
         if (found) {
             return;
         }
@@ -630,7 +620,7 @@ static bool expand_pid(const wcstring &instr_with_sep, expand_flags_t flags,
     if (prev_count == out->size() && !(flags & EXPAND_FOR_COMPLETIONS)) {
         // We failed to find anything.
         append_syntax_error(errors, 1, FAILED_EXPANSION_PROCESS_ERR_MSG,
-                            escape(in + 1, ESCAPE_NO_QUOTED).c_str());
+                            escape_string(in + 1, ESCAPE_NO_QUOTED).c_str());
         return false;
     }
 
@@ -763,7 +753,7 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
             stop_pos++;
         }
 
-        // printf( "Stop for '%c'\n", in[stop_pos]);
+        // fwprintf(stdout, L"Stop for '%c'\n", in[stop_pos]);
         var_len = stop_pos - start_pos;
 
         if (var_len == 0) {
@@ -831,7 +821,7 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
                     }
 
                     // string_values is the new var_item_list.
-                    var_item_list.swap(string_values);
+                    var_item_list = std::move(string_values);
                 }
             }
 
@@ -1413,7 +1403,8 @@ static expand_error_t expand_stage_wildcards(const wcstring &input, std::vector<
             // mostly the same. There's the following differences:
             //
             // 1. An empty CDPATH should be treated as '.', but an empty PATH should be left empty
-            // (no commands can be found).
+            // (no commands can be found). Also, an empty element of CDPATH is treated as '.' for
+            // consistency with POSIX shells.
             //
             // 2. PATH is only "one level," while CDPATH is multiple levels. That is, input like
             // 'foo/bar' should resolve against CDPATH, but not PATH.
@@ -1433,9 +1424,14 @@ static expand_error_t expand_stage_wildcards(const wcstring &input, std::vector<
                 if (paths.missing_or_empty()) paths = for_cd ? L"." : L"";
 
                 // Tokenize it into directories.
-                wcstokenizer tokenizer(paths, ARRAY_SEP_STR);
-                wcstring next_path;
-                while (tokenizer.next(next_path)) {
+                std::vector<wcstring> pathsv;
+                tokenize_variable_array(paths, pathsv);
+
+                for (auto next_path : pathsv) {
+                    if (next_path.empty()) {
+                        if (!for_cd) continue;
+                        next_path = L".";
+                    }
                     // Ensure that we use the working directory for relative cdpaths like ".".
                     effective_working_dirs.push_back(
                         path_apply_working_directory(next_path, working_dir));
@@ -1584,29 +1580,29 @@ bool expand_abbreviation(const wcstring &src, wcstring *output) {
     if (src.empty()) return false;
 
     // Get the abbreviations. Return false if we have none.
-    env_var_t var = env_get_string(USER_ABBREVIATIONS_VARIABLE_NAME);
-    if (var.missing_or_empty()) return false;
+    env_var_t abbrs = env_get_string(USER_ABBREVIATIONS_VARIABLE_NAME);
+    if (abbrs.missing_or_empty()) return false;
 
     bool result = false;
-    wcstring line;
-    wcstokenizer tokenizer(var, ARRAY_SEP_STR);
-    while (tokenizer.next(line)) {
-        // Line is expected to be of the form 'foo=bar' or 'foo bar'. Parse out the first = or
-        // space. Silently skip on failure (no equals, or equals at the end or beginning). Try to
+    std::vector<wcstring> abbrsv;
+    tokenize_variable_array(abbrs, abbrsv);
+    for (auto abbr : abbrsv) {
+        // Abbreviation is expected to be of the form 'foo=bar' or 'foo bar'. Parse out the first =
+        // or space. Silently skip on failure (no equals, or equals at the end or beginning). Try to
         // avoid copying any strings until we are sure this is a match.
-        size_t equals_pos = line.find(L'=');
-        size_t space_pos = line.find(L' ');
+        size_t equals_pos = abbr.find(L'=');
+        size_t space_pos = abbr.find(L' ');
         size_t separator = mini(equals_pos, space_pos);
-        if (separator == wcstring::npos || separator == 0 || separator + 1 == line.size()) continue;
+        if (separator == wcstring::npos || separator == 0 || separator + 1 == abbr.size()) continue;
 
         // Find the character just past the end of the command. Walk backwards, skipping spaces.
         size_t cmd_end = separator;
-        while (cmd_end > 0 && iswspace(line.at(cmd_end - 1))) cmd_end--;
+        while (cmd_end > 0 && iswspace(abbr.at(cmd_end - 1))) cmd_end--;
 
         // See if this command matches.
-        if (line.compare(0, cmd_end, src) == 0) {
+        if (abbr.compare(0, cmd_end, src) == 0) {
             // Success. Set output to everything past the end of the string.
-            if (output != NULL) output->assign(line, separator + 1, wcstring::npos);
+            if (output != NULL) output->assign(abbr, separator + 1, wcstring::npos);
 
             result = true;
             break;
