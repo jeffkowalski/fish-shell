@@ -87,15 +87,20 @@ static bool env_initialized = false;
 
 /// List of all locale environment variable names that might trigger (re)initializing the locale
 /// subsystem.
-static const wchar_t *const locale_variable[] = {
-    L"LANG",     L"LANGUAGE",          L"LC_ALL",         L"LC_ADDRESS",   L"LC_COLLATE",
-    L"LC_CTYPE", L"LC_IDENTIFICATION", L"LC_MEASUREMENT", L"LC_MESSAGES",  L"LC_MONETARY",
-    L"LC_NAME",  L"LC_NUMERIC",        L"LC_PAPER",       L"LC_TELEPHONE", L"LC_TIME",
-    NULL};
+static const wcstring_list_t locale_variables({L"LANG", L"LANGUAGE", L"LC_ALL", L"LC_ADDRESS",
+                                               L"LC_COLLATE", L"LC_CTYPE", L"LC_IDENTIFICATION",
+                                               L"LC_MEASUREMENT", L"LC_MESSAGES", L"LC_MONETARY",
+                                               L"LC_NAME", L"LC_NUMERIC", L"LC_PAPER",
+                                               L"LC_TELEPHONE", L"LC_TIME"});
 
 /// List of all curses environment variable names that might trigger (re)initializing the curses
 /// subsystem.
-static const wchar_t *const curses_variable[] = {L"TERM", L"TERMINFO", L"TERMINFO_DIRS", NULL};
+static const wcstring_list_t curses_variables({L"TERM", L"TERMINFO", L"TERMINFO_DIRS"});
+
+/// List of all "path" like variable names that need special handling. This includes automatic
+/// splitting and joining on import/export. As well as replacing empty elements, which implicitly
+/// refer to the CWD, with an explicit '.'.
+static const wcstring_list_t colon_delimited_variable({L"PATH", L"MANPATH", L"CDPATH"});
 
 // Some forward declarations to make it easy to logically group the code.
 static void init_locale();
@@ -160,7 +165,7 @@ struct var_stack_t {
     // Pops the top node if it's not global
     void pop();
 
-    bool var_changed(wchar_t const *const vars[]);
+    bool var_changed(const wcstring_list_t &vars);
 
     // Returns the next scope to search for a given node, respecting the new_scope lag
     // Returns NULL if we're done
@@ -183,9 +188,9 @@ void var_stack_t::push(bool new_scope) {
 }
 
 /// Return true if one of the vars in the passed list was changed in the current var scope.
-bool var_stack_t::var_changed(wchar_t const *const vars[]) {
-    for (auto v = vars; *v; v++) {
-        if (top->env.find(*v) != top->env.end()) return true;
+bool var_stack_t::var_changed(const wcstring_list_t &vars) {
+    for (auto v : vars) {
+        if (top->env.find(v) != top->env.end()) return true;
     }
     return false;
 }
@@ -198,8 +203,8 @@ void var_stack_t::pop() {
         return;
     }
 
-    bool locale_changed = this->var_changed(locale_variable);
-    bool curses_changed = this->var_changed(curses_variable);
+    bool locale_changed = this->var_changed(locale_variables);
+    bool curses_changed = this->var_changed(curses_variables);
 
     if (top->new_scope) {  //!OCLINT(collapsible if statements)
         if (top->exportv || local_scope_exports(top->next.get())) {
@@ -321,10 +326,47 @@ static void handle_timezone(const wchar_t *env_var_name) {
     tzset();
 }
 
+/// Some env vars contain a list of paths where an empty path element is equivalent to ".".
+/// Unfortunately that convention causes problems for fish scripts. So this function replaces the
+/// empty path element with an explicit ".". See issue #3914.
+static void fix_colon_delimited_var(const wcstring &var_name) {
+    const env_var_t paths = env_get_string(var_name);
+    if (paths.missing_or_empty()) return;
+
+    bool modified = false;
+    wcstring_list_t pathsv;
+    wcstring_list_t new_pathsv;
+    tokenize_variable_array(paths, pathsv);
+    for (auto next_path : pathsv) {
+        if (next_path.empty()) {
+            next_path = L".";
+            modified = true;
+        }
+        new_pathsv.push_back(next_path);
+    }
+
+    if (!modified) {
+        return;
+    }
+
+    wcstring new_val;
+    for (size_t i = 0; i < new_pathsv.size(); i++) {
+        new_val.append(new_pathsv[i]);
+        if (i < new_pathsv.size() - 1) {
+            new_val.append(ARRAY_SEP_STR);
+        }
+    }
+
+    int scope = env_set(var_name, new_val.c_str(), ENV_USER);
+    if (scope != ENV_OK) {
+        debug(0, L"fix_colon_delimited_var failed unexpectedly with retval %d", scope);
+    }
+}
+
 /// Check if the specified variable is a locale variable.
 static bool var_is_locale(const wcstring &key) {
-    for (size_t i = 0; locale_variable[i]; i++) {
-        if (key == locale_variable[i]) {
+    for (auto var_name : locale_variables) {
+        if (key == var_name) {
             return true;
         }
     }
@@ -337,9 +379,9 @@ static void init_locale() {
     // invalidate the pointer from the this setlocale() call.
     char *old_msg_locale = strdup(setlocale(LC_MESSAGES, NULL));
 
-    for (const wchar_t *const *var_name = locale_variable; *var_name; var_name++) {
-        const env_var_t val = env_get_string(*var_name, ENV_EXPORT);
-        const std::string &name = wcs2string(*var_name);
+    for (auto var_name : locale_variables) {
+        const env_var_t val = env_get_string(var_name, ENV_EXPORT);
+        const std::string &name = wcs2string(var_name);
         const std::string &value = wcs2string(val);
         debug(2, L"locale var %s='%s'", name.c_str(), value.c_str());
         if (val.empty()) {
@@ -368,8 +410,8 @@ static void init_locale() {
 
 /// Check if the specified variable is a locale variable.
 static bool var_is_curses(const wcstring &key) {
-    for (size_t i = 0; curses_variable[i]; i++) {
-        if (key == curses_variable[i]) {
+    for (auto var_name : curses_variables) {
+        if (key == var_name) {
             return true;
         }
     }
@@ -391,17 +433,19 @@ bool term_supports_setting_title() { return can_set_term_title; }
 /// One situation in which this breaks down is with screen, since screen supports setting the
 /// terminal title if the underlying terminal does so, but will print garbage on terminals that
 /// don't. Since we can't see the underlying terminal below screen there is no way to fix this.
+static const wcstring_list_t title_terms({L"xterm", L"screen", L"tmux", L"nxterm", L"rxvt"});
 static bool does_term_support_setting_title() {
     const env_var_t term_str = env_get_string(L"TERM");
     if (term_str.missing()) return false;
 
     const wchar_t *term = term_str.c_str();
-    bool recognized = contains(term, L"xterm", L"screen", L"tmux", L"nxterm", L"rxvt");
+    bool recognized = contains(title_terms, term_str);
     if (!recognized) recognized = !wcsncmp(term, L"xterm-", wcslen(L"xterm-"));
     if (!recognized) recognized = !wcsncmp(term, L"screen-", wcslen(L"screen-"));
     if (!recognized) recognized = !wcsncmp(term, L"tmux-", wcslen(L"tmux-"));
     if (!recognized) {
-        if (contains(term, L"linux", L"dumb")) return false;
+        if (term_str == L"linux") return false;
+        if (term_str == L"dumb") return false;
 
         char *n = ttyname(STDIN_FILENO);
         if (!n || strstr(n, "tty") || strstr(n, "/vc/")) return false;
@@ -483,11 +527,19 @@ static bool initialize_curses_using_fallback(const char *term) {
     return false;
 }
 
+/// Ensure the content of the magic path env vars is reasonable. Specifically, that empty path
+/// elements are converted to explicit "." to make the vars easier to use in fish scripts.
+static void init_path_vars() {
+    for (auto var_name : colon_delimited_variable) {
+        fix_colon_delimited_var(var_name);
+    }
+}
+
 /// Initialize the curses subsystem.
 static void init_curses() {
-    for (const wchar_t *const *var_name = curses_variable; *var_name; var_name++) {
-        const env_var_t val = env_get_string(*var_name, ENV_EXPORT);
-        const std::string &name = wcs2string(*var_name);
+    for (auto var_name : curses_variables) {
+        const env_var_t val = env_get_string(var_name, ENV_EXPORT);
+        const std::string &name = wcs2string(var_name);
         const std::string &value = wcs2string(val);
         debug(2, L"curses var %s='%s'", name.c_str(), value.c_str());
         if (val.empty()) {
@@ -523,6 +575,13 @@ static void init_curses() {
     curses_initialized = true;
 }
 
+// Here is the whitelist of variables that we colon-delimit, both incoming from the environment and
+// outgoing back to it. This is deliberately very short - we don't want to add language-specific
+// values like CLASSPATH.
+static bool variable_is_colon_delimited_var(const wcstring &str) {
+    return contains(colon_delimited_variable, str);
+}
+
 /// React to modifying the given variable.
 static void react_to_variable_change(const wcstring &key) {
     // Don't do any of this until `env_init()` has run. We only want to do this in response to
@@ -531,6 +590,8 @@ static void react_to_variable_change(const wcstring &key) {
 
     if (var_is_locale(key)) {
         init_locale();
+    } else if (variable_is_colon_delimited_var(key)) {
+        fix_colon_delimited_var(key);
     } else if (var_is_curses(key)) {
         init_curses();
         init_input();
@@ -636,13 +697,6 @@ wcstring env_get_pwd_slash(void) {
     return pwd;
 }
 
-// Here is the whitelist of variables that we colon-delimit, both incoming from the environment and
-// outgoing back to it. This is deliberately very short - we don't want to add language-specific
-// values like CLASSPATH.
-static bool variable_is_colon_delimited_array(const wcstring &str) {
-    return contains(str, L"PATH", L"MANPATH", L"CDPATH");
-}
-
 /// Set up the USER variable.
 static void setup_user(bool force) {
     if (env_get_string(L"USER").missing_or_empty() || force) {
@@ -708,7 +762,7 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     // Now the environment variable handling is set up, the next step is to insert valid data.
 
     // Import environment variables. Walk backwards so that the first one out of any duplicates wins
-    // (#2784).
+    // (See issue #2784).
     wcstring key, val;
     const char *const *envp = environ;
     size_t i = 0;
@@ -726,7 +780,7 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
             key.assign(key_and_val, 0, eql);
             if (is_read_only(key) || is_electric(key)) continue;
             val.assign(key_and_val, eql + 1, wcstring::npos);
-            if (variable_is_colon_delimited_array(key)) {
+            if (variable_is_colon_delimited_var(key)) {
                 std::replace(val.begin(), val.end(), L':', ARRAY_SEP);
             }
 
@@ -745,6 +799,7 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     init_locale();
     init_curses();
     init_input();
+    init_path_vars();
 
     // Set up the USER and PATH variables
     setup_path();
@@ -849,7 +904,7 @@ int env_set(const wcstring &key, const wchar_t *val, env_mode_flags_t var_mode) 
     bool has_changed_old = vars_stack().has_changed_exported;
     int done = 0;
 
-    if (val && contains(key, L"PWD", L"HOME")) {
+    if (val && (key == L"PWD" || key == L"HOME")) {
         // Canonicalize our path; if it changes, recurse and try again.
         wcstring val_canonical = val;
         path_make_canonical(val_canonical);
@@ -1320,7 +1375,7 @@ static void export_func(const std::map<wcstring, wcstring> &envs, std::vector<st
 
         // Arrays in the value are ASCII record separator (0x1e) delimited. But some variables
         // should have colons. Add those.
-        if (variable_is_colon_delimited_array(key)) {
+        if (variable_is_colon_delimited_var(key)) {
             // Replace ARRAY_SEP with colon.
             std::replace(vs.begin(), vs.end(), (char)ARRAY_SEP, ':');
         }
