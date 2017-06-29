@@ -2,6 +2,7 @@
 #include "config.h"  // IWYU pragma: keep
 
 #include <errno.h>
+#include <limits.h>
 #include <locale.h>
 #include <pthread.h>
 #include <pwd.h>
@@ -35,6 +36,7 @@
 #include <utility>
 #include <vector>
 
+#include "builtin_bind.h"
 #include "common.h"
 #include "env.h"
 #include "env_universal_common.h"
@@ -97,9 +99,9 @@ static const wcstring_list_t locale_variables({L"LANG", L"LANGUAGE", L"LC_ALL", 
 /// subsystem.
 static const wcstring_list_t curses_variables({L"TERM", L"TERMINFO", L"TERMINFO_DIRS"});
 
-/// List of all "path" like variable names that need special handling. This includes automatic
+/// List of "path" like variable names that need special handling. This includes automatic
 /// splitting and joining on import/export. As well as replacing empty elements, which implicitly
-/// refer to the CWD, with an explicit '.'.
+/// refer to the CWD, with an explicit '.' in the case of PATH and CDPATH.
 static const wcstring_list_t colon_delimited_variable({L"PATH", L"MANPATH", L"CDPATH"});
 
 // Some forward declarations to make it easy to logically group the code.
@@ -330,6 +332,9 @@ static void handle_timezone(const wchar_t *env_var_name) {
 /// Unfortunately that convention causes problems for fish scripts. So this function replaces the
 /// empty path element with an explicit ".". See issue #3914.
 static void fix_colon_delimited_var(const wcstring &var_name) {
+    // While we auto split/join MANPATH we do not want to replace empty elements with "." (#4158).
+    if (var_name == L"MANPATH") return;
+
     const env_var_t paths = env_get_string(var_name);
     if (paths.missing_or_empty()) return;
 
@@ -447,8 +452,9 @@ static bool does_term_support_setting_title() {
         if (term_str == L"linux") return false;
         if (term_str == L"dumb") return false;
 
-        char *n = ttyname(STDIN_FILENO);
-        if (!n || strstr(n, "tty") || strstr(n, "/vc/")) return false;
+        char buf[PATH_MAX];
+        int retval = ttyname_r(STDIN_FILENO, buf, PATH_MAX);
+        if (retval != 0 || strstr(buf, "tty") || strstr(buf, "/vc/")) return false;
     }
 
     return true;
@@ -700,9 +706,12 @@ wcstring env_get_pwd_slash(void) {
 /// Set up the USER variable.
 static void setup_user(bool force) {
     if (env_get_string(L"USER").missing_or_empty() || force) {
-        const struct passwd *pw = getpwuid(getuid());
-        if (pw && pw->pw_name) {
-            const wcstring uname = str2wcstring(pw->pw_name);
+        struct passwd userinfo;
+        struct passwd *result;
+        char buf[8192];
+        int retval = getpwuid_r(getuid(), &userinfo, buf, sizeof(buf), &result);
+        if (!retval && result) {
+            const wcstring uname = str2wcstring(userinfo.pw_name);
             env_set(L"USER", uname.c_str(), ENV_GLOBAL | ENV_EXPORT);
         }
     }
@@ -803,7 +812,14 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
 
     // Set up the USER and PATH variables
     setup_path();
-    setup_user(false);
+
+    // Some `su`s keep $USER when changing to root.
+    // This leads to issues later on (and e.g. in prompts),
+    // so we work around it by resetting $USER.
+    // TODO: Figure out if that su actually checks if username == "root"(as the man page says) or
+    // UID == 0.
+    uid_t uid = getuid();
+    setup_user(uid == 0);
 
     // Set up the version variable.
     wcstring version = str2wcstring(get_fish_version());
@@ -824,19 +840,26 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     env_read_only.insert(L"SHLVL");
 
     // Set up the HOME variable.
+    // Unlike $USER, it doesn't seem that `su`s pass this along
+    // if the target user is root, unless "--preserve-environment" is used.
+    // Since that is an explicit choice, we should allow it to enable e.g.
+    //     env HOME=(mktemp -d) su --preserve-environment fish
     if (env_get_string(L"HOME").missing_or_empty()) {
         const env_var_t unam = env_get_string(L"USER");
         char *unam_narrow = wcs2str(unam.c_str());
-        struct passwd *pw = getpwnam(unam_narrow);
-        if (pw == NULL) {
+        struct passwd userinfo;
+        struct passwd *result;
+        char buf[8192];
+        int retval = getpwnam_r(unam_narrow, &userinfo, buf, sizeof(buf), &result);
+        if (retval || !result) {
             // Maybe USER is set but it's bogus. Reset USER from the db and try again.
             setup_user(true);
             const env_var_t unam = env_get_string(L"USER");
             unam_narrow = wcs2str(unam.c_str());
-            pw = getpwnam(unam_narrow);
+            retval = getpwnam_r(unam_narrow, &userinfo, buf, sizeof(buf), &result);
         }
-        if (pw && pw->pw_dir) {
-            const wcstring dir = str2wcstring(pw->pw_dir);
+        if (!retval && result && userinfo.pw_dir) {
+            const wcstring dir = str2wcstring(userinfo.pw_dir);
             env_set(L"HOME", dir.c_str(), ENV_GLOBAL | ENV_EXPORT);
         }
         free(unam_narrow);

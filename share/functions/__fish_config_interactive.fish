@@ -23,13 +23,12 @@ function __fish_config_interactive -d "Initializations that should be performed 
     end
 
     if not set -q fish_greeting
-        set -l line1 (printf (_ 'Welcome to fish, the friendly interactive shell' ))
+        set -l line1 (_ 'Welcome to fish, the friendly interactive shell')
+        set -l line2 ''
         if not set -q __fish_init_2_3_0
-            set -l line2 \n(printf (_ 'Type %shelp%s for instructions on how to use fish %s') (set_color green) (set_color normal))
-        else
-            set -l line2 ''
+            set line2 \n(_ 'Type `help` for instructions on how to use fish')
         end
-        set -U fish_greeting $line1$line2
+        set -U fish_greeting "$line1$line2"
     end
 
     #
@@ -86,6 +85,9 @@ function __fish_config_interactive -d "Initializations that should be performed 
         set -q fish_color_selection
         or set -U fish_color_selection white --bold --background=brblack
 
+        set -q fish_color_cancel
+        or set -U fish_color_cancel -r
+
         # Pager colors
         set -q fish_pager_color_prefix
         or set -U fish_pager_color_prefix white --bold --underline
@@ -120,12 +122,12 @@ function __fish_config_interactive -d "Initializations that should be performed 
             # Hence we'll call python directly.
             # c_m_p.py should work with any python version.
             set -l update_args -B $__fish_datadir/tools/create_manpage_completions.py --manpath --cleanup-in '~/.config/fish/completions' --cleanup-in '~/.config/fish/generated_completions'
-            if command -qs python
-                python $update_args >/dev/null ^/dev/null &
+            if command -qs python3
+                python3 $update_args >/dev/null ^/dev/null &
             else if command -qs python2
                 python2 $update_args >/dev/null ^/dev/null &
-            else if command -qs python3
-                python3 $update_args >/dev/null ^/dev/null &
+            else if command -qs python
+                python $update_args >/dev/null ^/dev/null &
             end
         end
     end
@@ -240,7 +242,7 @@ function __fish_config_interactive -d "Initializations that should be performed 
         end
 
         # Disable BP before every command because that might not support it.
-        function __fish_disable_bracketed_paste --on-event fish_preexec
+        function __fish_disable_bracketed_paste --on-event fish_preexec --on-process-exit %self
             printf "\e[?2004l"
         end
 
@@ -260,7 +262,7 @@ function __fish_config_interactive -d "Initializations that should be performed 
             status --is-command-substitution
             or test -n "$INSIDE_EMACS"
             and return
-            printf \e\]7\;file://\%s\%s\a (hostname) (echo -n $PWD | __fish_urlencode)
+            printf \e\]7\;file://\%s\%s\a (hostname) (string escape --style=url $PWD)
         end
         __update_cwd_osc # Run once because we might have already inherited a PWD from an old tab
     end

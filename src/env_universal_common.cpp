@@ -141,8 +141,11 @@ static wcstring get_runtime_path() {
     } else {
         const char *uname = getenv("USER");
         if (uname == NULL) {
-            const struct passwd *pw = getpwuid(getuid());
-            uname = pw->pw_name;
+            struct passwd userinfo;
+            struct passwd *result;
+            char buf[8192];
+            int retval = getpwuid_r(getuid(), &userinfo, buf, sizeof(buf), &result);
+            if (!retval && result) uname = userinfo.pw_name;
         }
 
         // /tmp/fish.user
@@ -228,7 +231,7 @@ static bool append_file_entry(fish_message_type_t type, const wcstring &key_in,
     result->push_back(' ');
 
     // Append variable name like "fish_color_cwd".
-    if (wcsvarname(key_in)) {
+    if (!valid_var_name(key_in)) {
         debug(0, L"Illegal variable name: '%ls'", key_in.c_str());
         success = false;
     }
@@ -1381,11 +1384,9 @@ std::unique_ptr<universal_notifier_t> universal_notifier_t::new_notifier_for_str
         case strategy_named_pipe: {
             return make_unique<universal_notifier_named_pipe_t>(test_path);
         }
-        default: {
-            debug(0, "Unsupported universal notifier strategy %d\n", strat);
-            return NULL;
-        }
     }
+    DIE("should never reach this statement");
+    return NULL;
 }
 
 // Default implementations.

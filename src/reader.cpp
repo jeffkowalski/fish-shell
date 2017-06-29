@@ -92,6 +92,9 @@
 /// The name of the function that prints the fish right prompt (RPROMPT).
 #define RIGHT_PROMPT_FUNCTION_NAME L"fish_right_prompt"
 
+/// The name of the function to use in place of the left prompt if we're in the debugger context.
+#define DEBUG_PROMPT_FUNCTION_NAME L"fish_breakpoint_prompt"
+
 /// The name of the function for getting the input mode indicator.
 #define MODE_PROMPT_FUNCTION_NAME L"fish_mode_prompt"
 
@@ -168,6 +171,8 @@ class reader_data_t {
     bool suppress_autosuggestion;
     /// Whether abbreviations are expanded.
     bool expand_abbreviations;
+    /// Silent mode used for password input on the read command
+    bool silent;
     /// The representation of the current screen contents.
     screen_t screen;
     /// The history.
@@ -256,13 +261,14 @@ class reader_data_t {
 
     /// Constructor
     reader_data_t()
-        : allow_autosuggestion(0),
-          suppress_autosuggestion(0),
-          expand_abbreviations(0),
+        : allow_autosuggestion(false),
+          suppress_autosuggestion(false),
+          expand_abbreviations(false),
+          silent(false),
           history(0),
           token_history_pos(0),
           search_pos(0),
-          sel_active(0),
+          sel_active(false),
           sel_begin_pos(0),
           sel_start_pos(0),
           sel_stop_pos(0),
@@ -270,13 +276,13 @@ class reader_data_t {
           complete_func(0),
           highlight_function(0),
           test_func(0),
-          end_loop(0),
-          prev_end_loop(0),
+          end_loop(false),
+          prev_end_loop(false),
           next(0),
           search_mode(0),
-          repaint_needed(0),
-          screen_reset_needed(0),
-          exit_on_interrupt(0) {}
+          repaint_needed(false),
+          screen_reset_needed(false),
+          exit_on_interrupt(false) {}
 };
 
 /// Sets the command line contents, without clearing the pager.
@@ -412,8 +418,13 @@ static void reader_repaint() {
     // Update the indentation.
     data->indents = parse_util_compute_indents(cmd_line->text);
 
-    // Combine the command and autosuggestion into one string.
-    wcstring full_line = combine_command_and_autosuggestion(cmd_line->text, data->autosuggestion);
+    wcstring full_line;
+    if (data->silent) {
+        full_line = wcstring(cmd_line->text.length(), obfuscation_read_char);
+    } else {
+        // Combine the command and autosuggestion into one string.
+        full_line = combine_command_and_autosuggestion(cmd_line->text, data->autosuggestion);
+    }
 
     size_t len = full_line.size();
     if (len < 1) len = 1;
@@ -685,14 +696,14 @@ void reader_write_title(const wcstring &cmd, bool reset_cursor_position) {
         for (size_t i = 0; i < lst.size(); i++) {
             fputws(lst.at(i).c_str(), stdout);
         }
-        fputwc(L'\a', stdout);
+        write(STDOUT_FILENO, "\a", 1);
     }
 
     proc_pop_interactive();
     set_color(rgb_color_t::reset(), rgb_color_t::reset());
     if (reset_cursor_position && !lst.empty()) {
         // Put the cursor back at the beginning of the line (issue #2453).
-        fputwc(L'\r', stdout);
+        write(STDOUT_FILENO, "\r", 1);
     }
 }
 
@@ -792,6 +803,10 @@ void reader_init() {
     if (is_interactive_session) {
         tcsetattr(STDIN_FILENO, TCSANOW, &shell_modes);
     }
+
+    // We do this not because we actually need the window size but for its side-effect of correctly
+    // setting the COLUMNS and LINES env vars.
+    get_current_winsize();
 }
 
 void reader_destroy() { pthread_key_delete(generation_count_key); }
@@ -1276,7 +1291,7 @@ static void reader_flash() {
     }
 
     reader_repaint();
-    fputwc(L'\a', stdout);
+    write(STDOUT_FILENO, "\a", 1);
 
     pollint.tv_sec = 0;
     pollint.tv_nsec = 100 * 1000000;
@@ -1509,10 +1524,15 @@ static bool check_for_orphaned_process(unsigned long loop_count, pid_t shell_pgi
         we_think_we_are_orphaned = true;
     }
 
+    // Try reading from the tty; if we get EIO we are orphaned. This is sort of bad because it
+    // may block.
     if (!we_think_we_are_orphaned && loop_count % 128 == 0) {
-        // Try reading from the tty; if we get EIO we are orphaned. This is sort of bad because it
-        // may block.
+#ifdef HAVE_CTERMID_R
+        char buf[L_ctermid];
+        char *tty = ctermid_r(buf);
+#else
         char *tty = ctermid(NULL);
+#endif
         if (!tty) {
             wperror(L"ctermid");
             exit_without_destructors(1);
@@ -1595,9 +1615,10 @@ static void reader_interactive_init() {
             } else {
                 if (check_for_orphaned_process(loop_count, shell_pgid)) {
                     // We're orphaned, so we just die. Another sad statistic.
-                    debug(1, _(L"I appear to be an orphaned process, so I am quitting politely. My "
-                               L"pid is %d."),
-                          (int)getpid());
+                    const wchar_t *fmt =
+                        _(L"I appear to be an orphaned process, so I am quitting politely. "
+                          L"My pid is %d.");
+                    debug(1, fmt, (int)getpid());
                     exit_without_destructors(1);
                 }
 
@@ -1767,22 +1788,14 @@ static void handle_token_history(int forward, int reset) {
             tokenizer_t tok(data->token_history_buff.c_str(), TOK_ACCEPT_UNFINISHED);
             tok_t token;
             while (tok.next(&token)) {
-                if (token.type == TOK_STRING) {
-                    if (token.text.find(data->search_buff) != wcstring::npos) {
-                        // debug( 3, L"Found token at pos %d\n", tok_get_pos( &tok ) );
-                        if (token.offset >= current_pos) {
-                            break;
-                        }
-                        // debug( 3, L"ok pos" );
+                if (token.type != TOK_STRING) continue;
+                if (token.text.find(data->search_buff) == wcstring::npos) continue;
+                if (token.offset >= current_pos) continue;
 
-                        if (find(data->search_prev.begin(), data->search_prev.end(), token.text) ==
-                            data->search_prev.end()) {
-                            data->token_history_pos = token.offset;
-                            str = token.text;
-                        }
-                    }
-                } else {
-                    break;
+                auto found = find(data->search_prev.begin(), data->search_prev.end(), token.text);
+                if (found == data->search_prev.end()) {
+                    data->token_history_pos = token.offset;
+                    str = token.text;
                 }
             }
         }
@@ -1960,7 +1973,7 @@ parser_test_error_bits_t reader_shell_test(const wchar_t *b) {
 
     if (res & PARSER_TEST_ERROR) {
         wcstring error_desc;
-        parser_t::principal_parser().get_backtrace(bstr, errors, &error_desc);
+        parser_t::principal_parser().get_backtrace(bstr, errors, error_desc);
 
         // Ensure we end with a newline. Also add an initial newline, because it's likely the user
         // just hit enter and so there's junk on the current line.
@@ -2043,6 +2056,8 @@ void reader_set_test_function(parser_test_error_bits_t (*f)(const wchar_t *)) {
 }
 
 void reader_set_exit_on_interrupt(bool i) { data->exit_on_interrupt = i; }
+
+void reader_set_silent_status(bool flag) { data->silent = flag; }
 
 void reader_import_history_if_necessary(void) {
     // Import history from older location (config path) if our current history is empty.
@@ -2239,15 +2254,20 @@ static int read_i(void) {
 
     while ((!data->end_loop) && (!sanity_check())) {
         event_fire_generic(L"fish_prompt");
-        if (function_exists(LEFT_PROMPT_FUNCTION_NAME))
-            reader_set_left_prompt(LEFT_PROMPT_FUNCTION_NAME);
-        else
-            reader_set_left_prompt(DEFAULT_PROMPT);
 
-        if (function_exists(RIGHT_PROMPT_FUNCTION_NAME))
+        if (is_breakpoint && function_exists(DEBUG_PROMPT_FUNCTION_NAME)) {
+            reader_set_left_prompt(DEBUG_PROMPT_FUNCTION_NAME);
+        } else if (function_exists(LEFT_PROMPT_FUNCTION_NAME)) {
+            reader_set_left_prompt(LEFT_PROMPT_FUNCTION_NAME);
+        } else {
+            reader_set_left_prompt(DEFAULT_PROMPT);
+        }
+
+        if (function_exists(RIGHT_PROMPT_FUNCTION_NAME)) {
             reader_set_right_prompt(RIGHT_PROMPT_FUNCTION_NAME);
-        else
+        } else {
             reader_set_right_prompt(L"");
+        }
 
         // Put buff in temporary string and clear buff, so that we can handle a call to
         // reader_set_buffer during evaluation.
@@ -2275,6 +2295,7 @@ static int read_i(void) {
             }
         }
     }
+
     reader_pop();
     return 0;
 }
@@ -2699,9 +2720,6 @@ const wchar_t *reader_readline(int nchars) {
                 if (el->position < el->size()) {
                     update_buff_pos(el, el->position + 1);
                     remove_backward();
-                    if (el->position > 0 && el->position == el->size()) {
-                        update_buff_pos(el, el->position - 1);
-                    }
                 }
                 break;
             }
@@ -3211,7 +3229,7 @@ const wchar_t *reader_readline(int nchars) {
         reader_repaint_if_needed();
     }
 
-    fputwc(L'\n', stdout);
+    write(STDOUT_FILENO, "\n", 1);
 
     // Ensure we have no pager contents when we exit.
     if (!data->pager.empty()) {
@@ -3310,7 +3328,7 @@ static int read_ni(int fd, const io_chain_t &io) {
             parser.eval(str, io, TOP, std::move(tree));
         } else {
             wcstring sb;
-            parser.get_backtrace(str, errors, &sb);
+            parser.get_backtrace(str, errors, sb);
             fwprintf(stderr, L"%ls", sb.c_str());
             res = 1;
         }

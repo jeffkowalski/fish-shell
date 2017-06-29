@@ -97,9 +97,10 @@ int autoload_t::load(const wcstring &cmd, bool reload) {
     // on the main thread.
     if (!inserted) {
         // We failed to insert.
-        debug(0, _(L"Could not autoload item '%ls', it is already being autoloaded. "
-                   L"This is a circular dependency in the autoloading scripts, please remove it."),
-              cmd.c_str());
+        const wchar_t *fmt =
+            _(L"Could not autoload item '%ls', it is already being autoloaded. "
+              L"This is a circular dependency in the autoloading scripts, please remove it.");
+        debug(0, fmt, cmd.c_str());
         return 1;
     }
     // Try loading it.
@@ -253,7 +254,7 @@ bool autoload_t::locate_file_and_maybe_load_it(const wcstring &cmd, bool really_
             if (really_load) {
                 this->insert(cmd, autoload_function_t(true));
             } else {
-                this->insert(cmd, autoload_function_t(true));
+                this->insert_no_eviction(cmd, autoload_function_t(true));
             }
             func = this->get(cmd);
             assert(func);

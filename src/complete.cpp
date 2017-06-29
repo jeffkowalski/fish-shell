@@ -1121,7 +1121,7 @@ bool completer_t::try_complete_variable(const wcstring &str) {
 
     for (size_t in_pos = 0; in_pos < len; in_pos++) {
         wchar_t c = str.at(in_pos);
-        if (!wcsvarchr(c)) {
+        if (!valid_var_name_char(c)) {
             // This character cannot be in a variable, reset the dollar.
             variable_start = -1;
         }
@@ -1172,7 +1172,7 @@ bool completer_t::try_complete_variable(const wcstring &str) {
 
 /// Try to complete the specified string as a username. This is used by ~USER type expansion.
 ///
-/// \return 0 if unable to complete, 1 otherwise
+/// \return false if unable to complete, true otherwise
 bool completer_t::try_complete_user(const wcstring &str) {
 #ifndef HAVE_GETPWENT
     // The getpwent() function does not exist on Android. A Linux user on Android isn't
@@ -1184,48 +1184,41 @@ bool completer_t::try_complete_user(const wcstring &str) {
     const wchar_t *cmd = str.c_str();
     const wchar_t *first_char = cmd;
 
-    if (*first_char != L'~' || wcschr(first_char, L'/')) {
-        return false;
-    }
+    if (*first_char != L'~' || wcschr(first_char, L'/')) return false;
 
     const wchar_t *user_name = first_char + 1;
     const wchar_t *name_end = wcschr(user_name, L'~');
-    if (name_end) {
-        return false;
-    }
+    if (name_end) return false;
 
     double start_time = timef();
     bool result = false;
-    struct passwd *pw;
     size_t name_len = wcslen(user_name);
 
+    // We don't bother with the thread-safe `getpwent_r()` variant because it isn't needed. This is
+    // only run in a completion context and thus will only be called from a single thread and there
+    // is no place else in fish where we call `getpwent()`.
+    struct passwd *pw;
     setpwent();
-    while ((pw = getpwent()) != 0) {
-        double current_time = timef();
-        if (current_time - start_time > 0.2) {
-            return 1;
-        }
-
-        if (!pw->pw_name) {
-            continue;
-        }
-
+    // cppcheck-suppress getpwentCalled
+    while ((pw = getpwent()) != NULL) {
         const wcstring pw_name_str = str2wcstring(pw->pw_name);
         const wchar_t *pw_name = pw_name_str.c_str();
         if (wcsncmp(user_name, pw_name, name_len) == 0) {
             wcstring desc = format_string(COMPLETE_USER_DESC, pw_name);
             append_completion(&this->completions, &pw_name[name_len], desc, COMPLETE_NO_SPACE);
-
             result = true;
         } else if (wcsncasecmp(user_name, pw_name, name_len) == 0) {
             wcstring name = format_string(L"~%ls", pw_name);
             wcstring desc = format_string(COMPLETE_USER_DESC, pw_name);
-
             append_completion(&this->completions, name, desc,
                               COMPLETE_REPLACES_TOKEN | COMPLETE_DONT_ESCAPE | COMPLETE_NO_SPACE);
             result = true;
         }
+
+        // If we've spent too much time (more than 200 ms) doing this give up.
+        if (timef() - start_time > 0.2) break;
     }
+
     endpwent();
     return result;
 #endif
@@ -1456,10 +1449,6 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
                         }
                     }
 
-                    // If we have found no command specific completions at all, fall back to using
-                    // file completions.
-                    if (completer.empty()) do_file = true;
-
                     // Hack. If we're cd, handle it specially (issue #1059, others).
                     handle_as_special_cd = (current_command_unescape == L"cd");
 
@@ -1567,8 +1556,7 @@ static wrapper_map_t &wrap_map() {
     return *wrapper_map;
 }
 
-/// Add a new target that is wrapped by command. Example: __fish_sgrep (command) wraps grep
-/// (target).
+/// Add a new target that wraps a command. Example: __fish_XYZ (function) wraps XYZ (target).
 bool complete_add_wrapper(const wcstring &command, const wcstring &new_target) {
     if (command.empty() || new_target.empty()) {
         return false;

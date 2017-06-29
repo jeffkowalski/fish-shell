@@ -259,7 +259,7 @@ wcstring process_iterator_t::name_for_pid(pid_t pid) {
     }
 
     args = (char *)malloc(maxarg);
-    if (args == NULL) {
+    if (args == NULL) {  // cppcheck-suppress memleak
         return result;
     }
 
@@ -533,8 +533,6 @@ static bool find_job(const wchar_t *proc, expand_flags_t flags,
 /// Searches for a job with the specified job id, or a job or process which has the string \c proc
 /// as a prefix of its commandline. Appends the name of the process as a completion in 'out'.
 ///
-/// If the ACCEPT_INCOMPLETE flag is set, the remaining string for any matches are inserted.
-///
 /// Otherwise, any job matching the specified string is matched, and the job pgid is returned. If no
 /// job matches, all child processes are searched. If no child processes match, and <tt>fish</tt>
 /// can understand the contents of the /proc filesystem, all the users processes are searched for
@@ -652,7 +650,7 @@ static size_t parse_slice(const wchar_t *in, wchar_t **end_ptr, std::vector<long
         }
         // debug( 0, L"Push idx %d", tmp );
 
-        long i1 = tmp > -1 ? tmp : (long)array_size + tmp + 1;
+        long i1 = tmp > -1 ? tmp : size + tmp + 1;
         pos = end - in;
         while (in[pos] == INTERNAL_SEPARATOR) pos++;
         if (in[pos] == L'.' && in[pos + 1] == L'.') {
@@ -669,6 +667,13 @@ static size_t parse_slice(const wchar_t *in, wchar_t **end_ptr, std::vector<long
 
             // debug( 0, L"Push range %d %d", tmp, tmp1 );
             long i2 = tmp1 > -1 ? tmp1 : size + tmp1 + 1;
+            // Clamp to array size, but only when doing a range,
+            // and only when just one is too high.
+            if (i1 > size && i2 > size) {
+                continue;
+            }
+            i1 = i1 < size ? i1 : size;
+            i2 = i2 < size ? i2 : size;
             // debug( 0, L"Push range idx %d %d", i1, i2 );
             short direction = i2 < i1 ? -1 : 1;
             for (long jjj = i1; jjj * direction <= i2 * direction; jjj += direction) {
@@ -748,7 +753,7 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
                 stop_pos++;
                 break;
             }
-            if (!wcsvarchr(nc)) break;
+            if (!valid_var_name_char(nc)) break;
 
             stop_pos++;
         }
@@ -798,29 +803,22 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
 
                 if (!all_vars) {
                     wcstring_list_t string_values(var_idx_list.size());
+                    size_t k = 0;
                     for (size_t j = 0; j < var_idx_list.size(); j++) {
                         long tmp = var_idx_list.at(j);
-                        // Check that we are within array bounds. If not, truncate the list to
-                        // exit.
-                        if (tmp < 1 || (size_t)tmp > var_item_list.size()) {
-                            size_t var_src_pos = var_pos_list.at(j);
-                            // The slice was parsed starting at stop_pos, so we have to add that
-                            // to the error position.
-                            append_syntax_error(errors, slice_start + var_src_pos,
-                                                ARRAY_BOUNDS_ERR);
-                            is_ok = false;
-                            var_idx_list.resize(j);
-                            break;
-                        } else {
-                            // Replace each index in var_idx_list inplace with the string value
-                            // at the specified index.
-                            // al_set( var_idx_list, j, wcsdup((const wchar_t *)al_get(
-                            // &var_item_list, tmp-1 ) ) );
-                            string_values.at(j) = var_item_list.at(tmp - 1);
+                        // Check that we are within array bounds. If not, skip the element. Note:
+                        // Negative indices (`echo $foo[-1]`) are already converted to positive ones
+                        // here, So tmp < 1 means it's definitely not in.
+                        if ((size_t)tmp > var_item_list.size() || tmp < 1) {
+                            continue;
                         }
+                        // Replace each index in var_idx_list inplace with the string value
+                        // at the specified index.
+                        string_values.at(k++) = var_item_list.at(tmp - 1);
                     }
 
-                    // string_values is the new var_item_list.
+                    // string_values is the new var_item_list. Resize to remove invalid elements.
+                    string_values.resize(k);
                     var_item_list = std::move(string_values);
                 }
             }
@@ -894,17 +892,6 @@ static int expand_variables(const wcstring &instr, std::vector<completion_t> *ou
                 return is_ok;
             }
             stop_pos = (slice_end - in);
-
-            // Validate that the parsed indexes are valid.
-            for (size_t j = 0; j < var_idx_list.size(); j++) {
-                long tmp = var_idx_list.at(j);
-                if (tmp != 1) {
-                    size_t var_src_pos = var_pos_list.at(j);
-                    append_syntax_error(errors, slice_start + var_src_pos, ARRAY_BOUNDS_ERR);
-                    is_ok = 0;
-                    return is_ok;
-                }
-            }
         }
 
         // Expand a non-existing variable.
@@ -1092,10 +1079,8 @@ static int expand_cmdsubst(const wcstring &input, std::vector<completion_t> *out
         tail_begin = slice_end;
         for (i = 0; i < slice_idx.size(); i++) {
             long idx = slice_idx.at(i);
-            if (idx < 1 || (size_t)idx > sub_res.size()) {
-                size_t pos = slice_source_positions.at(i);
-                append_syntax_error(errors, slice_begin - in + pos, ARRAY_BOUNDS_ERR);
-                return 0;
+            if ((size_t)idx > sub_res.size() || idx < 1) {
+                continue;
             }
             idx = idx - 1;
 
@@ -1180,11 +1165,14 @@ static void expand_home_directory(wcstring &input) {
         } else {
             // Some other users home directory.
             std::string name_cstr = wcs2string(username);
-            struct passwd *userinfo = getpwnam(name_cstr.c_str());
-            if (userinfo == NULL) {
+            struct passwd userinfo;
+            struct passwd *result;
+            char buf[8192];
+            int retval = getpwnam_r(name_cstr.c_str(), &userinfo, buf, sizeof(buf), &result);
+            if (retval || !result) {
                 tilde_error = true;
             } else {
-                home = str2wcstring(userinfo->pw_dir);
+                home = str2wcstring(userinfo.pw_dir);
             }
         }
 

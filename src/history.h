@@ -89,7 +89,7 @@ class history_item_t {
     time_t timestamp() const { return creation_timestamp; }
 
     const path_list_t &get_required_paths() const { return required_paths; }
-    void set_required_paths(path_list_t paths) { required_paths = paths; }
+    void set_required_paths(const path_list_t &paths) { required_paths = paths; }
 
     bool operator==(const history_item_t &other) const {
         return contents == other.contents && creation_timestamp == other.creation_timestamp &&
@@ -182,7 +182,7 @@ class history_t {
 
     // Attempts to rewrite the existing file to a target temporary file
     // Returns false on error, true on success
-    bool rewrite_to_temporary_file(int tmp_fd, int existing_fd) const;
+    bool rewrite_to_temporary_file(int existing_fd, int dst_fd) const;
 
     // Saves history by rewriting the file.
     bool save_internal_via_rewrite();

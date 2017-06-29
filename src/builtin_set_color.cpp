@@ -27,7 +27,6 @@
 #include "env.h"
 #include "io.h"
 #include "output.h"
-#include "proc.h"
 #include "wgetopt.h"
 #include "wutil.h"  // IWYU pragma: keep
 
@@ -55,20 +54,19 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     // By the time this is called we should have initialized the curses subsystem.
     assert(curses_initialized);
 
-    wgetopter_t w;
     // Variables used for parsing the argument list.
-    const struct woption long_options[] = {{L"background", required_argument, 0, 'b'},
-                                           {L"help", no_argument, 0, 'h'},
-                                           {L"bold", no_argument, 0, 'o'},
-                                           {L"underline", no_argument, 0, 'u'},
-                                           {L"italics", no_argument, 0, 'i'},
-                                           {L"dim", no_argument, 0, 'd'},
-                                           {L"reverse", no_argument, 0, 'r'},
-                                           {L"version", no_argument, 0, 'v'},
-                                           {L"print-colors", no_argument, 0, 'c'},
-                                           {0, 0, 0, 0}};
+    static const wchar_t *short_options = L"b:hvoidrcu";
+    static const struct woption long_options[] = {{L"background", required_argument, NULL, 'b'},
+                                                  {L"help", no_argument, NULL, 'h'},
+                                                  {L"bold", no_argument, NULL, 'o'},
+                                                  {L"underline", no_argument, NULL, 'u'},
+                                                  {L"italics", no_argument, NULL, 'i'},
+                                                  {L"dim", no_argument, NULL, 'd'},
+                                                  {L"reverse", no_argument, NULL, 'r'},
+                                                  {L"version", no_argument, NULL, 'v'},
+                                                  {L"print-colors", no_argument, NULL, 'c'},
+                                                  {NULL, 0, NULL, 0}};
 
-    const wchar_t *short_options = L"b:hvoidrcu";
     int argc = builtin_count_args(argv);
 
     // Some code passes variables to set_color that don't exist, like $fish_user_whatever. As a
@@ -81,25 +79,17 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     bool bold = false, underline = false, italics = false, dim = false, reverse = false;
 
     // Parse options to obtain the requested operation and the modifiers.
-    w.woptind = 0;
-    while (1) {
-        int opt = w.wgetopt_long(argc, argv, short_options, long_options, 0);
-
-        if (opt == -1) {
-            break;
-        }
-
+    int opt;
+    wgetopter_t w;
+    while ((opt = w.wgetopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
         switch (opt) {
-            case 0: {
-                break;
-            }
             case 'b': {
                 bgcolor = w.woptarg;
                 break;
             }
             case 'h': {
                 builtin_print_help(parser, streams, argv[0], streams.out);
-                return STATUS_BUILTIN_OK;
+                return STATUS_CMD_OK;
             }
             case 'o': {
                 bold = true;
@@ -123,13 +113,13 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
             }
             case 'c': {
                 print_colors(streams);
-                return STATUS_BUILTIN_OK;
+                return STATUS_CMD_OK;
             }
             case '?': {
-                return STATUS_BUILTIN_ERROR;
+                return STATUS_INVALID_ARGS;
             }
             default: {
-                DIE("unexpected opt");
+                DIE("unexpected retval from wgetopt_long");
                 break;
             }
         }
@@ -141,7 +131,7 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
         rgb_color_t fg = rgb_color_t(argv[w.woptind]);
         if (fg.is_none()) {
             streams.err.append_format(_(L"%ls: Unknown color '%ls'\n"), argv[0], argv[w.woptind]);
-            return STATUS_BUILTIN_ERROR;
+            return STATUS_INVALID_ARGS;
         }
         fgcolors.push_back(fg);
     }
@@ -149,7 +139,7 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     if (fgcolors.empty() && bgcolor == NULL && !bold && !underline && !italics && !dim &&
         !reverse) {
         streams.err.append_format(_(L"%ls: Expected an argument\n"), argv[0]);
-        return STATUS_BUILTIN_ERROR;
+        return STATUS_INVALID_ARGS;
     }
 
     // #1323: We may have multiple foreground colors. Choose the best one. If we had no foreground
@@ -160,13 +150,13 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     const rgb_color_t bg = rgb_color_t(bgcolor ? bgcolor : L"");
     if (bgcolor && bg.is_none()) {
         streams.err.append_format(_(L"%ls: Unknown color '%ls'\n"), argv[0], bgcolor);
-        return STATUS_BUILTIN_ERROR;
+        return STATUS_INVALID_ARGS;
     }
 
     // Test if we have at least basic support for setting fonts, colors and related bits - otherwise
     // just give up...
     if (cur_term == NULL || !exit_attribute_mode) {
-        return STATUS_BUILTIN_ERROR;
+        return STATUS_CMD_ERROR;
     }
 
     // Save old output function so we can restore it.
@@ -228,5 +218,5 @@ int builtin_set_color(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     streams.out.append(str2wcstring(builtin_set_color_output));
     builtin_set_color_output.clear();
 
-    return STATUS_BUILTIN_OK;
+    return STATUS_CMD_OK;
 }

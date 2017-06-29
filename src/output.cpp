@@ -168,7 +168,7 @@ void set_color(rgb_color_t c, rgb_color_t c2) {
 #if 0
     wcstring tmp = c.description();
     wcstring tmp2 = c2.description();
-    debug(3, "set_color %ls : %ls\n", tmp.c_str(), tmp2.c_str());
+    debug(3, "set_color %ls : %ls", tmp.c_str(), tmp2.c_str());
 #endif
     ASSERT_IS_MAIN_THREAD();
     if (!cur_term) return;
@@ -555,8 +555,9 @@ void writembs_check(char *mbs, const char *mbs_name, const char *file, long line
         tputs(mbs, 1, &writeb);
     } else {
         env_var_t term = env_get_string(L"TERM");
-        debug(0, _(L"Tried to use terminfo string %s on line %ld of %s, which is undefined in "
-                   L"terminal of type \"%ls\". Please report this error to %s"),
-              mbs_name, line, file, term.c_str(), PACKAGE_BUGREPORT);
+        const wchar_t *fmt =
+            _(L"Tried to use terminfo string %s on line %ld of %s, which is "
+              L"undefined in terminal of type \"%ls\". Please report this error to %s");
+        debug(0, fmt, mbs_name, line, file, term.c_str(), PACKAGE_BUGREPORT);
     }
 }

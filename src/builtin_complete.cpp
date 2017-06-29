@@ -17,7 +17,6 @@
 #include "parse_constants.h"
 #include "parse_util.h"
 #include "parser.h"
-#include "proc.h"
 #include "reader.h"
 #include "wgetopt.h"
 #include "wutil.h"  // IWYU pragma: keep
@@ -130,25 +129,25 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     wcstring_list_t path;
     wcstring_list_t wrap_targets;
 
-    const wchar_t *short_options = L":a:c:p:s:l:o:d:frxeuAn:C::w:h";
-    const struct woption long_options[] = {{L"exclusive", no_argument, NULL, 'x'},
-                                           {L"no-files", no_argument, NULL, 'f'},
-                                           {L"require-parameter", no_argument, NULL, 'r'},
-                                           {L"path", required_argument, NULL, 'p'},
-                                           {L"command", required_argument, NULL, 'c'},
-                                           {L"short-option", required_argument, NULL, 's'},
-                                           {L"long-option", required_argument, NULL, 'l'},
-                                           {L"old-option", required_argument, NULL, 'o'},
-                                           {L"description", required_argument, NULL, 'd'},
-                                           {L"arguments", required_argument, NULL, 'a'},
-                                           {L"erase", no_argument, NULL, 'e'},
-                                           {L"unauthoritative", no_argument, NULL, 'u'},
-                                           {L"authoritative", no_argument, NULL, 'A'},
-                                           {L"condition", required_argument, NULL, 'n'},
-                                           {L"wraps", required_argument, NULL, 'w'},
-                                           {L"do-complete", optional_argument, NULL, 'C'},
-                                           {L"help", no_argument, NULL, 'h'},
-                                           {NULL, 0, NULL, 0}};
+    static const wchar_t *short_options = L":a:c:p:s:l:o:d:frxeuAn:C::w:h";
+    static const struct woption long_options[] = {{L"exclusive", no_argument, NULL, 'x'},
+                                                  {L"no-files", no_argument, NULL, 'f'},
+                                                  {L"require-parameter", no_argument, NULL, 'r'},
+                                                  {L"path", required_argument, NULL, 'p'},
+                                                  {L"command", required_argument, NULL, 'c'},
+                                                  {L"short-option", required_argument, NULL, 's'},
+                                                  {L"long-option", required_argument, NULL, 'l'},
+                                                  {L"old-option", required_argument, NULL, 'o'},
+                                                  {L"description", required_argument, NULL, 'd'},
+                                                  {L"arguments", required_argument, NULL, 'a'},
+                                                  {L"erase", no_argument, NULL, 'e'},
+                                                  {L"unauthoritative", no_argument, NULL, 'u'},
+                                                  {L"authoritative", no_argument, NULL, 'A'},
+                                                  {L"condition", required_argument, NULL, 'n'},
+                                                  {L"wraps", required_argument, NULL, 'w'},
+                                                  {L"do-complete", optional_argument, NULL, 'C'},
+                                                  {L"help", no_argument, NULL, 'h'},
+                                                  {NULL, 0, NULL, 0}};
 
     int opt;
     wgetopter_t w;
@@ -176,7 +175,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                         cmd_to_complete.push_back(tmp);
                 } else {
                     streams.err.append_format(_(L"%ls: Invalid token '%ls'\n"), cmd, w.woptarg);
-                    return STATUS_BUILTIN_ERROR;
+                    return STATUS_INVALID_ARGS;
                 }
                 break;
             }
@@ -196,7 +195,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 short_opt.append(w.woptarg);
                 if (w.woptarg[0] == '\0') {
                     streams.err.append_format(_(L"%ls: -s requires a non-empty string\n"), cmd);
-                    return STATUS_BUILTIN_ERROR;
+                    return STATUS_INVALID_ARGS;
                 }
                 break;
             }
@@ -204,7 +203,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 gnu_opt.push_back(w.woptarg);
                 if (w.woptarg[0] == '\0') {
                     streams.err.append_format(_(L"%ls: -l requires a non-empty string\n"), cmd);
-                    return STATUS_BUILTIN_ERROR;
+                    return STATUS_INVALID_ARGS;
                 }
                 break;
             }
@@ -212,7 +211,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 old_opt.push_back(w.woptarg);
                 if (w.woptarg[0] == '\0') {
                     streams.err.append_format(_(L"%ls: -o requires a non-empty string\n"), cmd);
-                    return STATUS_BUILTIN_ERROR;
+                    return STATUS_INVALID_ARGS;
                 }
                 break;
             }
@@ -239,22 +238,22 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                     // This corresponds to using 'complete -C' in non-interactive mode.
                     // See #2361.
                     builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
-                    return STATUS_BUILTIN_ERROR;
+                    return STATUS_INVALID_ARGS;
                 }
                 do_complete_param = arg;
                 break;
             }
             case 'h': {
                 builtin_print_help(parser, streams, cmd, streams.out);
-                return STATUS_BUILTIN_OK;
+                return STATUS_CMD_OK;
             }
             case ':': {
                 builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
-                return STATUS_BUILTIN_ERROR;
+                return STATUS_INVALID_ARGS;
             }
             case '?': {
                 builtin_unknown_option(parser, streams, cmd, argv[w.woptind - 1]);
-                return STATUS_BUILTIN_ERROR;
+                return STATUS_INVALID_ARGS;
             }
             default: {
                 DIE("unexpected retval from wgetopt_long");
@@ -266,7 +265,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     if (w.woptind != argc) {
         streams.err.append_format(BUILTIN_ERR_TOO_MANY_ARGUMENTS, cmd);
         builtin_print_help(parser, streams, cmd, streams.err);
-        return STATUS_BUILTIN_ERROR;
+        return STATUS_INVALID_ARGS;
     }
 
     if (condition && wcslen(condition)) {
@@ -280,7 +279,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 streams.err.append_format(L"\n%s: ", cmd);
                 streams.err.append(errors.at(i).describe(condition_string));
             }
-            return STATUS_BUILTIN_ERROR;
+            return STATUS_CMD_ERROR;
         }
     }
 
@@ -295,7 +294,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                                       comp);
             streams.err.append(err_text);
             streams.err.push_back(L'\n');
-            return STATUS_BUILTIN_ERROR;
+            return STATUS_CMD_ERROR;
         }
     }
 
@@ -374,5 +373,5 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
         }
     }
 
-    return STATUS_BUILTIN_OK;
+    return STATUS_CMD_OK;
 }

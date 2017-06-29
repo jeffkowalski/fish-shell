@@ -4,7 +4,6 @@
 #include "config.h"  // IWYU pragma: keep
 
 #include <errno.h>
-#include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -26,10 +25,10 @@
 
 static bool path_get_path_core(const wcstring &cmd, wcstring *out_path,
                                const env_var_t &bin_path_var) {
-    int err = ENOENT;
     debug(3, L"path_get_path( '%ls' )", cmd.c_str());
 
-    // If the command has a slash, it must be a full path.
+    // If the command has a slash, it must be an absolute or relative path and thus we don't bother
+    // looking for a matching command.
     if (cmd.find(L'/') != wcstring::npos) {
         if (waccess(cmd, X_OK) != 0) {
             return false;
@@ -47,18 +46,17 @@ static bool path_get_path_core(const wcstring &cmd, wcstring *out_path,
         return false;
     }
 
+    int err = ENOENT;
     wcstring bin_path;
     if (!bin_path_var.missing()) {
         bin_path = bin_path_var;
     } else {
-        // Note that PREFIX is defined in the Makefile and is defined when this module is compiled.
-        // This ensures we always default to "/bin", "/usr/bin" and the bin dir defined for the fish
-        // programs with no duplicates.
-        if (!wcscmp(PREFIX L"/bin", L"/bin") || !wcscmp(PREFIX L"/bin", L"/usr/bin")) {
-            bin_path = L"/bin" ARRAY_SEP_STR L"/usr/bin";
-        } else {
-            bin_path = L"/bin" ARRAY_SEP_STR L"/usr/bin" ARRAY_SEP_STR PREFIX L"/bin";
-        }
+        // Note that PREFIX is defined in the `Makefile` and is thus defined when this module is
+        // compiled. This ensures we always default to "/bin", "/usr/bin" and the bin dir defined
+        // for the fish programs. Possibly with a duplicate dir if PREFIX is empty, "/", "/usr" or
+        // "/usr/". If the PREFIX duplicates /bin or /usr/bin that is harmless other than a trivial
+        // amount of time testing a path we've already tested.
+        bin_path = L"/bin" ARRAY_SEP_STR L"/usr/bin" ARRAY_SEP_STR PREFIX L"/bin";
     }
 
     std::vector<wcstring> pathsv;
@@ -106,6 +104,40 @@ bool path_get_path(const wcstring &cmd, wcstring *out_path, const env_vars_snaps
 
 bool path_get_path(const wcstring &cmd, wcstring *out_path) {
     return path_get_path_core(cmd, out_path, env_get_string(L"PATH"));
+}
+
+wcstring_list_t path_get_paths(const wcstring &cmd) {
+    debug(3, L"path_get_paths('%ls')", cmd.c_str());
+    wcstring_list_t paths;
+
+    // If the command has a slash, it must be an absolute or relative path and thus we don't bother
+    // looking for matching commands in the PATH var.
+    if (cmd.find(L'/') != wcstring::npos) {
+        struct stat buff;
+        if (wstat(cmd, &buff)) return paths;
+        if (!S_ISREG(buff.st_mode)) return paths;
+        if (waccess(cmd, X_OK)) return paths;
+        paths.push_back(cmd);
+        return paths;
+    }
+
+    wcstring env_path = env_get_string(L"PATH");
+    std::vector<wcstring> pathsv;
+    tokenize_variable_array(env_path, pathsv);
+    for (auto path : pathsv) {
+        if (path.empty()) continue;
+        append_path_component(path, cmd);
+        if (waccess(path, X_OK) == 0) {
+            struct stat buff;
+            if (wstat(path, &buff) == -1) {
+                if (errno != EACCES) wperror(L"stat");
+                continue;
+            }
+            if (S_ISREG(buff.st_mode)) paths.push_back(path);
+        }
+    }
+
+    return paths;
 }
 
 bool path_get_cdpath(const wcstring &dir, wcstring *out, const wchar_t *wd,
@@ -233,8 +265,7 @@ static void maybe_issue_path_warning(const wcstring &which_dir, const wcstring &
     debug(0, custom_error_msg.c_str());
     if (path.empty()) {
         debug(0, _(L"Unable to locate the %ls directory."), which_dir.c_str());
-        debug(0, _(L"Please set the %ls or HOME environment variable "
-                   L"before starting fish."),
+        debug(0, _(L"Please set the %ls or HOME environment variable before starting fish."),
               xdg_var.c_str());
     } else {
         const wchar_t *env_var = using_xdg ? xdg_var.c_str() : L"HOME";
@@ -243,7 +274,7 @@ static void maybe_issue_path_warning(const wcstring &which_dir, const wcstring &
         debug(0, _(L"The error was '%s'."), strerror(saved_errno));
         debug(0, _(L"Please set $%ls to a directory where you have write access."), env_var);
     }
-    fputwc(L'\n', stderr);
+    write(STDERR_FILENO, "\n", 1);
 }
 
 static void path_create(wcstring &path, const wcstring &xdg_var, const wcstring &which_dir,

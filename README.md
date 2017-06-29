@@ -30,7 +30,7 @@ Building the documentation requires Doxygen 1.8.7 or newer.
     autoreconf --no-recursive [if building from Git]
     ./configure
     make [gmake on BSD]
-    sudo make install
+    sudo make install [sudo gmake install on BSD]
 
 ### Xcode Development Build
 
@@ -41,6 +41,7 @@ Building the documentation requires Doxygen 1.8.7 or newer.
 
     xcodebuild install
     sudo ditto /tmp/fish.dst /
+    sudo make install-doc
 
 ## Help, it didn't build!
 
@@ -60,7 +61,7 @@ fish requires a curses implementation, such as ncurses, to run.
 
 fish requires PCRE2 due to the regular expression support contained in the `string` builtin. A bundled version will be compiled in automatically at build time if required.
 
-fish requires a number of utilities to operate, which should be present on any Unix, GNU/Linux or OS X system. These include (but are not limited to) hostname, grep, awk, sed, which, and getopt. fish also requires the bc program.
+fish requires a number of utilities to operate, which should be present on any Unix, GNU/Linux or OS X system. These include (but are not limited to) hostname, grep, awk, sed, and getopt. fish also requires the bc program.
 
 Translation support requires the gettext program.
 

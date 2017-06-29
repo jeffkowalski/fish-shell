@@ -37,7 +37,7 @@ AC_SUBST(EXTRA_PCRE2)
 AC_MSG_CHECKING([if autoreconf needs to be run])
 if test configure -ot configure.ac; then
   AC_MSG_RESULT([yes])
-  if which autoreconf >/dev/null; then
+  if command -v autoreconf >/dev/null; then
     # No need to provide any error messages if autoreconf fails, the
     # shell and autconf should take care of that themselves
     AC_MSG_NOTICE([running autoreconf --no-recursive])
@@ -68,7 +68,7 @@ fi
 AC_MSG_CHECKING([if autoheader needs to be run])
 if test ! -f ./config.h.in -o config.h.in -ot configure.ac; then
   AC_MSG_RESULT([yes])
-  if which autoheader >/dev/null; then
+  if command -v autoheader >/dev/null; then
     AC_MSG_NOTICE([running autoheader])
     autoheader || exit 1
   else
@@ -416,6 +416,17 @@ fi
 # Here follows a list of small programs used to test for various
 # features that Autoconf doesn't tell us about
 #
+
+dnl AC_CHECK_FUNCS uses C linkage, but sometimes (Solaris!) the behaviour is
+dnl different with C++.
+AC_MSG_CHECKING([if ctermid_r() available])
+AC_TRY_LINK( [ #include <stdio.h> ],
+             [ char buf[L_ctermid]; char *foo = ctermid_r(buf); ],
+             [ AC_MSG_RESULT(yes)
+               AC_DEFINE(HAVE_CTERMID_R, 1, Define to 1 if you have the `ctermid_r' function.)
+             ],
+             [AC_MSG_RESULT(no)],
+             )
 
 #
 # Check if struct winsize and TIOCGWINSZ exist

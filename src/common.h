@@ -1,7 +1,7 @@
 // Prototypes for various functions, mostly string utilities, that are used by most parts of fish.
 #ifndef FISH_COMMON_H
 #define FISH_COMMON_H
-#include "config.h"
+#include "config.h"  // IWYU pragma: keep
 
 #include <errno.h>
 #include <pthread.h>
@@ -12,6 +12,9 @@
 #include <string.h>
 #include <termios.h>
 #include <wchar.h>
+#ifdef HAVE_SYS_IOCTL_H
+#include <sys/ioctl.h>
+#endif
 
 #include <memory>
 #include <sstream>
@@ -86,6 +89,8 @@ typedef std::vector<wcstring> wcstring_list_t;
 #define INPUT_COMMON_BASE (wchar_t)0xF700
 #define INPUT_COMMON_END (INPUT_COMMON_BASE + 64)
 
+enum escape_string_style_t { STRING_STYLE_SCRIPT, STRING_STYLE_URL, STRING_STYLE_VAR };
+
 // Flags for unescape_string functions.
 enum {
     UNESCAPE_DEFAULT = 0,         // default behavior
@@ -94,15 +99,14 @@ enum {
 };
 typedef unsigned int unescape_flags_t;
 
-// Flags for the escape_string() and escape_string() functions.
+// Flags for the escape_string() and escape_string() functions. These are only applicable when the
+// escape style is "script" (i.e., STRING_STYLE_SCRIPT).
 enum {
     /// Escape all characters, including magic characters like the semicolon.
     ESCAPE_ALL = 1 << 0,
-
     /// Do not try to use 'simplified' quoted escapes, and do not use empty quotes as the empty
     /// string.
     ESCAPE_NO_QUOTED = 1 << 1,
-
     /// Do not escape tildes.
     ESCAPE_NO_TILDE = 1 << 2
 };
@@ -159,6 +163,9 @@ extern wchar_t ellipsis_char;
 /// Character representing an omitted newline at the end of text.
 extern wchar_t omitted_newline_char;
 
+/// Character used for the silent mode of the read command
+extern wchar_t obfuscation_read_char;
+
 /// The verbosity level of fish. If a call to debug has a severity level higher than \c debug_level,
 /// it will not be printed.
 extern int debug_level;
@@ -210,23 +217,21 @@ extern bool has_working_tty_timestamps;
 /// stdio functions and should be writing the message to stderr rather than stdout. Second, if
 /// possible it is useful to provide additional context such as a stack backtrace.
 #undef assert
-#undef __assert
-//#define assert(e)  do {(void)((e) ? ((void)0) : __assert(#e, __FILE__, __LINE__)); } while(false)
-#define assert(e) (e) ? ((void)0) : __assert(#e, __FILE__, __LINE__, 0)
-#define assert_with_errno(e) (e) ? ((void)0) : __assert(#e, __FILE__, __LINE__, errno)
-#define DIE(msg) __assert(msg, __FILE__, __LINE__, 0)
-#define DIE_WITH_ERRNO(msg) __assert(msg, __FILE__, __LINE__, errno)
+#define assert(e) (e) ? ((void)0) : __fish_assert(#e, __FILE__, __LINE__, 0)
+#define assert_with_errno(e) (e) ? ((void)0) : __fish_assert(#e, __FILE__, __LINE__, errno)
+#define DIE(msg) __fish_assert(msg, __FILE__, __LINE__, 0)
+#define DIE_WITH_ERRNO(msg) __fish_assert(msg, __FILE__, __LINE__, errno)
 /// This macro is meant to be used with functions that return zero on success otherwise return an
 /// errno value. Most notably the pthread family of functions which we never expect to fail.
-#define DIE_ON_FAILURE(e)                             \
-    do {                                              \
-        int status = e;                               \
-        if (status != 0) {                            \
-            __assert(#e, __FILE__, __LINE__, status); \
-        }                                             \
+#define DIE_ON_FAILURE(e)                                  \
+    do {                                                   \
+        int status = e;                                    \
+        if (status != 0) {                                 \
+            __fish_assert(#e, __FILE__, __LINE__, status); \
+        }                                                  \
     } while (0)
 
-[[noreturn]] void __assert(const char *msg, const char *file, size_t line, int error);
+[[noreturn]] void __fish_assert(const char *msg, const char *file, size_t line, int error);
 
 /// Check if signals are blocked. If so, print an error message and return from the function
 /// performing this check.
@@ -688,8 +693,10 @@ ssize_t read_loop(int fd, void *buff, size_t count);
 /// \param in The string to be escaped
 /// \param flags Flags to control the escaping
 /// \return The escaped string
-wcstring escape_string(const wchar_t *in, escape_flags_t flags);
-wcstring escape_string(const wcstring &in, escape_flags_t flags);
+wcstring escape_string(const wchar_t *in, escape_flags_t flags,
+                       escape_string_style_t style = STRING_STYLE_SCRIPT);
+wcstring escape_string(const wcstring &in, escape_flags_t flags,
+                       escape_string_style_t style = STRING_STYLE_SCRIPT);
 
 /// Expand backslashed escapes and substitute them with their unescaped counterparts. Also
 /// optionally change the wildcards, the tilde character and a few more into constants which are
@@ -704,10 +711,13 @@ size_t read_unquoted_escape(const wchar_t *input, wcstring *result, bool allow_i
 /// indicates the string was unmodified.
 bool unescape_string_in_place(wcstring *str, unescape_flags_t escape_special);
 
-/// Unescapes a string, returning the unescaped value by reference. On failure, the output is set to
-/// an empty string.
-bool unescape_string(const wchar_t *input, wcstring *output, unescape_flags_t escape_special);
-bool unescape_string(const wcstring &input, wcstring *output, unescape_flags_t escape_special);
+/// Reverse the effects of calling `escape_string`. Returns the unescaped value by reference. On
+/// failure, the output is set to an empty string.
+bool unescape_string(const wchar_t *input, wcstring *output, unescape_flags_t escape_special,
+                     escape_string_style_t style = STRING_STYLE_SCRIPT);
+
+bool unescape_string(const wcstring &input, wcstring *output, unescape_flags_t escape_special,
+                     escape_string_style_t style = STRING_STYLE_SCRIPT);
 
 /// Returns the width of the terminal window, so that not all functions that use these values
 /// continually have to keep track of it separately.
@@ -842,4 +852,38 @@ void redirect_tty_output();
 #define DFLT_TERM_ROW_STR L"24"
 void invalidate_termsize(bool invalidate_vars = false);
 struct winsize get_current_winsize();
+
+bool valid_var_name_char(wchar_t chr);
+bool valid_var_name(const wchar_t *str);
+bool valid_var_name(const wcstring &str);
+bool valid_func_name(const wcstring &str);
+
+// Return values (`$status` values for fish scripts) for various situations.
+enum {
+    /// The status code used for normal exit in a command.
+    STATUS_CMD_OK = 0,
+    /// The status code used for failure exit in a command (but not if the args were invalid).
+    STATUS_CMD_ERROR = 1,
+    /// The status code used when a command was not found.
+    STATUS_CMD_UNKNOWN = 127,
+
+    /// TODO: Figure out why we have two distinct failure codes for when an external command cannot
+    /// be run.
+    ///
+    /// The status code used when an external command can not be run.
+    STATUS_NOT_EXECUTABLE = 126,
+    /// The status code used when an external command can not be run.
+    STATUS_EXEC_FAIL = 125,
+
+    /// The status code used when a wildcard had no matches.
+    STATUS_UNMATCHED_WILDCARD = 124,
+    /// The status code used when illegal command name is encountered.
+    STATUS_ILLEGAL_CMD = 123,
+    /// The status code used when `read` is asked to consume too much data.
+    STATUS_READ_TOO_MUCH = 122,
+    /// The status code used for invalid arguments given to a command. This is distinct from valid
+    /// arguments that might result in a command failure. An invalid args condition is something
+    /// like an unrecognized flag, missing or too many arguments, an invalid integer, etc. But
+    STATUS_INVALID_ARGS = 121,
+};
 #endif

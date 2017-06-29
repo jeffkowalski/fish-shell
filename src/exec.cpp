@@ -454,11 +454,9 @@ void exec_job(parser_t &parser, job_t *j) {
     // program to exit before continuing in the pipeline, causing the group leader to exit.
     if (j->get_flag(JOB_CONTROL) && !exec_error) {
         for (const process_ptr_t &p : j->processes) {
-            if (p->type != EXTERNAL) {
-                if (!p->is_last_in_job || !p->is_first_in_job) {
-                    needs_keepalive = true;
-                    break;
-                }
+            if (p->type != EXTERNAL && (!p->is_last_in_job || !p->is_first_in_job)) {
+                needs_keepalive = true;
+                break;
             }
         }
     }
@@ -1066,7 +1064,7 @@ void exec_job(parser_t &parser, job_t *j) {
                         // safe_launch_process _never_ returns...
                         DIE("safe_launch_process should not have returned");
                     } else {
-                        debug(2, L"Fork #%d, pid %d: external command '%s' from '%ls'\n",
+                        debug(2, L"Fork #%d, pid %d: external command '%s' from '%ls'",
                               g_fork_count, pid, p->argv0(), file ? file : L"<no file>");
                         if (pid < 0) {
                             job_mark_process_as_failed(j, p);
@@ -1132,7 +1130,7 @@ void exec_job(parser_t &parser, job_t *j) {
 static int exec_subshell_internal(const wcstring &cmd, wcstring_list_t *lst,
                                   bool apply_exit_status) {
     ASSERT_IS_MAIN_THREAD();
-    int prev_subshell = is_subshell;
+    bool prev_subshell = is_subshell;
     const int prev_status = proc_get_last_status();
     bool split_output = false;
 
@@ -1141,7 +1139,7 @@ static int exec_subshell_internal(const wcstring &cmd, wcstring_list_t *lst,
         split_output = true;
     }
 
-    is_subshell = 1;
+    is_subshell = true;
     int subcommand_status = -1;  // assume the worst
 
     // IO buffer creation may fail (e.g. if we have too many open files to make a pipe), so this may
