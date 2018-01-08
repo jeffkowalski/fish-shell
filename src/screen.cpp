@@ -80,7 +80,8 @@ class scoped_buffer_t {
 };
 
 // Singleton of the cached escape sequences seen in prompts and similar strings.
-cached_esc_sequences_t cached_esc_sequences = cached_esc_sequences_t();
+// Note this is deliberately exported so that init_curses can clear it.
+cached_esc_sequences_t cached_esc_sequences;
 
 /// Tests if the specified narrow character sequence is present at the specified position of the
 /// specified wide character string. All of \c seq must match, but str may be longer than seq.
@@ -120,8 +121,8 @@ static bool is_screen_name_escape_seq(const wchar_t *code, size_t *resulting_len
 #if 0
     // TODO: Decide if this should be removed or modified to also test for TERM values that begin
     // with "tmux". See issue #3512.
-    const env_var_t term_name = env_get_string(L"TERM");
-    if (term_name.missing() || !string_prefixes_string(L"screen", term_name)) {
+    const env_var_t term_name = env_get(L"TERM");
+    if (term_name.missing_or_empty() || !string_prefixes_string(L"screen", term_name)) {
         return false;
     }
 #endif
@@ -278,7 +279,7 @@ size_t escape_code_length(const wchar_t *code) {
     if (!found) found = is_single_byte_escape_seq(code, &esc_seq_len);
     if (!found) found = is_csi_style_escape_seq(code, &esc_seq_len);
     if (!found) found = is_two_byte_escape_seq(code, &esc_seq_len);
-    if (found) cached_esc_sequences.add_entry(code, esc_seq_len);
+    if (found) cached_esc_sequences.add_entry(wcstring(code, esc_seq_len));
     return esc_seq_len;
 }
 

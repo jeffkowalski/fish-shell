@@ -4,6 +4,7 @@
 #include "config.h"  // IWYU pragma: keep
 
 #include <errno.h>
+#include <limits.h>
 #include <pthread.h>
 #include <stdarg.h>  // IWYU pragma: keep
 #include <stddef.h>
@@ -13,10 +14,11 @@
 #include <termios.h>
 #include <wchar.h>
 #ifdef HAVE_SYS_IOCTL_H
-#include <sys/ioctl.h>
+#include <sys/ioctl.h>  // IWYU pragma: keep
 #endif
 
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <type_traits>
@@ -89,6 +91,17 @@ typedef std::vector<wcstring> wcstring_list_t;
 #define INPUT_COMMON_BASE (wchar_t)0xF700
 #define INPUT_COMMON_END (INPUT_COMMON_BASE + 64)
 
+// NAME_MAX is not defined on Solaris
+#if !defined(NAME_MAX)
+#include <sys/param.h>
+#if defined(MAXNAMELEN)
+// MAXNAMELEN is defined on Linux, BSD, and Solaris among others
+#define NAME_MAX MAXNAMELEN
+#else
+static_assert(false, "Neither NAME_MAX nor MAXNAMELEN is defined!");
+#endif
+#endif
+
 enum escape_string_style_t { STRING_STYLE_SCRIPT, STRING_STYLE_URL, STRING_STYLE_VAR };
 
 // Flags for unescape_string functions.
@@ -146,9 +159,20 @@ enum selection_direction_t {
 ///
 /// will print the string 'fish: Pi = 3.141', given that debug_level is 1 or higher, and that
 /// program_name is 'fish'.
-void __attribute__((noinline)) debug(int level, const char *msg, ...)
+void __attribute__((noinline)) debug_impl(int level, const char *msg, ...)
     __attribute__((format(printf, 2, 3)));
-void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...);
+void __attribute__((noinline)) debug_impl(int level, const wchar_t *msg, ...);
+
+/// The verbosity level of fish. If a call to debug has a severity level higher than \c debug_level,
+/// it will not be printed.
+extern int debug_level;
+
+inline bool should_debug(int level) { return level <= debug_level; }
+
+#define debug(level, ...)                                            \
+    do {                                                             \
+        if (should_debug((level))) debug_impl((level), __VA_ARGS__); \
+    } while (0)
 
 /// Exits without invoking destructors (via _exit), useful for code after fork.
 [[noreturn]] void exit_without_destructors(int code);
@@ -166,10 +190,6 @@ extern wchar_t omitted_newline_char;
 /// Character used for the silent mode of the read command
 extern wchar_t obfuscation_read_char;
 
-/// The verbosity level of fish. If a call to debug has a severity level higher than \c debug_level,
-/// it will not be printed.
-extern int debug_level;
-
 /// How many stack frames to show when a debug() call is made.
 extern int debug_stack_frames;
 
@@ -178,10 +198,6 @@ extern bool g_profiling_active;
 
 /// Name of the current program. Should be set at startup. Used by the debug function.
 extern const wchar_t *program_name;
-
-// Variants of read() and write() that ignores return values, defeating a warning.
-void read_ignore(int fd, void *buff, size_t count);
-void write_ignore(int fd, const void *buff, size_t count);
 
 /// Set to false at run-time if it's been determined we can't trust the last modified timestamp on
 /// the tty.
@@ -203,12 +219,12 @@ extern bool has_working_tty_timestamps;
 // from within a `switch` block. As of the time I'm writing this oclint doesn't recognize the
 // `__attribute__((noreturn))` on the exit_without_destructors() function.
 // TODO: we use C++11 [[noreturn]] now, does that change things?
-#define FATAL_EXIT()                        \
-    {                                       \
-        char exit_read_buff;                \
-        show_stackframe(L'E');              \
-        read_ignore(0, &exit_read_buff, 1); \
-        exit_without_destructors(1);        \
+#define FATAL_EXIT()                                \
+    {                                               \
+        char exit_read_buff;                        \
+        show_stackframe(L'E');                      \
+        ignore_result(read(0, &exit_read_buff, 1)); \
+        exit_without_destructors(1);                \
     }
 
 /// Exit the program at once after emitting an error message and stack trace if possible.
@@ -276,6 +292,7 @@ int fgetws2(wcstring *s, FILE *f);
 wcstring str2wcstring(const char *in);
 wcstring str2wcstring(const char *in, size_t len);
 wcstring str2wcstring(const std::string &in);
+wcstring str2wcstring(const std::string &in, size_t len);
 
 /// Returns a newly allocated multibyte character string equivalent of the specified wide character
 /// string.
@@ -289,6 +306,7 @@ std::string wcs2string(const wcstring &input);
 /// Test if a string prefixes another. Returns true if a is a prefix of b.
 bool string_prefixes_string(const wcstring &proposed_prefix, const wcstring &value);
 bool string_prefixes_string(const wchar_t *proposed_prefix, const wcstring &value);
+bool string_prefixes_string(const wchar_t *proposed_prefix, const wchar_t *value);
 
 /// Test if a string is a suffix of another.
 bool string_suffixes_string(const wcstring &proposed_suffix, const wcstring &value);
@@ -501,70 +519,8 @@ class null_terminated_array_t {
 // null_terminated_array_t<char_t>.
 void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &arr,
                                   null_terminated_array_t<char> *output);
-
-class mutex_lock_t {
-   public:
-    pthread_mutex_t mutex;
-    mutex_lock_t() { DIE_ON_FAILURE(pthread_mutex_init(&mutex, NULL)); }
-
-    ~mutex_lock_t() { DIE_ON_FAILURE(pthread_mutex_destroy(&mutex)); }
-};
-
-// Basic scoped lock class.
-class scoped_lock {
-    pthread_mutex_t *lock_obj;
-    bool locked;
-
-    // No copying.
-    scoped_lock &operator=(const scoped_lock &) = delete;
-    scoped_lock(const scoped_lock &) = delete;
-
-   public:
-    scoped_lock(scoped_lock &&rhs) : lock_obj(rhs.lock_obj), locked(rhs.locked) {
-        // we acquire any locked state
-        // ensure the rhs doesn't try to unlock
-        rhs.locked = false;
-    }
-
-    void lock(void);
-    void unlock(void);
-    explicit scoped_lock(pthread_mutex_t &mutex);
-    explicit scoped_lock(mutex_lock_t &lock);
-    ~scoped_lock();
-};
-
-class rwlock_t {
-   public:
-    pthread_rwlock_t rwlock;
-    rwlock_t() { DIE_ON_FAILURE(pthread_rwlock_init(&rwlock, NULL)); }
-
-    ~rwlock_t() { DIE_ON_FAILURE(pthread_rwlock_destroy(&rwlock)); }
-
-    rwlock_t &operator=(const rwlock_t &) = delete;
-    rwlock_t(const rwlock_t &) = delete;
-};
-
-// Scoped lock class for rwlocks.
-class scoped_rwlock {
-    pthread_rwlock_t *rwlock_obj;
-    bool locked;
-    bool locked_shared;
-
-    // No copying.
-    scoped_rwlock &operator=(const scoped_lock &) = delete;
-    explicit scoped_rwlock(const scoped_lock &) = delete;
-
-   public:
-    void lock(void);
-    void unlock(void);
-    void lock_shared(void);
-    void unlock_shared(void);
-    // Upgrade shared lock to exclusive. Equivalent to `lock.unlock_shared(); lock.lock();`.
-    void upgrade(void);
-    explicit scoped_rwlock(pthread_rwlock_t &rwlock, bool shared = false);
-    explicit scoped_rwlock(rwlock_t &rwlock, bool shared = false);
-    ~scoped_rwlock();
-};
+typedef std::lock_guard<std::mutex> scoped_lock;
+typedef std::lock_guard<std::recursive_mutex> scoped_rlock;
 
 // An object wrapping a scoped lock and a value
 // This is returned from owning_lock.acquire()
@@ -579,7 +535,7 @@ class scoped_rwlock {
 template <typename DATA>
 class acquired_lock {
     scoped_lock lock;
-    acquired_lock(mutex_lock_t &lk, DATA *v) : lock(lk), value(*v) {}
+    acquired_lock(std::mutex &lk, DATA *v) : lock(lk), value(*v) {}
 
     template <typename T>
     friend class owning_lock;
@@ -604,7 +560,7 @@ class owning_lock {
     owning_lock(owning_lock &&) = default;
     owning_lock &operator=(owning_lock &&) = default;
 
-    mutex_lock_t lock;
+    std::mutex lock;
     DATA data;
 
    public:
@@ -737,12 +693,6 @@ void common_handle_winch(int signal);
 
 /// Write the given paragraph of output, redoing linebreaks to fit the current screen.
 wcstring reformat_for_screen(const wcstring &msg);
-
-/// Tokenize the specified string into the specified wcstring_list_t.
-///
-/// \param val the input string. The contents of this string is not changed.
-/// \param out the list in which to place the elements.
-void tokenize_variable_array(const wcstring &val, wcstring_list_t &out);
 
 /// Make sure the specified direcotry exists. If needed, try to create it and any currently not
 /// existing parent directories.
@@ -886,4 +836,34 @@ enum {
     /// like an unrecognized flag, missing or too many arguments, an invalid integer, etc. But
     STATUS_INVALID_ARGS = 121,
 };
+
+/* Normally casting an expression to void discards its value, but GCC
+   versions 3.4 and newer have __attribute__ ((__warn_unused_result__))
+   which may cause unwanted diagnostics in that case.  Use __typeof__
+   and __extension__ to work around the problem, if the workaround is
+   known to be needed.  */
+#if 3 < __GNUC__ + (4 <= __GNUC_MINOR__)
+#define ignore_result(x)         \
+    (__extension__({             \
+        __typeof__(x) __x = (x); \
+        (void)__x;               \
+    }))
+#else
+#define ignore_result(x) ((void)(x))
+#endif
+
+// Custom hash function used by unordered_map/unordered_set when key is const
+#ifndef CONST_WCSTRING_HASH
+#define CONST_WCSTRING_HASH 1
+namespace std {
+template <>
+struct hash<const wcstring> {
+    std::size_t operator()(const wcstring &w) const {
+        std::hash<wcstring> hasher;
+        return hasher((wcstring)w);
+    }
+};
+}
+#endif
+
 #endif

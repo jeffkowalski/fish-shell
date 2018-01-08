@@ -10,6 +10,7 @@
 #include <string>
 
 #include "common.h"
+#include "maybe.h"
 
 /// Wide character version of fopen(). This sets CLO_EXEC.
 FILE *wfopen(const wcstring &path, const char *mode);
@@ -58,10 +59,9 @@ const wcstring wgetcwd();
 /// Wide character version of chdir().
 int wchdir(const wcstring &dir);
 
-/// Wide character version of realpath function. Just like the GNU version of realpath, wrealpath
-/// will accept 0 as the value for the second argument, in which case the result will be allocated
-/// using malloc, and must be free'd by the user.
-wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path);
+/// Wide character version of realpath function.
+/// \returns the canonicalized path, or none if the path is invalid.
+maybe_t<wcstring> wrealpath(const wcstring &pathname);
 
 /// Wide character version of readdir().
 bool wreaddir(DIR *dir, wcstring &out_name);
@@ -142,6 +142,21 @@ struct file_id_t {
    private:
     int compare_file_id(const file_id_t &rhs) const;
 };
+
+#ifndef HASH_FILE_ID
+#define HASH_FILE_ID 1
+namespace std {
+    template<>
+    struct hash<file_id_t> {
+        size_t operator()(const file_id_t &f) const {
+            std::hash<decltype(f.device)> hasher1;
+            std::hash<decltype(f.inode)> hasher2;
+
+            return hasher1(f.device) ^ hasher2(f.inode);
+        }
+    };
+}
+#endif
 
 file_id_t file_id_for_fd(int fd);
 file_id_t file_id_for_path(const wcstring &path);

@@ -12,20 +12,22 @@
 #include <wctype.h>
 
 #include <algorithm>
+#include <cstddef>
 #include <functional>
+#include <iterator>
 #include <list>
-#include <map>
 #include <memory>
 #include <set>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "autoload.h"
 #include "builtin.h"
 #include "common.h"
 #include "complete.h"
-#include "env.h"
 #include "exec.h"
 #include "expand.h"
 #include "fallback.h"  // IWYU pragma: keep
@@ -56,7 +58,7 @@
 /// The special cased translation macro for completions. The empty string needs to be special cased,
 /// since it can occur, and should not be translated. (Gettext returns the version information as
 /// the response).
-#ifdef USE_GETTEXT
+#ifdef HAVE_GETTEXT
 static const wchar_t *C_(const wcstring &s) {
     return s.empty() ? L"" : wgettext(s.c_str()).c_str();
 }
@@ -156,17 +158,22 @@ class completion_entry_t {
 };
 
 /// Set of all completion entries.
-struct completion_entry_set_comparer {
-    /** Comparison for std::set */
-    bool operator()(const completion_entry_t &p1, const completion_entry_t &p2) const {
-        // Paths always come last for no particular reason.
-        if (p1.cmd_is_path != p2.cmd_is_path) {
-            return p1.cmd_is_path < p2.cmd_is_path;
+namespace std {
+    template<>
+    struct hash<completion_entry_t> {
+        size_t operator()(const completion_entry_t &c) const {
+            std::hash<wcstring> hasher;
+            return hasher((wcstring) c.cmd);
         }
-        return p1.cmd < p2.cmd;
-    }
-};
-typedef std::set<completion_entry_t, completion_entry_set_comparer> completion_entry_set_t;
+    };
+    template <>
+    struct equal_to<completion_entry_t> {
+        bool operator()(const completion_entry_t &c1, const completion_entry_t &c2) const {
+            return c1.cmd == c2.cmd;
+        }
+    };
+}
+typedef std::unordered_set<completion_entry_t> completion_entry_set_t;
 static completion_entry_set_t completion_set;
 
 /// Comparison function to sort completions by their order field.
@@ -176,7 +183,7 @@ static bool compare_completions_by_order(const completion_entry_t *p1,
 }
 
 /// The lock that guards the list of completion entries.
-static pthread_mutex_t completion_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex completion_lock;
 
 void completion_entry_t::add_option(const complete_entry_opt_t &opt) {
     ASSERT_IS_LOCKED(completion_lock);
@@ -224,11 +231,12 @@ completion_t &completion_t::operator=(const completion_t &him) {
 }
 
 bool completion_t::is_naturally_less_than(const completion_t &a, const completion_t &b) {
+    // For this to work, stable_sort must be used because results aren't interchangeable.
+    if (a.flags & b.flags & COMPLETE_DONT_SORT) {
+        // Both completions are from a source with the --keep-order flag.
+        return false;
+    }
     return wcsfilecmp(a.completion.c_str(), b.completion.c_str()) < 0;
-}
-
-bool completion_t::is_alphabetically_equal_to(const completion_t &a, const completion_t &b) {
-    return a.completion == b.completion;
 }
 
 void completion_t::prepend_token_prefix(const wcstring &prefix) {
@@ -239,6 +247,14 @@ void completion_t::prepend_token_prefix(const wcstring &prefix) {
 
 static bool compare_completions_by_match_type(const completion_t &a, const completion_t &b) {
     return a.match.type < b.match.type;
+}
+
+template <class Iterator, class HashFunction>
+static Iterator unique_unsorted(Iterator begin, Iterator end, HashFunction hash) {
+    typedef typename std::iterator_traits<Iterator>::value_type T;
+
+    std::unordered_set<size_t> temp;
+    return std::remove_if(begin, end, [&](const T &val) { return !temp.insert(hash(val)).second; });
 }
 
 void completions_sort_and_prioritize(std::vector<completion_t> *comps) {
@@ -261,10 +277,12 @@ void completions_sort_and_prioritize(std::vector<completion_t> *comps) {
         }
     }
 
-    // Remove duplicates.
-    sort(comps->begin(), comps->end(), completion_t::is_naturally_less_than);
+    // Sort, provided COMPLETION_DONT_SORT isn't set
+    stable_sort(comps->begin(), comps->end(), completion_t::is_naturally_less_than);
+    // Deduplicate both sorted and unsorted results
     comps->erase(
-        std::unique(comps->begin(), comps->end(), completion_t::is_alphabetically_equal_to),
+        unique_unsorted(comps->begin(), comps->end(),
+                        [](const completion_t &c) { return std::hash<wcstring>{}(c.completion); }),
         comps->end());
 
     // Sort the remainder by match type. They're already sorted alphabetically.
@@ -276,11 +294,10 @@ class completer_t {
     const completion_request_flags_t flags;
     const wcstring initial_cmd;
     std::vector<completion_t> completions;
-    const env_vars_snapshot_t &vars;  // transient, stack-allocated
 
     /// Table of completions conditions that have already been tested and the corresponding test
     /// results.
-    typedef std::map<wcstring, bool> condition_cache_t;
+    typedef std::unordered_map<wcstring, bool> condition_cache_t;
     condition_cache_t condition_cache;
 
     enum complete_type_t { COMPLETE_DEFAULT, COMPLETE_AUTOSUGGEST };
@@ -302,8 +319,7 @@ class completer_t {
     }
 
    public:
-    completer_t(const wcstring &c, completion_request_flags_t f, const env_vars_snapshot_t &evs)
-        : flags(f), initial_cmd(c), vars(evs) {}
+    completer_t(const wcstring &c, completion_request_flags_t f) : flags(f), initial_cmd(c) {}
 
     bool empty() const { return completions.empty(); }
     const std::vector<completion_t> &get_completions(void) { return completions; }
@@ -316,8 +332,6 @@ class completer_t {
 
     void complete_param_expand(const wcstring &str, bool do_file,
                                bool handle_as_special_cd = false);
-
-    void complete_special_cd(const wcstring &str);
 
     void complete_cmd(const wcstring &str, bool use_function, bool use_builtin, bool use_command,
                       bool use_implicit_cd);
@@ -408,8 +422,7 @@ bool completer_t::condition_test(const wcstring &condition) {
 static completion_entry_t &complete_get_exact_entry(const wcstring &cmd, bool cmd_is_path) {
     ASSERT_IS_LOCKED(completion_lock);
 
-    std::pair<completion_entry_set_t::iterator, bool> ins =
-        completion_set.insert(completion_entry_t(cmd, cmd_is_path));
+    auto ins = completion_set.emplace(completion_entry_t(cmd, cmd_is_path));
 
     // NOTE SET_ELEMENTS_ARE_IMMUTABLE: Exposing mutable access here is only okay as long as callers
     // do not change any field that matters to ordering - affecting order without telling std::set
@@ -587,7 +600,7 @@ void completer_t::complete_cmd_desc(const wcstring &str) {
     wcstring lookup_cmd(L"__fish_describe_command ");
     lookup_cmd.append(escape_string(cmd_start, 1));
 
-    std::map<wcstring, wcstring> lookup;
+    std::unordered_map<wcstring, wcstring> lookup;
 
     // First locate a list of possible descriptions using a single call to apropos or a direct
     // search if we know the location of the whatis database. This can take some time on slower
@@ -625,7 +638,7 @@ void completer_t::complete_cmd_desc(const wcstring &str) {
             const wcstring &el = completion.completion;
             if (el.empty()) continue;
 
-            std::map<wcstring, wcstring>::iterator new_desc_iter = lookup.find(el);
+            auto new_desc_iter = lookup.find(el);
             if (new_desc_iter != lookup.end()) completion.description = new_desc_iter->second;
         }
     }
@@ -1095,12 +1108,13 @@ bool completer_t::complete_variable(const wcstring &str, size_t start_offset) {
         wcstring desc;
         if (this->wants_descriptions()) {
             // Can't use this->vars here, it could be any variable.
-            env_var_t value_unescaped = env_get_string(env_name);
-            if (value_unescaped.missing()) continue;
+            auto var = env_get(env_name);
+            if (!var) continue;
 
-            wcstring value = expand_escape_variable(value_unescaped);
-            if (this->type() != COMPLETE_AUTOSUGGEST)
+            wcstring value = expand_escape_variable(*var);
+            if (this->type() != COMPLETE_AUTOSUGGEST) {
                 desc = format_string(COMPLETE_VAR_DESC_VAL, value.c_str());
+            }
         }
 
         append_completion(&this->completions, comp, desc, flags, match);
@@ -1225,7 +1239,7 @@ bool completer_t::try_complete_user(const wcstring &str) {
 }
 
 void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_comps,
-              completion_request_flags_t flags, const env_vars_snapshot_t &vars) {
+              completion_request_flags_t flags) {
     // Determine the innermost subcommand.
     const wchar_t *cmdsubst_begin, *cmdsubst_end;
     parse_util_cmdsubst_extent(cmd_with_subcmds.c_str(), cmd_with_subcmds.size(), &cmdsubst_begin,
@@ -1234,7 +1248,7 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
     const wcstring cmd = wcstring(cmdsubst_begin, cmdsubst_end - cmdsubst_begin);
 
     // Make our completer.
-    completer_t completer(cmd, flags, vars);
+    completer_t completer(cmd, flags);
 
     wcstring current_command;
     const size_t pos = cmd.size();
@@ -1434,7 +1448,6 @@ void complete(const wcstring &cmd_with_subcmds, std::vector<completion_t> *out_c
                             if (i == 0) {
                                 assert(wrap_chain.at(i) == current_command_unescape);
                             } else if (!(flags & COMPLETION_REQUEST_AUTOSUGGESTION)) {
-                                assert(cmd_node != NULL);
                                 wcstring faux_cmdline = cmd;
                                 faux_cmdline.replace(cmd_node->source_start,
                                                      cmd_node->source_length, wrap_chain.at(i));
@@ -1543,8 +1556,8 @@ wcstring complete_print() {
 }
 
 /// Completion "wrapper" support. The map goes from wrapping-command to wrapped-command-list.
-static pthread_mutex_t wrapper_lock = PTHREAD_MUTEX_INITIALIZER;
-typedef std::map<wcstring, wcstring_list_t> wrapper_map_t;
+static std::mutex wrapper_lock;
+typedef std::unordered_map<wcstring, wcstring_list_t> wrapper_map_t;
 static wrapper_map_t &wrap_map() {
     ASSERT_IS_LOCKED(wrapper_lock);
     // A pointer is a little more efficient than an object as a static because we can elide the
@@ -1601,7 +1614,7 @@ wcstring_list_t complete_get_wrap_chain(const wcstring &command) {
     const wrapper_map_t &wraps = wrap_map();
 
     wcstring_list_t result;
-    std::set<wcstring> visited;            // set of visited commands
+    std::unordered_set<wcstring> visited;  // set of visited commands
     wcstring_list_t to_visit(1, command);  // stack of remaining-to-visit commands
 
     wcstring target;

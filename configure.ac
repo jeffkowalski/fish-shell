@@ -25,6 +25,7 @@ AC_SUBST(HAVE_DOXYGEN)
 AC_SUBST(LDFLAGS_FISH)
 AC_SUBST(WCHAR_T_BITS)
 AC_SUBST(EXTRA_PCRE2)
+AC_SUBST(EXTRA_MUPARSER)
 
 #
 # If needed, run autoconf to regenerate the configure file
@@ -211,17 +212,14 @@ AS_IF([test "$use_doxygen" != "no"],
 AC_SYS_LARGEFILE
 
 
-# fish does not use exceptions
-# Disabling exceptions saves about 20% (!) of the compiled code size
+# Fish does not use exceptions.
 CXXFLAGS="$CXXFLAGS -fno-exceptions"
-
 
 #
 # Set some warning flags
 # Don't warn about missing field initializers, it has too many
 # false positives for code like `struct termios tmodes = {};`
 #
-
 CXXFLAGS="$CXXFLAGS -Wextra -Wno-missing-field-initializers"
 
 #
@@ -579,34 +577,8 @@ else
   AC_MSG_RESULT(no)
 fi
 
-# Check that threads actually work on Solaris
-AC_MSG_CHECKING([for threadsafe errno])
-AC_RUN_IFELSE(
-  [AC_LANG_PROGRAM([
-    #include <errno.h>
-    #include <pthread.h>
-    #include <signal.h>
-
-    void *thread1_func(void *p_arg)
-    {
-            errno = 1;
-            return 0;
-    }
-    ],[
-    errno = 0;
-    pthread_t t1;
-    pthread_create(&t1, NULL, thread1_func, NULL);
-    pthread_join(t1, NULL);
-    return errno;
-  ])],
-  [AC_MSG_RESULT(yes)],
-  [
-    AC_MSG_RESULT(no)
-    AC_MSG_FAILURE([errno is not threadsafe - check your compiler settings])
-  ],
-  [AC_MSG_RESULT(crosscompiling, skipped)]
-)
-
+# ========
+# PCRE2 library configuration.
 pcre2_min_version=10.21
 EXTRA_PCRE2=
 AC_ARG_WITH(
@@ -700,6 +672,26 @@ if test "x$included_pcre2" = "xyes"; then
   CXXFLAGS="$CXXFLAGS $PCRE2_CXXFLAGS"
   LIBS="$LIBS $PCRE2_LIBS"
 fi
+
+
+
+# ========
+# MuParser math expression library configuration.
+EXTRA_MUPARSER=
+
+# Build configure/Makefile for muparser
+AC_MSG_NOTICE([using included MuParser library])
+# unfortunately these get added to the global configuration
+ac_configure_args="$ac_configure_args --enable-shared=no --enable-samples=no --enable-debug=no"
+AC_CONFIG_SUBDIRS([muparser-2.2.5])
+
+MUPARSER_CXXFLAGS='-I$(MUPARSER_DIR)/include'
+MUPARSER_LIBS='-L$(MUPARSER_LIBDIR) -lmuparser'
+
+# Make the binary depend on the MuParser libraries so they get built
+EXTRA_MUPARSER='$(MUPARSER_LIB)'
+CXXFLAGS="$CXXFLAGS $MUPARSER_CXXFLAGS"
+LIBS="$LIBS $MUPARSER_LIBS"
 
 # Allow configurable extra directories.
 AC_SUBST(extra_completionsdir)

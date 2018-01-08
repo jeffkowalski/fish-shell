@@ -68,7 +68,7 @@ function fish_prompt --description 'Write out the prompt'
     set -l color_cwd
     set -l prefix
     set -l suffix
-    switch $USER
+    switch "$USER"
         case root toor
             if set -q fish_color_cwd_root
                 set color_cwd $fish_color_cwd_root
@@ -90,9 +90,9 @@ function fish_prompt --description 'Write out the prompt'
 
     if not test $last_status -eq 0
         set_color $fish_color_error
+        echo -n "[$last_status] "
+        set_color normal
     end
 
     echo -n "$suffix "
-
-    set_color normal
 end

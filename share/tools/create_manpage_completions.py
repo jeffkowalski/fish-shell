@@ -131,11 +131,12 @@ def built_command(options, description):
     fish_options = []
     for optionstr in man_optionlist:
         option = re.sub(r"(\[.*\])", "", optionstr)
-        option = option.strip(" \t\n[]()")
+        option = option.strip(" \t\r\n[](){}.,:!")
 
 
         # Skip some problematic cases
         if option in ['-', '--']: continue
+        if any(c in "{}()" for c in option): continue
 
         if option.startswith('--'):
             # New style long option (--recursive)
@@ -528,7 +529,6 @@ class TypeDarwinManParser(ManParser):
         line = line.replace('.Nm', CMDNAME)
         line = line.replace('\\ ', ' ')
         line = line.replace('\& ', '')
-        line = line.replace(r'.\"', '')
         return line
 
     def is_option(self, line):
@@ -567,6 +567,9 @@ class TypeDarwinManParser(ManParser):
             desc_lines = []
             while lines and not self.is_option(lines[0]):
                 line = lossy_unicode(lines.pop(0).strip())
+                # Ignore comments
+                if line.startswith(r'.\"'):
+                    continue
                 if line.startswith('.'):
                     line = self.groff_replace_escapes(line)
                     line = self.trim_groff(line).strip()
@@ -854,7 +857,7 @@ def parse_and_output_man_pages(paths, output_directory, show_progress):
     add_diagnostic("Successfully parsed %d / %d pages" % (successful_count, total_count), BRIEF_VERBOSE)
     flush_diagnostics(sys.stderr)
 
-def get_paths_from_manpath():
+def get_paths_from_man_locations():
     # Return all the paths to man(1) and man(8) files in the manpath
     import subprocess, os
     proc = None
@@ -863,7 +866,6 @@ def get_paths_from_manpath():
         parent_paths = os.getenv("MANPATH").strip().split(':')
     else:
         # Some systems have manpath, others have `man --path` (like Haiku).
-        # TODO: Deal with systems that have neither (OpenBSD)
         for prog in [['manpath'], ['man', '--path']]:
             try:
                 proc = subprocess.Popen(prog, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -873,10 +875,18 @@ def get_paths_from_manpath():
         manpath, err_data = proc.communicate()
         parent_paths = manpath.decode().strip().split(':')
     if (not parent_paths) or (proc and proc.returncode > 0):
-        # HACK: Use some fallback in case we can't get anything else.
-        # `mandoc` does not provide `manpath` or `man --path` and $MANPATH might not be set, so just use the default for mandoc (minus /usr/X11R6/man, because that's not relevant).
+        # HACK: Use some fallbacks in case we can't get anything else.
+        # `mandoc` does not provide `manpath` or `man --path` and $MANPATH might not be set.
         # The alternative is reading its config file (/etc/man.conf)
-        sys.stderr.write("Unable to get the manpath, falling back to /usr/share/man:/usr/local/share/man. Please set $MANPATH if that is not correct.\n")
+        if os.path.isfile('/etc/man.conf'):
+            data = open('/etc/man.conf', 'r')
+            for line in data:
+                if ('manpath' in line or 'MANPATH' in line):
+                    p = line.split(' ')[1]
+                    p = p.split()[0]
+                    parent_paths.append(p)
+        if (not parent_paths):
+            sys.stderr.write("Unable to get the manpath, falling back to /usr/share/man:/usr/local/share/man. Please set $MANPATH if that is not correct.\n")
         parent_paths = ["/usr/share/man", "/usr/local/share/man"]
     result = []
     for parent_path in parent_paths:
@@ -940,8 +950,8 @@ if __name__ == "__main__":
             assert False, "unhandled option"
 
     if use_manpath:
-        # Fetch all man1 and man8 files from the manpath
-        file_paths.extend(get_paths_from_manpath())
+        # Fetch all man1 and man8 files from the manpath or man.conf
+        file_paths.extend(get_paths_from_man_locations())
 
     if cleanup_directories:
         for cleanup_dir in cleanup_directories:

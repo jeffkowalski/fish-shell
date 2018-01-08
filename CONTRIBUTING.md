@@ -6,11 +6,18 @@ See the bottom of this document for help on installing the linting and style ref
 
 Fish source should limit the C++ features it uses to those available in C++11. It should not use exceptions.
 
+Before introducing a new dependency, please make it optional with graceful failure if possible. Add
+any new dependencies to the README.md under the *Running* and/or *Building* sections.
+
+## Versioning
+
+The fish version is constructed by the *build_tools/git_version_gen.sh* script. For developers the version is the branch name plus the output of `git describe --always --dirty`. Normally the main part of the version will be the closest annotated tag. Which itself is usually the most recent release number (e.g., `2.6.0`).
+
 ## Include What You Use
 
 You should not depend on symbols being visible to a `*.cpp` module from `#include` statements inside another header file. In other words if your module does `#include "common.h"` and that header does `#include "signal.h"` your module should not assume the sub-include is present. It should instead directly `#include "signal.h"` if it needs any symbol from that header. That makes the actual dependencies much clearer. It also makes it easy to modify the headers included by a specific header file without having to worry that will break any module (or header) that includes a particular header.
 
-To help enforce this rule the `make lint` (and `make lint-all`) command will run the [include-what-you-use](http://include-what-you-use.org/) tool. You can find the IWYU project on [github](https://github.com/include-what-you-use/include-what-you-use).
+To help enforce this rule the `make lint` (and `make lint-all`) command will run the [include-what-you-use](https://include-what-you-use.org/) tool. You can find the IWYU project on [github](https://github.com/include-what-you-use/include-what-you-use).
 
 To install the tool on OS X you'll need to add a [formula](https://github.com/jasonmp85/homebrew-iwyu) then install it:
 
@@ -30,6 +37,8 @@ Ultimately we want lint free code. However, at the moment a lot of cleanup is re
 To make linting the code easy there are two make targets: `lint` and `lint-all`. The latter does just what the name implies. The former will lint any modified but not committed `*.cpp` files. If there is no uncommitted work it will lint the files in the most recent commit.
 
 Fish has custom cppcheck rules in the file `.cppcheck.rule`. These help catch mistakes such as using `wcwidth()` rather than `fish_wcwidth()`. Please add a new rule if you find similar mistakes being made.
+
+Fish also depends on `diff` and `expect` for its tests.
 
 ### Dealing With Lint Warnings
 
@@ -93,7 +102,25 @@ If you use Emacs: TBD
 
 ### Configuring Your Editor for Fish Scripts
 
-If you use ViM: TBD
+If you use ViM: Install [vim-fish](https://github.com/dag/vim-fish), make sure you have syntax and filetype functionality in `~/.vimrc`:
+
+```
+syntax enable
+filetype plugin indent on
+```
+
+Then turn on some options for nicer display of fish scripts in `~/.vim/ftplugin/fish.vim`:
+
+```
+" Set up :make to use fish for syntax checking.
+compiler fish
+
+" Set this to have long lines wrap inside comments.
+setlocal textwidth=79
+
+" Enable folding of block structures in fish.
+setlocal foldmethod=expr
+```
 
 If you use Emacs: Install [fish-mode](https://github.com/wwwjfy/emacs-fish) (also available in melpa and melpa-stable) and `(setq-default indent-tabs-mode nil)` for it (via a hook or in `use-package`s ":init" block). It can also be made to run fish_indent via e.g.
 
@@ -111,6 +138,8 @@ If you have a good reason for doing so you can tell `clang-format` to not reform
 code to ignore
 // clang-format on
 ```
+
+However, as I write this there are no places in the code where we use this and I can't think of any legitimate reasons for exempting blocks of code from clang-format.
 
 ## Fish Script Style Guide
 
@@ -146,7 +175,7 @@ You are strongly encouraged to add tests when changing the functionality of fish
 
 The tests can be run on your local computer on all operating systems.
 
-Running the tests is only supported from the autotools build and not xcodebuild. On OS X, you will need to install autoconf &mdash; we suggest using [Homebrew](http://brew.sh/) to install these tools.
+Running the tests is only supported from the autotools build and not xcodebuild. On OS X, you will need to install autoconf &mdash; we suggest using [Homebrew](https://brew.sh/) to install these tools.
 
     autoconf
     ./configure

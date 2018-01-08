@@ -7,6 +7,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -66,7 +67,7 @@ static pid_t initial_fg_process_group = -1;
 /// This struct maintains the current state of the terminal size. It is updated on demand after
 /// receiving a SIGWINCH. Do not touch this struct directly, it's managed with a rwlock. Use
 /// common_get_width()/common_get_height().
-static pthread_mutex_t termsize_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex termsize_lock;
 static struct winsize termsize = {USHRT_MAX, USHRT_MAX, USHRT_MAX, USHRT_MAX};
 static volatile bool termsize_valid = false;
 
@@ -162,7 +163,7 @@ show_stackframe(const wchar_t msg_level, int frame_count, int skip_levels) {
 #else   // HAVE_BACKTRACE_SYMBOLS
 
 void __attribute__((noinline))
-show_stackframe(const wchar_t msg_level, int frame_count, int skip_levels) {
+show_stackframe(const wchar_t msg_level, int, int) {
     debug_shared(msg_level, L"Sorry, but your system does not support backtraces");
 }
 #endif  // HAVE_BACKTRACE_SYMBOLS
@@ -287,6 +288,11 @@ wcstring str2wcstring(const char *in) { return str2wcs_internal(in, strlen(in));
 wcstring str2wcstring(const std::string &in) {
     // Handles embedded nulls!
     return str2wcs_internal(in.data(), in.size());
+}
+
+wcstring str2wcstring(const std::string &in, size_t len) {
+    // Handles embedded nulls!
+    return str2wcs_internal(in.data(), len);
 }
 
 char *wcs2str(const wchar_t *in) {
@@ -486,14 +492,14 @@ wchar_t *quote_end(const wchar_t *pos) {
 }
 
 void fish_setlocale() {
-    // Use the Unicode "ellipsis" symbol if it can be encoded using the current locale.
-    ellipsis_char = can_be_encoded(L'\x2026') ? L'\x2026' : L'$';
-
-    // Use the Unicode "return" symbol if it can be encoded using the current locale.
-    omitted_newline_char = can_be_encoded(L'\x23CE') ? L'\x23CE' : L'~';
-
-    // solid circle unicode character if it is able, fallback to the hash character
-    obfuscation_read_char = can_be_encoded(L'\u25cf') ? L'\u25cf' : L'#';
+    // Use various Unicode symbols if they can be encoded using the current locale, else a simple
+    // ASCII char alternative. All of the can_be_encoded() invocations should return the same
+    // true/false value since the code points are in the BMP but we're going to be paranoid. This
+    // is also technically wrong if we're not in a Unicode locale but we expect (or hope)
+    // can_be_encoded() will return false in that case.
+    ellipsis_char = can_be_encoded(L'\u2026') ? L'\u2026' : L'$';          // "horizontal ellipsis"
+    omitted_newline_char = can_be_encoded(L'\u23CE') ? L'\u23CE' : L'~';   // "return"
+    obfuscation_read_char = can_be_encoded(L'\u25CF') ? L'\u25CF' : L'#';  // "black circle"
 }
 
 long read_blocked(int fd, void *buf, size_t count) {
@@ -548,12 +554,6 @@ bool should_suppress_stderr_for_tests() {
     return program_name && !wcscmp(program_name, TESTS_PROGRAM_NAME);
 }
 
-/// Return true if we should emit a `debug()` message. This used to call
-/// `should_suppress_stderr_for_tests()`. It no longer does so because it can suppress legitimate
-/// errors we want to see if things go wrong. Too, calling that function is no longer necessary, if
-/// it ever was, to suppress unwanted diagnostic output that might confuse people running `make
-/// test`.
-static bool should_debug(int level) { return level <= debug_level; }
 
 static void debug_shared(const wchar_t level, const wcstring &msg) {
     pid_t current_pid = getpid();
@@ -567,8 +567,7 @@ static void debug_shared(const wchar_t level, const wcstring &msg) {
 }
 
 static wchar_t level_char[] = {L'E', L'W', L'2', L'3', L'4', L'5'};
-void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...) {
-    if (!should_debug(level)) return;
+void __attribute__((noinline)) debug_impl(int level, const wchar_t *msg, ...) {
     int errno_old = errno;
     va_list va;
     va_start(va, msg);
@@ -582,7 +581,7 @@ void __attribute__((noinline)) debug(int level, const wchar_t *msg, ...) {
     errno = errno_old;
 }
 
-void __attribute__((noinline)) debug(int level, const char *msg, ...) {
+void __attribute__((noinline)) debug_impl(int level, const char *msg, ...) {
     if (!should_debug(level)) return;
     int errno_old = errno;
     char local_msg[512];
@@ -596,16 +595,6 @@ void __attribute__((noinline)) debug(int level, const char *msg, ...) {
         show_stackframe(msg_level, debug_stack_frames, 1);
     }
     errno = errno_old;
-}
-
-void read_ignore(int fd, void *buff, size_t count) {
-    size_t ignore __attribute__((unused));
-    ignore = read(fd, buff, count);
-}
-
-void write_ignore(int fd, const void *buff, size_t count) {
-    size_t ignore __attribute__((unused));
-    ignore = write(fd, buff, count);
 }
 
 void debug_safe(int level, const char *msg, const char *param1, const char *param2,
@@ -626,14 +615,14 @@ void debug_safe(int level, const char *msg, const char *param1, const char *para
         const char *end = strchr(cursor, '%');
         if (end == NULL) end = cursor + strlen(cursor);
 
-        write_ignore(STDERR_FILENO, cursor, end - cursor);
+        ignore_result(write(STDERR_FILENO, cursor, end - cursor));
 
         if (end[0] == '%' && end[1] == 's') {
             // Handle a format string.
             assert(param_idx < sizeof params / sizeof *params);
             const char *format = params[param_idx++];
             if (!format) format = "(null)";
-            write_ignore(STDERR_FILENO, format, strlen(format));
+            ignore_result(write(STDERR_FILENO, format, strlen(format)));
             cursor = end + 2;
         } else if (end[0] == '\0') {
             // Must be at the end of the string.
@@ -645,7 +634,7 @@ void debug_safe(int level, const char *msg, const char *param1, const char *para
     }
 
     // We always append a newline.
-    write_ignore(STDERR_FILENO, "\n", 1);
+    ignore_result(write(STDERR_FILENO, "\n", 1));
 
     errno = errno_old;
 }
@@ -967,7 +956,6 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                 case L'\\':
                 case L'\'': {
                     need_escape = need_complex_escape = 1;
-                    // WTF if (escape_all) out += L'\\';
                     out += L'\\';
                     out += *in;
                     break;
@@ -1366,9 +1354,7 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                     break;
                 }
                 case L',': {
-                    // If the last character was a separator, then treat this as a literal comma.
-                    if (unescape_special && bracket_count > 0 &&
-                        string_last_char(result) != BRACKET_SEP) {
+                    if (unescape_special && bracket_count > 0) {
                         to_append_or_none = BRACKET_SEP;
                     }
                     break;
@@ -1493,7 +1479,7 @@ bool unescape_string_in_place(wcstring *str, unescape_flags_t escape_special) {
 
 bool unescape_string(const wchar_t *input, wcstring *output, unescape_flags_t escape_special,
                      escape_string_style_t style) {
-    bool success;
+    bool success = false;
     switch (style) {
         case STRING_STYLE_SCRIPT: {
             success = unescape_string_internal(input, wcslen(input), output, escape_special);
@@ -1514,7 +1500,7 @@ bool unescape_string(const wchar_t *input, wcstring *output, unescape_flags_t es
 
 bool unescape_string(const wcstring &input, wcstring *output, unescape_flags_t escape_special,
                      escape_string_style_t style) {
-    bool success;
+    bool success = false;
     switch (style) {
         case STRING_STYLE_SCRIPT: {
             success = unescape_string_internal(input.c_str(), input.size(), output, escape_special);
@@ -1564,13 +1550,13 @@ static void validate_new_termsize(struct winsize *new_termsize) {
         }
 #endif
         // Fallback to the environment vars.
-        env_var_t col_var = env_get_string(L"COLUMNS");
-        env_var_t row_var = env_get_string(L"LINES");
+        maybe_t<env_var_t> col_var = env_get(L"COLUMNS");
+        maybe_t<env_var_t> row_var = env_get(L"LINES");
         if (!col_var.missing_or_empty() && !row_var.missing_or_empty()) {
             // Both vars have to have valid values.
-            int col = fish_wcstoi(col_var.c_str());
+            int col = fish_wcstoi(col_var->as_string().c_str());
             bool col_ok = errno == 0 && col > 0 && col <= USHRT_MAX;
-            int row = fish_wcstoi(row_var.c_str());
+            int row = fish_wcstoi(row_var->as_string().c_str());
             bool row_ok = errno == 0 && row > 0 && row <= USHRT_MAX;
             if (col_ok && row_ok) {
                 new_termsize->ws_col = col;
@@ -1592,16 +1578,20 @@ static void validate_new_termsize(struct winsize *new_termsize) {
 /// Export the new terminal size as env vars and to the kernel if possible.
 static void export_new_termsize(struct winsize *new_termsize) {
     wchar_t buf[64];
-    env_var_t cols = env_get_string(L"COLUMNS", ENV_EXPORT);
-    swprintf(buf, 64, L"%d", (int)new_termsize->ws_col);
-    env_set(L"COLUMNS", buf, ENV_GLOBAL | (cols.missing_or_empty() ? 0 : ENV_EXPORT));
 
-    env_var_t lines = env_get_string(L"LINES", ENV_EXPORT);
+    auto cols = env_get(L"COLUMNS", ENV_EXPORT);
+    swprintf(buf, 64, L"%d", (int)new_termsize->ws_col);
+    env_set_one(L"COLUMNS", ENV_GLOBAL | (cols.missing_or_empty() ? ENV_DEFAULT : ENV_EXPORT), buf);
+
+    auto lines = env_get(L"LINES", ENV_EXPORT);
     swprintf(buf, 64, L"%d", (int)new_termsize->ws_row);
-    env_set(L"LINES", buf, ENV_GLOBAL | (lines.missing_or_empty() ? 0 : ENV_EXPORT));
+    env_set_one(L"LINES", ENV_GLOBAL | (lines.missing_or_empty() ? ENV_DEFAULT : ENV_EXPORT), buf);
 
 #ifdef HAVE_WINSIZE
-    ioctl(STDOUT_FILENO, TIOCSWINSZ, new_termsize);
+    // Only write the new terminal size if we are in the foreground (#4477)
+    if (tcgetpgrp(STDOUT_FILENO) == getpgrp()) {
+        ioctl(STDOUT_FILENO, TIOCSWINSZ, new_termsize);
+    }
 #endif
 }
 
@@ -1633,19 +1623,6 @@ int common_get_width() { return get_current_winsize().ws_col; }
 
 int common_get_height() { return get_current_winsize().ws_row; }
 
-void tokenize_variable_array(const wcstring &val, std::vector<wcstring> &out) {
-    size_t pos = 0, end = val.size();
-    while (pos <= end) {
-        size_t next_pos = val.find(ARRAY_SEP, pos);
-        if (next_pos == wcstring::npos) {
-            next_pos = end;
-        }
-        out.resize(out.size() + 1);
-        out.back().assign(val, pos, next_pos - pos);
-        pos = next_pos + 1;  // skip the separator, or skip past the end
-    }
-}
-
 bool string_prefixes_string(const wchar_t *proposed_prefix, const wcstring &value) {
     size_t prefix_size = wcslen(proposed_prefix);
     return prefix_size <= value.size() && value.compare(0, prefix_size, proposed_prefix) == 0;
@@ -1654,6 +1631,16 @@ bool string_prefixes_string(const wchar_t *proposed_prefix, const wcstring &valu
 bool string_prefixes_string(const wcstring &proposed_prefix, const wcstring &value) {
     size_t prefix_size = proposed_prefix.size();
     return prefix_size <= value.size() && value.compare(0, prefix_size, proposed_prefix) == 0;
+}
+
+bool string_prefixes_string(const wchar_t *proposed_prefix, const wchar_t *value) {
+    for (size_t idx = 0; proposed_prefix[idx] != L'\0'; idx++) {
+        // Note if the prefix is longer than value, then we will compare a nonzero prefix character
+        // against a zero value character, and so we'll return false;
+        if (proposed_prefix[idx] != value[idx]) return false;
+    }
+    // We must have that proposed_prefix[idx] == L'\0', so we have a prefix match.
+    return true;
 }
 
 bool string_prefixes_string_case_insensitive(const wcstring &proposed_prefix,
@@ -1998,102 +1985,15 @@ void assert_is_background_thread(const char *who) {
 }
 
 void assert_is_locked(void *vmutex, const char *who, const char *caller) {
-    pthread_mutex_t *mutex = static_cast<pthread_mutex_t *>(vmutex);
-    if (0 == pthread_mutex_trylock(mutex)) {
+    std::mutex *mutex = static_cast<std::mutex *>(vmutex);
+
+    // Note that std::mutex.try_lock() is allowed to return false when the mutex isn't
+    // actually locked; fortunately we are checking the opposite so we're safe.
+    if (mutex->try_lock()) {
         debug(0, "%s is not locked when it should be in '%s'", who, caller);
         debug(0, "Break on debug_thread_error to debug.");
         debug_thread_error();
-        pthread_mutex_unlock(mutex);
-    }
-}
-
-void scoped_lock::lock(void) {
-    assert(!locked);  //!OCLINT(multiple unary operator)
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_mutex_lock(lock_obj));
-    locked = true;
-}
-
-void scoped_lock::unlock(void) {
-    assert(locked);
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_mutex_unlock(lock_obj));
-    locked = false;
-}
-
-scoped_lock::scoped_lock(pthread_mutex_t &mutex) : lock_obj(&mutex), locked(false) { this->lock(); }
-
-scoped_lock::scoped_lock(mutex_lock_t &lock) : lock_obj(&lock.mutex), locked(false) {
-    this->lock();
-}
-
-scoped_lock::~scoped_lock() {
-    if (locked) this->unlock();
-}
-
-void scoped_rwlock::lock(void) {
-    assert(!(locked || locked_shared));  //!OCLINT(multiple unary operator)
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_rwlock_rdlock(rwlock_obj));
-    locked = true;
-}
-
-void scoped_rwlock::unlock(void) {
-    assert(locked);
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_rwlock_unlock(rwlock_obj));
-    locked = false;
-}
-
-void scoped_rwlock::lock_shared(void) {
-    assert(!(locked || locked_shared));  //!OCLINT(multiple unary operator)
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_rwlock_wrlock(rwlock_obj));
-    locked_shared = true;
-}
-
-void scoped_rwlock::unlock_shared(void) {
-    assert(locked_shared);
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_rwlock_unlock(rwlock_obj));
-    locked_shared = false;
-}
-
-#if 0
-// This is not currently used.
-void scoped_rwlock::upgrade(void) {
-    assert(locked_shared);
-    ASSERT_IS_NOT_FORKED_CHILD();
-    DIE_ON_FAILURE(pthread_rwlock_unlock(rwlock_obj));
-    locked = false;
-    DIE_ON_FAILURE(pthread_rwlock_wrlock(rwlock_obj));
-    locked_shared = true;
-}
-#endif
-
-scoped_rwlock::scoped_rwlock(pthread_rwlock_t &rwlock, bool shared)
-    : rwlock_obj(&rwlock), locked(false), locked_shared(false) {
-    if (shared) {
-        this->lock_shared();
-    } else {
-        this->lock();
-    }
-}
-
-scoped_rwlock::scoped_rwlock(rwlock_t &rwlock, bool shared)
-    : rwlock_obj(&rwlock.rwlock), locked(false), locked_shared(false) {
-    if (shared) {
-        this->lock_shared();
-    } else {
-        this->lock();
-    }
-}
-
-scoped_rwlock::~scoped_rwlock() {
-    if (locked) {
-        this->unlock();
-    } else if (locked_shared) {
-        this->unlock_shared();
+        mutex->unlock();
     }
 }
 

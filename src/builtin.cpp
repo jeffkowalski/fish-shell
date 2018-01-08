@@ -28,6 +28,7 @@
 #include <string>
 
 #include "builtin.h"
+#include "builtin_argparse.h"
 #include "builtin_bg.h"
 #include "builtin_bind.h"
 #include "builtin_block.h"
@@ -45,6 +46,7 @@
 #include "builtin_functions.h"
 #include "builtin_history.h"
 #include "builtin_jobs.h"
+#include "builtin_math.h"
 #include "builtin_printf.h"
 #include "builtin_pwd.h"
 #include "builtin_random.h"
@@ -58,6 +60,7 @@
 #include "builtin_string.h"
 #include "builtin_test.h"
 #include "builtin_ulimit.h"
+#include "builtin_wait.h"
 #include "common.h"
 #include "complete.h"
 #include "exec.h"
@@ -106,7 +109,7 @@ void builtin_wperror(const wchar_t *s, io_streams_t &streams) {
     }
 }
 
-static const wchar_t *short_options = L":h";
+static const wchar_t *short_options = L"+:h";
 static const struct woption long_options[] = {{L"help", no_argument, NULL, 'h'},
                                               {NULL, 0, NULL, 0}};
 
@@ -122,7 +125,7 @@ int parse_help_only_cmd_opts(struct help_only_cmd_opts_t &opts, int *optind, int
                 break;
             }
             case ':': {
-                streams.err.append_format(BUILTIN_ERR_MISSING, cmd, argv[w.woptind - 1]);
+                builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
                 return STATUS_INVALID_ARGS;
             }
             case '?': {
@@ -406,6 +409,7 @@ int builtin_false(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 static const builtin_data_t builtin_datas[] = {
     {L"[", &builtin_test, N_(L"Test a condition")},
     {L"and", &builtin_generic, N_(L"Execute command if previous command suceeded")},
+    {L"argparse", &builtin_argparse, N_(L"Parse options in fish script")},
     {L"begin", &builtin_generic, N_(L"Create a block of code")},
     {L"bg", &builtin_bg, N_(L"Send job to background")},
     {L"bind", &builtin_bind, N_(L"Handle fish key bindings")},
@@ -438,6 +442,7 @@ static const builtin_data_t builtin_datas[] = {
     {L"history", &builtin_history, N_(L"History of commands executed by user")},
     {L"if", &builtin_generic, N_(L"Evaluate block if condition is true")},
     {L"jobs", &builtin_jobs, N_(L"Print currently running jobs")},
+    {L"math", &builtin_math, N_(L"Evaluate math expressions")},
     {L"not", &builtin_generic, N_(L"Negate exit status of job")},
     {L"or", &builtin_generic, N_(L"Execute command if previous command failed")},
     {L"printf", &builtin_printf, N_(L"Prints formatted text")},
@@ -455,6 +460,7 @@ static const builtin_data_t builtin_datas[] = {
     {L"test", &builtin_test, N_(L"Test a condition")},
     {L"true", &builtin_true, N_(L"Return a successful result")},
     {L"ulimit", &builtin_ulimit, N_(L"Set or get the shells resource usage limits")},
+    {L"wait", &builtin_wait, N_(L"Wait for background processes completed")},
     {L"while", &builtin_generic, N_(L"Perform a command multiple times")}};
 
 #define BUILTIN_COUNT (sizeof builtin_datas / sizeof *builtin_datas)
@@ -489,9 +495,9 @@ void builtin_destroy() {}
 /// Is there a builtin command with the given name?
 bool builtin_exists(const wcstring &cmd) { return static_cast<bool>(builtin_lookup(cmd)); }
 
-/// Is the command a keyword or a builtin we need to special-case the handling of `-h` and `--help`.
+/// Is the command a keyword we need to special-case the handling of `-h` and `--help`.
 static const wcstring_list_t help_builtins({L"for", L"while", L"function", L"if", L"end", L"switch",
-                                            L"case", L"count", L"printf"});
+                                            L"case"});
 static bool cmd_needs_help(const wchar_t *cmd) { return contains(help_builtins, cmd); }
 
 /// Execute a builtin command

@@ -486,8 +486,8 @@ rgb_color_t best_color(const std::vector<rgb_color_t> &candidates, color_support
 }
 
 /// Return the internal color code representing the specified color.
-/// XXX This code should be refactored to enable sharing with builtin_set_color.
-rgb_color_t parse_color(const wcstring &val, bool is_background) {
+/// TODO: This code should be refactored to enable sharing with builtin_set_color.
+rgb_color_t parse_color(const env_var_t &var, bool is_background) {
     int is_bold = 0;
     int is_underline = 0;
     int is_italics = 0;
@@ -497,7 +497,7 @@ rgb_color_t parse_color(const wcstring &val, bool is_background) {
     std::vector<rgb_color_t> candidates;
 
     wcstring_list_t el;
-    tokenize_variable_array(val, el);
+    var.to_list(el);
 
     for (size_t j = 0; j < el.size(); j++) {
         const wcstring &next = el.at(j);
@@ -554,10 +554,11 @@ void writembs_check(char *mbs, const char *mbs_name, const char *file, long line
     if (mbs != NULL) {
         tputs(mbs, 1, &writeb);
     } else {
-        env_var_t term = env_get_string(L"TERM");
+        auto term = env_get(L"TERM");
         const wchar_t *fmt =
             _(L"Tried to use terminfo string %s on line %ld of %s, which is "
               L"undefined in terminal of type \"%ls\". Please report this error to %s");
-        debug(0, fmt, mbs_name, line, file, term.c_str(), PACKAGE_BUGREPORT);
+        debug(0, fmt, mbs_name, line, file, term ? term->as_string().c_str() : L"",
+              PACKAGE_BUGREPORT);
     }
 }

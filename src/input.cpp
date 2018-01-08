@@ -189,7 +189,7 @@ static std::vector<terminfo_mapping_t> terminfo_mappings;
 /// List of all terminfo mappings.
 static std::vector<terminfo_mapping_t> mappings;
 
-/// Set to true when the input subsytem has been initialized.
+/// Set to true when the input subsystem has been initialized.
 bool input_initialized = false;
 
 /// Initialize terminfo.
@@ -201,8 +201,8 @@ static int input_function_args_index = 0;
 
 /// Return the current bind mode.
 wcstring input_get_bind_mode() {
-    env_var_t mode = env_get_string(FISH_BIND_MODE_VAR);
-    return mode.missing() ? DEFAULT_BIND_MODE : mode;
+    auto mode = env_get(FISH_BIND_MODE_VAR);
+    return mode ? mode->as_string() : DEFAULT_BIND_MODE;
 }
 
 /// Set the current bind mode.
@@ -211,7 +211,7 @@ void input_set_bind_mode(const wcstring &bm) {
     // modes may not be empty - empty is a sentinel value meaning to not change the mode
     assert(!bm.empty());
     if (input_get_bind_mode() != bm.c_str()) {
-        env_set(FISH_BIND_MODE_VAR, bm.c_str(), ENV_GLOBAL);
+        env_set_one(FISH_BIND_MODE_VAR, ENV_GLOBAL, bm);
     }
 }
 
@@ -307,7 +307,6 @@ void init_input() {
     }
 
     input_initialized = true;
-    return;
 }
 
 void input_destroy() {

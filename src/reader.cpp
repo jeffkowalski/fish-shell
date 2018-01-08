@@ -76,7 +76,7 @@
 
 // Name of the variable that tells how long it took, in milliseconds, for the previous
 // interactive command to complete.
-#define ENV_CMD_DURATION L"CMD_DURATION"
+#define ENV_cmd_duration L"cmd_duration"
 
 /// Maximum length of prefix string when printing completion list. Longer prefixes will be
 /// ellipsized.
@@ -696,14 +696,14 @@ void reader_write_title(const wcstring &cmd, bool reset_cursor_position) {
         for (size_t i = 0; i < lst.size(); i++) {
             fputws(lst.at(i).c_str(), stdout);
         }
-        write(STDOUT_FILENO, "\a", 1);
+        ignore_result(write(STDOUT_FILENO, "\a", 1));
     }
 
     proc_pop_interactive();
     set_color(rgb_color_t::reset(), rgb_color_t::reset());
     if (reset_cursor_position && !lst.empty()) {
         // Put the cursor back at the beginning of the line (issue #2453).
-        write(STDOUT_FILENO, "\r", 1);
+        ignore_result(write(STDOUT_FILENO, "\r", 1));
     }
 }
 
@@ -765,8 +765,8 @@ void reader_init() {
 
     // Ensure this var is present even before an interactive command is run so that if it is used
     // in a function like `fish_prompt` or `fish_right_prompt` it is defined at the time the first
-    // prompt is issued.
-    env_set(ENV_CMD_DURATION, L"0", ENV_UNEXPORT);
+    // prompt is written.
+    env_set_one(ENV_cmd_duration, ENV_UNEXPORT, L"0");
 
     // Save the initial terminal mode.
     tcgetattr(STDIN_FILENO, &terminal_mode_on_startup);
@@ -1188,7 +1188,7 @@ static std::function<autosuggestion_result_t(void)> get_autosuggestion_performer
 
         // Try normal completions.
         std::vector<completion_t> completions;
-        complete(search_string, &completions, COMPLETION_REQUEST_AUTOSUGGESTION, vars);
+        complete(search_string, &completions, COMPLETION_REQUEST_AUTOSUGGESTION);
         completions_sort_and_prioritize(&completions);
         if (!completions.empty()) {
             const completion_t &comp = completions.at(0);
@@ -1291,7 +1291,7 @@ static void reader_flash() {
     }
 
     reader_repaint();
-    write(STDOUT_FILENO, "\a", 1);
+    ignore_result(write(STDOUT_FILENO, "\a", 1));
 
     pollint.tv_sec = 0;
     pollint.tv_nsec = 100 * 1000000;
@@ -1563,10 +1563,10 @@ static bool check_for_orphaned_process(unsigned long loop_count, pid_t shell_pgi
 
 /// Initialize data for interactive use.
 static void reader_interactive_init() {
-    assert(input_initialized);
     // See if we are running interactively.
     pid_t shell_pgid;
 
+    if (!input_initialized) init_input();
     kill_init();
     shell_pgid = getpgrp();
 
@@ -1575,20 +1575,12 @@ static void reader_interactive_init() {
     // Check if we are in control of the terminal, so that we don't do semi-expensive things like
     // reset signal handlers unless we really have to, which we often don't.
     if (tcgetpgrp(STDIN_FILENO) != shell_pgid) {
-        int block_count = 0;
-        int i;
-
         // Bummer, we are not in control of the terminal. Stop until parent has given us control of
-        // it. Stopping in fish is a bit of a challange, what with all the signal fidgeting, we need
-        // to reset a bunch of signal state, making this coda a but unobvious.
+        // it.
         //
         // In theory, reseting signal handlers could cause us to miss signal deliveries. In
-        // practice, this code should only be run suring startup, when we're not waiting for any
+        // practice, this code should only be run during startup, when we're not waiting for any
         // signals.
-        while (signal_is_blocked()) {
-            signal_unblock();
-            block_count++;
-        }
         signal_reset_handlers();
 
         // Ok, signal handlers are taken out of the picture. Stop ourself in a loop until we are in
@@ -1632,37 +1624,11 @@ static void reader_interactive_init() {
         }
 
         signal_set_handlers();
-
-        for (i = 0; i < block_count; i++) {
-            signal_block();
-        }
-    }
-
-    // Put ourselves in our own process group.
-    shell_pgid = getpid();
-    if (getpgrp() != shell_pgid && setpgid(shell_pgid, shell_pgid) < 0) {
-        debug(0, _(L"Couldn't put the shell in its own process group"));
-        wperror(L"setpgid");
-        exit_without_destructors(1);
-    }
-
-    // Grab control of the terminal.
-    if (tcsetpgrp(STDIN_FILENO, shell_pgid) == -1) {
-        if (errno == ENOTTY) redirect_tty_output();
-        debug(0, _(L"Couldn't grab control of terminal"));
-        wperror(L"tcsetpgrp");
-        exit_without_destructors(1);
     }
 
     invalidate_termsize();
 
-    // Set the new modes.
-    if (tcsetattr(0, TCSANOW, &shell_modes) == -1) {
-        if (errno == EIO) redirect_tty_output();
-        wperror(L"tcsetattr");
-    }
-
-    env_set(L"_", L"fish", ENV_GLOBAL);
+    env_set_one(L"_", ENV_GLOBAL, L"fish");
 }
 
 /// Destroy data for interactive use.
@@ -1929,7 +1895,7 @@ void set_env_cmd_duration(struct timeval *after, struct timeval *before) {
     }
 
     swprintf(buf, 16, L"%d", (secs * 1000) + (usecs / 1000));
-    env_set(ENV_CMD_DURATION, buf, ENV_UNEXPORT);
+    env_set_one(ENV_cmd_duration, ENV_UNEXPORT, buf);
 }
 
 void reader_run_command(parser_t &parser, const wcstring &cmd) {
@@ -1937,7 +1903,7 @@ void reader_run_command(parser_t &parser, const wcstring &cmd) {
 
     wcstring ft = tok_first(cmd);
 
-    if (!ft.empty()) env_set(L"_", ft.c_str(), ENV_GLOBAL);
+    if (!ft.empty()) env_set_one(L"_", ENV_GLOBAL, ft);
 
     reader_write_title(cmd);
 
@@ -1953,7 +1919,7 @@ void reader_run_command(parser_t &parser, const wcstring &cmd) {
 
     term_steal();
 
-    env_set(L"_", program_name, ENV_GLOBAL);
+    env_set_one(L"_", ENV_GLOBAL, program_name);
 
 #ifdef HAVE__PROC_SELF_STAT
     proc_update_jiffies();
@@ -1993,6 +1959,14 @@ parser_test_error_bits_t reader_shell_test(const wchar_t *b) {
 static parser_test_error_bits_t default_test(const wchar_t *b) {
     UNUSED(b);
     return 0;
+}
+
+void reader_change_history(const wchar_t *name) {
+    // We don't need to _change_ if we're not initialized yet.
+    if (data && data->history) {
+        data->history->save();
+        data->history = &history_t::history_with_name(name);
+    }
 }
 
 void reader_push(const wchar_t *name) {
@@ -2070,8 +2044,8 @@ void reader_import_history_if_necessary(void) {
         // Try opening a bash file. We make an effort to respect $HISTFILE; this isn't very complete
         // (AFAIK it doesn't have to be exported), and to really get this right we ought to ask bash
         // itself. But this is better than nothing.
-        const env_var_t var = env_get_string(L"HISTFILE");
-        wcstring path = (var.missing() ? L"~/.bash_history" : var);
+        const auto var = env_get(L"HISTFILE");
+        wcstring path = (var ? var->as_string() : L"~/.bash_history");
         expand_tilde(path);
         FILE *f = wfopen(path, "r");
         if (f) {
@@ -2185,6 +2159,21 @@ bool shell_is_exiting() {
     return end_loop;
 }
 
+static void bg_job_warning() {
+    fputws(_(L"There are still jobs active:\n"), stdout);
+    fputws(_(L"\n   PID  Command\n"), stdout);
+
+    job_iterator_t jobs;
+    while (job_t *j = jobs.next()) {
+        if (!job_is_completed(j)) {
+            fwprintf(stdout, L"%6d  %ls\n", j->processes[0]->pid, j->command_wcstr());
+        }
+    }
+    fputws(L"\n", stdout);
+    fputws(_(L"A second attempt to exit will terminate them.\n"), stdout);
+    fputws(_(L"Use 'disown PID' to remove jobs from the list without terminating them.\n"), stdout);
+}
+
 /// This function is called when the main loop notices that end_loop has been set while in
 /// interactive mode. It checks if it is ok to exit.
 static void handle_end_loop() {
@@ -2209,8 +2198,7 @@ static void handle_end_loop() {
         }
 
         if (!data->prev_end_loop && bg_jobs) {
-            fputws(_(L"There are still jobs active (use the jobs command to see them).\n"), stdout);
-            fputws(_(L"A second attempt to exit will terminate them.\n"), stdout);
+            bg_job_warning();
             reader_exit(0, 0);
             data->prev_end_loop = 1;
             return;
@@ -2240,7 +2228,7 @@ static bool selection_is_at_top() {
 
 /// Read interactively. Read input from stdin while providing editing facilities.
 static int read_i(void) {
-    reader_push(L"fish");
+    reader_push(history_session_id().c_str());
     reader_set_complete_function(&complete);
     reader_set_highlight_function(&highlight_shell);
     reader_set_test_function(&reader_shell_test);
@@ -2583,8 +2571,7 @@ const wchar_t *reader_readline(int nchars) {
                     complete_flags_t complete_flags = COMPLETION_REQUEST_DEFAULT |
                                                       COMPLETION_REQUEST_DESCRIPTIONS |
                                                       COMPLETION_REQUEST_FUZZY_MATCH;
-                    data->complete_func(buffcpy, &comp, complete_flags,
-                                        env_vars_snapshot_t::current());
+                    data->complete_func(buffcpy, &comp, complete_flags);
 
                     // Munge our completions.
                     completions_sort_and_prioritize(&comp);
@@ -2742,20 +2729,29 @@ const wchar_t *reader_readline(int nchars) {
                 // We only execute the command line.
                 editable_line_t *el = &data->command_line;
 
-                // Allow backslash-escaped newlines, but only if the following character is
-                // whitespace, or we're at the end of the text (see issue #613) and not in a comment
-                // (issue #1255).
-                if (is_backslashed(el->text, el->position)) {
-                    bool continue_on_next_line = false;
-                    if (el->position >= el->size()) {
-                        continue_on_next_line = !text_ends_in_comment(el->text);
-                    } else {
-                        continue_on_next_line = iswspace(el->text.at(el->position));
+                // Allow backslash-escaped newlines.
+                bool continue_on_next_line = false;
+                if (el->position >= el->size()) {
+                    // We're at the end of the text and not in a comment (issue #1225).
+                    continue_on_next_line = is_backslashed(el->text, el->position) &&
+                                            !text_ends_in_comment(el->text);
+                } else {
+                    // Allow mid line split if the following character is whitespace (issue #613).
+                    if (is_backslashed(el->text, el->position) &&
+                        iswspace(el->text.at(el->position))) {
+                        continue_on_next_line = true;
+                    // Check if the end of the line is backslashed (issue #4467).
+                    } else if (is_backslashed(el->text, el->size()) &&
+                               !text_ends_in_comment(el->text)) {
+                        // Move the cursor to the end of the line.
+                        el->position = el->size();
+                        continue_on_next_line = true;
                     }
-                    if (continue_on_next_line) {
-                        insert_char(el, '\n');
-                        break;
-                    }
+                }
+                // If the conditions are met, insert a new line at the position of the cursor.
+                if (continue_on_next_line) {
+                    insert_char(el, '\n');
+                    break;
                 }
 
                 // See if this command is valid.
@@ -3229,7 +3225,7 @@ const wchar_t *reader_readline(int nchars) {
         reader_repaint_if_needed();
     }
 
-    write(STDOUT_FILENO, "\n", 1);
+    ignore_result(write(STDOUT_FILENO, "\n", 1));
 
     // Ensure we have no pager contents when we exit.
     if (!data->pager.empty()) {
@@ -3323,9 +3319,10 @@ static int read_ni(int fd, const io_chain_t &io) {
         }
 
         parse_error_list_t errors;
-        parse_node_tree_t tree;
-        if (!parse_util_detect_errors(str, &errors, false /* do not accept incomplete */, &tree)) {
-            parser.eval(str, io, TOP, std::move(tree));
+        parsed_source_ref_t pstree;
+        if (!parse_util_detect_errors(str, &errors, false /* do not accept incomplete */,
+                                      &pstree)) {
+            parser.eval(pstree, io, TOP);
         } else {
             wcstring sb;
             parser.get_backtrace(str, errors, sb);

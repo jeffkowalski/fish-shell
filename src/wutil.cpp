@@ -17,8 +17,8 @@
 #include <wchar.h>
 #include <wctype.h>
 
-#include <map>
 #include <string>
+#include <unordered_map>
 
 #include "common.h"
 #include "fallback.h"  // IWYU pragma: keep
@@ -38,7 +38,7 @@ const file_id_t kInvalidFileID = {(dev_t)-1LL, (ino_t)-1LL, (uint64_t)-1LL, -1, 
 #endif
 
 /// Map used as cache by wgettext.
-static owning_lock<std::map<wcstring, wcstring>> wgettext_map;
+static owning_lock<std::unordered_map<wcstring, wcstring>> wgettext_map;
 
 bool wreaddir_resolving(DIR *dir, const wcstring &dir_path, wcstring &out_name, bool *out_is_dir) {
     struct dirent d;
@@ -92,7 +92,7 @@ bool wreaddir(DIR *dir, wcstring &out_name) {
     // long when it should be at least NAME_MAX + 1.
     union {
         struct dirent d;
-        char c[offsetof(struct dirent, d_name) + NAME_MAX + 1]; /* NAME_MAX is POSIX. */
+        char c[offsetof(struct dirent, d_name) + NAME_MAX + 1];
     } d_u;
     struct dirent *result = NULL;
 
@@ -137,18 +137,14 @@ bool wreaddir_for_dirs(DIR *dir, wcstring *out_name) {
 }
 
 const wcstring wgetcwd() {
-    wcstring retval;
-
-    char *res = getcwd(NULL, 0);
+    char cwd[PATH_MAX];
+    char *res = getcwd(cwd, sizeof(cwd));
     if (res) {
-        retval = str2wcstring(res);
-        free(res);
-    } else {
-        debug(0, _(L"getcwd() failed with errno %d/%s"), errno, strerror(errno));
-        retval = wcstring();
+        return str2wcstring(res);
     }
 
-    return retval;
+    debug(0, _(L"getcwd() failed with errno %d/%s"), errno, strerror(errno));
+    return wcstring();
 }
 
 int wchdir(const wcstring &dir) {
@@ -338,14 +334,14 @@ void safe_perror(const char *message) {
     safe_append(buff, safe_strerror(err), sizeof buff);
     safe_append(buff, "\n", sizeof buff);
 
-    write_ignore(STDERR_FILENO, buff, strlen(buff));
+    ignore_result(write(STDERR_FILENO, buff, strlen(buff)));
     errno = err;
 }
 
-wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path) {
-    if (pathname.size() == 0) return NULL;
+maybe_t<wcstring> wrealpath(const wcstring &pathname) {
+    if (pathname.empty()) return none();
 
-    cstring real_path("");
+    cstring real_path;
     cstring narrow_path = wcs2string(pathname);
 
     // Strip trailing slashes. This is needed to be bug-for-bug compatible with GNU realpath which
@@ -354,7 +350,8 @@ wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path) {
         narrow_path.erase(narrow_path.size() - 1, 1);
     }
 
-    char *narrow_res = realpath(narrow_path.c_str(), NULL);
+    char tmpbuf[PATH_MAX];
+    char *narrow_res = realpath(narrow_path.c_str(), tmpbuf);
     if (narrow_res) {
         real_path.append(narrow_res);
     } else {
@@ -364,15 +361,16 @@ wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path) {
             // single path component and thus doesn't need conversion.
             real_path = narrow_path;
         } else {
+            char tmpbuff[PATH_MAX];
             if (pathsep_idx == cstring::npos) {
                 // No pathsep means a single path component relative to pwd.
-                narrow_res = realpath(".", NULL);
-                assert(narrow_res != NULL);
+                narrow_res = realpath(".", tmpbuff);
+                assert(narrow_res != NULL && "realpath unexpectedly returned null");
                 pathsep_idx = 0;
             } else {
                 // Only call realpath() on the portion up to the last component.
-                narrow_res = realpath(narrow_path.substr(0, pathsep_idx).c_str(), NULL);
-                if (!narrow_res) return NULL;
+                narrow_res = realpath(narrow_path.substr(0, pathsep_idx).c_str(), tmpbuff);
+                if (!narrow_res) return none();
                 pathsep_idx++;
             }
             real_path.append(narrow_res);
@@ -381,24 +379,11 @@ wchar_t *wrealpath(const wcstring &pathname, wchar_t *resolved_path) {
             real_path.append(narrow_path.substr(pathsep_idx, cstring::npos));
         }
     }
-#if __APPLE__ && __DARWIN_C_LEVEL < 200809L
-// OS X Snow Leopard is broken with respect to the dynamically allocated buffer returned by
-// realpath(). It's not dynamically allocated so attempting to free that buffer triggers a
-// malloc/free error. Thus we don't attempt the free in this case.
-#else
-    free(narrow_res);
-#endif
-
-    wcstring wreal_path = str2wcstring(real_path);
-    if (resolved_path) {
-        wcslcpy(resolved_path, wreal_path.c_str(), PATH_MAX);
-        return resolved_path;
-    }
-    return wcsdup(wreal_path.c_str());
+    return str2wcstring(real_path);
 }
 
 wcstring wdirname(const wcstring &path) {
-    char *tmp = wcs2str(path.c_str());
+    char *tmp = wcs2str(path);
     char *narrow_res = dirname(tmp);
     wcstring result = format_string(L"%s", narrow_res);
     free(tmp);
@@ -406,7 +391,7 @@ wcstring wdirname(const wcstring &path) {
 }
 
 wcstring wbasename(const wcstring &path) {
-    char *tmp = wcs2str(path.c_str());
+    char *tmp = wcs2str(path);
     char *narrow_res = basename(tmp);
     wcstring result = format_string(L"%s", narrow_res);
     free(tmp);
@@ -432,7 +417,7 @@ const wcstring &wgettext(const wchar_t *in) {
     wcstring key = in;
 
     wgettext_init_if_necessary();
-    auto wmap = wgettext_map.acquire();
+    auto &&wmap = wgettext_map.acquire();
     wcstring &val = wmap.value[key];
     if (val.empty()) {
         cstring mbs_in = wcs2string(key);

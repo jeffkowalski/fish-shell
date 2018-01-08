@@ -46,7 +46,7 @@ static int parse_cmd_opts(echo_cmd_opts_t &opts, int *optind, int argc, wchar_t 
                 break;
             }
             case ':': {
-                streams.err.append_format(BUILTIN_ERR_MISSING, cmd, argv[w.woptind - 1]);
+                builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
                 return STATUS_INVALID_ARGS;
             }
             case '?': {
@@ -178,6 +178,7 @@ static bool builtin_echo_parse_numeric_sequence(const wchar_t *str, size_t *cons
 /// fish specific, option -s to mean "no spaces".
 int builtin_echo(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     wchar_t *cmd = argv[0];
+    UNUSED(cmd);
     int argc = builtin_count_args(argv);
     echo_cmd_opts_t opts;
     int optind;

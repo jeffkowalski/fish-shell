@@ -89,7 +89,7 @@ static int parse_cmd_opts(functions_cmd_opts_t &opts, int *optind,  //!OCLINT(hi
                 break;
             }
             case ':': {
-                streams.err.append_format(BUILTIN_ERR_MISSING, cmd, argv[w.woptind - 1]);
+                builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
                 return STATUS_INVALID_ARGS;
             }
             case '?': {
@@ -192,9 +192,7 @@ static wcstring functions_def(const wcstring &name) {
                                                        end = inherit_vars.end();
          it != end; ++it) {
         wcstring_list_t lst;
-        if (!it->second.missing()) {
-            tokenize_variable_array(it->second, lst);
-        }
+        it->second.to_list(lst);
 
         // This forced tab is crummy, but we don't know what indentation style the function uses.
         append_format(out, L"\n\tset -l %ls", it->first.c_str());

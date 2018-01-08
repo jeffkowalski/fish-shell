@@ -72,6 +72,9 @@ const wchar_t *reader_current_filename();
 /// \param fn The fileanme to push
 void reader_push_current_filename(const wchar_t *fn);
 
+/// Change the history file for the current command reading context.
+void reader_change_history(const wchar_t *fn);
+
 /// Pop the current filename from the stack of read files.
 void reader_pop_current_filename();
 
@@ -155,7 +158,7 @@ void reader_pop();
 /// - The command to be completed as a null terminated array of wchar_t
 /// - An array_list_t in which completions will be inserted.
 typedef void (*complete_function_t)(const wcstring &, std::vector<completion_t> *,
-                                    completion_request_flags_t, const env_vars_snapshot_t &);
+                                    completion_request_flags_t);
 void reader_set_complete_function(complete_function_t);
 
 /// The type of a highlight function.

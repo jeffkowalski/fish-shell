@@ -55,7 +55,7 @@ static owning_lock<wcstring_list_t> &get_transient_stack() {
 }
 
 static bool get_top_transient(wcstring *out_result) {
-    auto locked = get_transient_stack().acquire();
+    auto &&locked = get_transient_stack().acquire();
     wcstring_list_t &stack = locked.value;
     if (stack.empty()) {
         return false;
@@ -67,7 +67,7 @@ static bool get_top_transient(wcstring *out_result) {
 builtin_commandline_scoped_transient_t::builtin_commandline_scoped_transient_t(
     const wcstring &cmd) {
     ASSERT_IS_MAIN_THREAD();
-    auto locked = get_transient_stack().acquire();
+    auto &&locked = get_transient_stack().acquire();
     wcstring_list_t &stack = locked.value;
     stack.push_back(cmd);
     this->token = stack.size();
@@ -75,7 +75,7 @@ builtin_commandline_scoped_transient_t::builtin_commandline_scoped_transient_t(
 
 builtin_commandline_scoped_transient_t::~builtin_commandline_scoped_transient_t() {
     ASSERT_IS_MAIN_THREAD();
-    auto locked = get_transient_stack().acquire();
+    auto &&locked = get_transient_stack().acquire();
     wcstring_list_t &stack = locked.value;
     assert(this->token == stack.size());
     stack.pop_back();
@@ -304,7 +304,7 @@ int builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_t **argv)
                 return STATUS_CMD_OK;
             }
             case ':': {
-                streams.err.append_format(BUILTIN_ERR_MISSING, cmd, argv[w.woptind - 1]);
+                builtin_missing_argument(parser, streams, cmd, argv[w.woptind - 1]);
                 return STATUS_INVALID_ARGS;
             }
             case L'?': {
@@ -330,8 +330,7 @@ int builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_t **argv)
         }
 
         if (argc == w.woptind) {
-            streams.err.append_format(BUILTIN_ERR_MISSING, argv[0]);
-            builtin_print_help(parser, streams, cmd, streams.err);
+            builtin_missing_argument(parser, streams, cmd, argv[0]);
             return STATUS_INVALID_ARGS;
         }
 

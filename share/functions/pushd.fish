@@ -18,10 +18,13 @@ function pushd --description 'Push directory to stack'
         end
     end
 
+    set -q dirstack
+    or set -g dirstack
+
     # emulate bash: an empty pushd should switch the top of dirs
-    if test (count $argv) -eq 0
+    if not set -q argv[1]
         # check that the stack isn't empty
-        if test (count $dirstack) -eq 0
+        if not set -q dirstack[1]
             echo "pushd: no other directory"
             return 1
         end
@@ -73,6 +76,6 @@ function pushd --description 'Push directory to stack'
     end
 
     # argv[1] is a directory
-    set -g dirstack $PWD $dirstack
+    set -g -p dirstack $PWD
     cd $argv[1]
 end

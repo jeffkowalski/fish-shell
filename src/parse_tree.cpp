@@ -29,9 +29,10 @@ static bool production_is_empty(const production_element_t *production) {
 /// Returns a string description of this parse error.
 wcstring parse_error_t::describe_with_prefix(const wcstring &src, const wcstring &prefix,
                                              bool is_interactive, bool skip_caret) const {
+    if (skip_caret && this->text.empty()) return L"";
+
     wcstring result = prefix;
     result.append(this->text);
-
     if (skip_caret || source_start >= src.size() || source_start + source_length > src.size()) {
         return result;
     }
@@ -1196,6 +1197,13 @@ const parse_node_t *parse_node_tree_t::get_child(const parse_node_t &parent, nod
     }
 
     return result;
+}
+
+parsed_source_ref_t parse_source(wcstring src, parse_tree_flags_t flags, parse_error_list_t *errors,
+                                 parse_token_type_t goal) {
+    parse_node_tree_t tree;
+    if (!parse_tree_from_string(src, flags, &tree, errors, goal)) return {};
+    return std::make_shared<parsed_source_t>(std::move(src), std::move(tree));
 }
 
 const parse_node_t &parse_node_tree_t::find_child(const parse_node_t &parent,

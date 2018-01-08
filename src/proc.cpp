@@ -161,7 +161,7 @@ int proc_get_last_status() { return last_status; }
 static owning_lock<std::vector<bool>> locked_consumed_job_ids;
 
 job_id_t acquire_job_id(void) {
-    auto locker = locked_consumed_job_ids.acquire();
+    auto &&locker = locked_consumed_job_ids.acquire();
     std::vector<bool> &consumed_job_ids = locker.value;
 
     // Find the index of the first 0 slot.
@@ -181,7 +181,7 @@ job_id_t acquire_job_id(void) {
 
 void release_job_id(job_id_t jid) {
     assert(jid > 0);
-    auto locker = locked_consumed_job_ids.acquire();
+    auto &&locker = locked_consumed_job_ids.acquire();
     std::vector<bool> &consumed_job_ids = locker.value;
     size_t slot = (size_t)(jid - 1), count = consumed_job_ids.size();
 
@@ -513,12 +513,12 @@ void proc_fire_event(const wchar_t *msg, int type, pid_t pid, int status) {
     event.arguments.resize(0);
 }
 
-int job_reap(bool allow_interactive) {
+static int process_clean_after_marking(bool allow_interactive) {
     ASSERT_IS_MAIN_THREAD();
     job_t *jnext;
     int found = 0;
 
-    // job_reap may fire an event handler, we do not want to call ourselves recursively (to avoid
+    // this function may fire an event handler, we do not want to call ourselves recursively (to avoid
     // infinite recursion).
     static bool locked = false;
     if (locked) {
@@ -530,10 +530,6 @@ int job_reap(bool allow_interactive) {
     // don't try to print in that case (#3222)
     const bool interactive = allow_interactive && cur_term != NULL;
 
-    process_mark_finished_children(false);
-
-    // Preserve the exit status.
-    const int saved_status = proc_get_last_status();
 
     job_iterator_t jobs;
     const size_t job_count = jobs.count();
@@ -637,10 +633,24 @@ int job_reap(bool allow_interactive) {
 
     if (found) fflush(stdout);
 
+    locked = false;
+
+    return found;
+}
+
+int job_reap(bool allow_interactive) {
+    ASSERT_IS_MAIN_THREAD();
+    int found = 0;
+
+    process_mark_finished_children(false);
+
+    // Preserve the exit status.
+    const int saved_status = proc_get_last_status();
+
+    found = process_clean_after_marking(allow_interactive);
+
     // Restore the exit status.
     proc_set_last_status(saved_status);
-
-    locked = false;
 
     return found;
 }
@@ -782,25 +792,83 @@ static void read_try(job_t *j) {
 /// \param j The job to give the terminal to.
 /// \param cont If this variable is set, we are giving back control to a job that has previously
 /// been stopped. In that case, we need to set the terminal attributes to those saved in the job.
-static bool terminal_give_to_job(job_t *j, int cont) {
+bool terminal_give_to_job(job_t *j, int cont) {
     errno = 0;
     if (j->pgid == 0) {
         debug(2, "terminal_give_to_job() returning early due to no process group");
         return true;
     }
 
-    signal_block(true);
-    int result = -1;
-    errno = EINTR;
-    while (result == -1 && errno == EINTR) {
-        result = tcsetpgrp(STDIN_FILENO, j->pgid);
-    }
-    if (result == -1) {
-        if (errno == ENOTTY) redirect_tty_output();
-        debug(1, _(L"Could not send job %d ('%ls') to foreground"), j->job_id, j->command_wcstr());
-        wperror(L"tcsetpgrp");
-        signal_unblock(true);
-        return false;
+    signal_block();
+
+    // It may not be safe to call tcsetpgrp if we've already done so, as at that point we are no
+    // longer the controlling process group for the terminal and no longer have permission to set
+    // the process group that is in control, causing tcsetpgrp to return EPERM, even though that's
+    // not the documented behavior in tcsetpgrp(3), which instead says other bad things will happen
+    // (it says SIGTTOU will be sent to all members of the background *calling* process group, but
+    // it's more complicated than that, SIGTTOU may or may not be sent depending on the TTY
+    // configuration and whether or not signal handlers for SIGTTOU are installed. Read:
+    // http://curiousthing.org/sigttin-sigttou-deep-dive-linux In all cases, our goal here was just
+    // to hand over control of the terminal to this process group, which is a no-op if it's already
+    // been done.
+    if (tcgetpgrp(STDIN_FILENO) == j->pgid) {
+        debug(2, L"Process group %d already has control of terminal\n", j->pgid);
+    } else {
+        debug(4,
+              L"Attempting to bring process group to foreground via tcsetpgrp for job->pgid %d\n",
+              j->pgid);
+
+        // The tcsetpgrp(2) man page says that EPERM is thrown if "pgrp has a supported value, but
+        // is not the process group ID of a process in the same session as the calling process."
+        // Since we _guarantee_ that this isn't the case (the child calls setpgid before it calls
+        // SIGSTOP, and the child was created in the same session as us), it seems that EPERM is
+        // being thrown because of an caching issue - the call to tcsetpgrp isn't seeing the
+        // newly-created process group just yet. On this developer's test machine (WSL running Linux
+        // 4.4.0), EPERM does indeed disappear on retry. The important thing is that we can
+        // guarantee the process isn't going to exit while we wait (which would cause us to possibly
+        // block indefinitely).
+        while (tcsetpgrp(STDIN_FILENO, j->pgid) != 0) {
+            bool pgroup_terminated = false;
+            if (errno == EINTR) {
+                ;  // Always retry on EINTR, see comments in tcsetattr EINTR code below.
+            } else if (errno == EINVAL) {
+                // OS X returns EINVAL if the process group no longer lives. Probably other OSes,
+                // too. Unlike EPERM below, EINVAL can only happen if the process group has
+                // terminated.
+                pgroup_terminated = true;
+            } else if (errno == EPERM) {
+                // Retry so long as this isn't because the process group is dead.
+                int wait_result = waitpid(-1 * j->pgid, &wait_result, WNOHANG);
+                if (wait_result == -1) {
+                    // Note that -1 is technically an "error" for waitpid in the sense that an
+                    // invalid argument was specified because no such process group exists any
+                    // longer. This is the observed behavior on Linux 4.4.0. a "success" result
+                    // would mean processes from the group still exist but is still running in some
+                    // state or the other.
+                    pgroup_terminated = true;
+                } else {
+                    // Debug the original tcsetpgrp error (not the waitpid errno) to the log, and
+                    // then retry until not EPERM or the process group has exited.
+                    debug(2, L"terminal_give_to_job(): EPERM.\n", j->pgid);
+                }
+            } else {
+                if (errno == ENOTTY) redirect_tty_output();
+                debug(1, _(L"Could not send job %d ('%ls') with pgid %d to foreground"), j->job_id,
+                      j->command_wcstr(), j->pgid);
+                wperror(L"tcsetpgrp");
+                signal_unblock();
+                return false;
+            }
+
+            if (pgroup_terminated) {
+                // All processes in the process group has exited. Since we force all child procs to
+                // SIGSTOP on startup, the only way that can happen is if the very last process in
+                // the group terminated, and didn't need to access the terminal, otherwise it would
+                // have hung waiting for terminal IO (SIGTTIN). We can ignore this.
+                debug(3, L"tcsetpgrp called but process group %d has terminated.\n", j->pgid);
+                break;
+            }
+        }
     }
 
     if (cont) {
@@ -814,15 +882,15 @@ static bool terminal_give_to_job(job_t *j, int cont) {
         }
         if (result == -1) {
             if (errno == ENOTTY) redirect_tty_output();
-            debug(1, _(L"terminal_give_to_job(): Could not send job %d ('%ls') to foreground"),
-                  j->job_id, j->command_wcstr());
+            debug(1, _(L"Could not send job %d ('%ls') to foreground"), j->job_id,
+                  j->command_wcstr());
             wperror(L"tcsetattr");
-            signal_unblock(true);
+            signal_unblock();
             return false;
         }
     }
 
-    signal_unblock(true);
+    signal_unblock();
     return true;
 }
 
@@ -835,12 +903,12 @@ static bool terminal_return_from_job(job_t *j) {
         return true;
     }
 
-    signal_block(true);
+    signal_block();
     if (tcsetpgrp(STDIN_FILENO, getpgrp()) == -1) {
         if (errno == ENOTTY) redirect_tty_output();
         debug(1, _(L"Could not return shell to foreground"));
         wperror(L"tcsetpgrp");
-        signal_unblock(true);
+        signal_unblock();
         return false;
     }
 
@@ -849,7 +917,7 @@ static bool terminal_return_from_job(job_t *j) {
         if (errno == EIO) redirect_tty_output();
         debug(1, _(L"Could not return shell to foreground"));
         wperror(L"tcgetattr");
-        signal_unblock(true);
+        signal_unblock();
         return false;
     }
 
@@ -867,7 +935,7 @@ static bool terminal_return_from_job(job_t *j) {
     }
 #endif
 
-    signal_unblock(true);
+    signal_unblock();
     return true;
 }
 
@@ -877,8 +945,8 @@ void job_continue(job_t *j, bool cont) {
     j->set_flag(JOB_NOTIFIED, false);
 
     CHECK_BLOCK();
-    debug(4, L"Continue job %d, gid %d (%ls), %ls, %ls", j->job_id, j->pgid, j->command_wcstr(),
-          job_is_completed(j) ? L"COMPLETED" : L"UNCOMPLETED",
+    debug(4, L"%ls job %d, gid %d (%ls), %ls, %ls", cont ? L"Continue" : L"Start", j->job_id,
+          j->pgid, j->command_wcstr(), job_is_completed(j) ? L"COMPLETED" : L"UNCOMPLETED",
           is_interactive ? L"INTERACTIVE" : L"NON-INTERACTIVE");
 
     if (!job_is_completed(j)) {
@@ -1036,4 +1104,13 @@ void proc_pop_interactive() {
     is_interactive = interactive_stack.back();
     interactive_stack.pop_back();
     if (is_interactive != old) signal_set_handlers();
+}
+
+pid_t proc_wait_any() {
+    int pid_status;
+    pid_t pid = waitpid(-1, &pid_status, WUNTRACED);
+    if (pid == -1) return -1;
+    handle_child_status(pid, pid_status);
+    process_clean_after_marking(is_interactive);
+    return pid;
 }
