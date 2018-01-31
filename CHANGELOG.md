@@ -28,6 +28,14 @@ This section is for changes merged to the `major` branch that are not also merge
 - `read` writes directly to stdout if called without arguments (#4407)
 - Globs are faster (#4579)
 - `string` reads from stdin faster (#4610)
+- `cd` tab completions no longer descend into the deepest unambiguous path (#4649)
+- Setting `$PATH` no longer warns on non-existent directories, allowing for a single $PATH to be shared across machines (e.g. via dotfiles).
+- `funced` now has a `-s` and `--save` option to automatically save the edited function after successfully editing (#4668).
+- Arguments to `end` are now errors, instead of being silently ignored.
+- Pager navigation has been improved. Most notably, moving down now wraps around, moving up from the commandline now jumps to the last element and moving right and left now reverse each other even when wrapping around (#4680).
+- Typing normal characters while the completion pager is active no longer shows the search field. Instead it enters them into the command line, and ends paging (#2249).
+- A new input binding `pager-toggle-search` toggles the search field in the completions pager on and off. By default this is bound to control-s.
+- Slicing $history (in particular, `$history[1]` for the last executed command) is much faster.
 
 ## Other significant changes
 - Command substitution output is now limited to 10 MB by default (#3822).
@@ -39,6 +47,7 @@ This section is for changes merged to the `major` branch that are not also merge
 - Improved completions for
   - `git` (#4395, #4396, #4592)
   - `brew`
+  - `diskutil`
 
 --
 
@@ -104,8 +113,6 @@ Xcode builds and macOS packages could not be produced with 2.7b1, but this is fi
 - Lots of improvements to completions.
 - Updated Chinese and French translations.
 
-<<<<<<< Local Changes
-
 - Improved completions for:
   - `apt`
   - `cd` (#4061)
@@ -120,9 +127,7 @@ Xcode builds and macOS packages could not be produced with 2.7b1, but this is fi
   - `tail`
   - `xdg-mime` (#4333)
   - `zypper` (#4325)
-=======
 ---
->>>>>>> External Changes
 
 # fish 2.6.0 (released June 3, 2017)
 

@@ -36,12 +36,12 @@
 #include "iothread.h"
 #include "lru.h"
 #include "parse_constants.h"
-#include "parse_tree.h"
 #include "parse_util.h"
 #include "path.h"
 #include "reader.h"
+#include "tnode.h"
 #include "wildcard.h"  // IWYU pragma: keep
-#include "wutil.h"  // IWYU pragma: keep
+#include "wutil.h"     // IWYU pragma: keep
 
 // Our history format is intended to be valid YAML. Here it is:
 //
@@ -890,8 +890,8 @@ size_t history_t::size() {
     return new_item_count + old_item_count;
 }
 
-history_item_t history_t::item_at_index(size_t idx) {
-    scoped_lock locker(lock);
+history_item_t history_t::item_at_index_assume_locked(size_t idx) {
+    ASSERT_IS_LOCKED(lock);
 
     // 0 is considered an invalid index.
     assert(idx > 0);
@@ -921,6 +921,31 @@ history_item_t history_t::item_at_index(size_t idx) {
 
     // Index past the valid range, so return an empty history item.
     return history_item_t(wcstring(), 0);
+}
+
+history_item_t history_t::item_at_index(size_t idx) {
+    scoped_lock locker(lock);
+    return item_at_index_assume_locked(idx);
+}
+
+std::unordered_map<long, wcstring> history_t::items_at_indexes(const std::vector<long> &idxs) {
+    scoped_lock locker(lock);
+    std::unordered_map<long, wcstring> result;
+    for (long idx : idxs) {
+        if (idx <= 0) {
+            // Skip non-positive entries.
+            continue;
+        }
+        // Insert an empty string to see if this is the first time the index is encountered. If so,
+        // we have to go fetch the item.
+        auto iter_inserted = result.emplace(idx, wcstring{});
+        if (iter_inserted.second) {
+            // New key.
+            auto item = item_at_index_assume_locked(size_t(idx));
+            iter_inserted.first->second = std::move(item.contents);
+        }
+    }
+    return result;
 }
 
 void history_t::populate_from_mmap(void) {
@@ -1892,11 +1917,9 @@ void history_t::add_pending_with_file_detection(const wcstring &str) {
     bool impending_exit = false;
     parse_node_tree_t tree;
     parse_tree_from_string(str, parse_flag_none, &tree, NULL);
-    size_t count = tree.size();
 
     path_list_t potential_paths;
-    for (size_t i = 0; i < count; i++) {
-        const parse_node_t &node = tree.at(i);
+    for (const parse_node_t &node : tree) {
         if (!node.has_source()) {
             continue;
         }
@@ -1911,15 +1934,15 @@ void history_t::add_pending_with_file_detection(const wcstring &str) {
             // Hack hack hack - if the command is likely to trigger an exit, then don't do
             // background file detection, because we won't be able to write it to our history file
             // before we exit.
-            if (tree.decoration_for_plain_statement(node) == parse_statement_decoration_exec) {
+            if (get_decoration({&tree, &node}) == parse_statement_decoration_exec) {
                 impending_exit = true;
             }
 
-            wcstring command;
-            tree.command_for_plain_statement(node, str, &command);
-            unescape_string_in_place(&command, UNESCAPE_DEFAULT);
-            if (command == L"exit" || command == L"reboot") {
-                impending_exit = true;
+            if (maybe_t<wcstring> command = command_for_plain_statement({&tree, &node}, str)) {
+                unescape_string_in_place(&*command, UNESCAPE_DEFAULT);
+                if (*command == L"exit" || *command == L"reboot") {
+                    impending_exit = true;
+                }
             }
         }
     }

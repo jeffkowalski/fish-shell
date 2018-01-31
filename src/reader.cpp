@@ -62,7 +62,6 @@
 #include "output.h"
 #include "pager.h"
 #include "parse_constants.h"
-#include "parse_tree.h"
 #include "parse_util.h"
 #include "parser.h"
 #include "proc.h"
@@ -70,6 +69,7 @@
 #include "sanity.h"
 #include "screen.h"
 #include "signal.h"
+#include "tnode.h"
 #include "tokenizer.h"
 #include "util.h"
 #include "wutil.h"  // IWYU pragma: keep
@@ -580,25 +580,25 @@ bool reader_expand_abbreviation_in_command(const wcstring &cmdline, size_t curso
                            &parse_tree, NULL);
 
     // Look for plain statements where the cursor is at the end of the command.
-    const parse_node_t *matching_cmd_node = NULL;
-    const size_t len = parse_tree.size();
-    for (size_t i = 0; i < len; i++) {
-        const parse_node_t &node = parse_tree.at(i);
-
+    using namespace grammar;
+    tnode_t<tok_string> matching_cmd_node;
+    for (const parse_node_t &node : parse_tree) {
         // Only interested in plain statements with source.
         if (node.type != symbol_plain_statement || !node.has_source()) continue;
 
-        // Skip decorated statements.
-        if (parse_tree.decoration_for_plain_statement(node) != parse_statement_decoration_none)
-            continue;
-
         // Get the command node. Skip it if we can't or it has no source.
-        const parse_node_t *cmd_node = parse_tree.get_child(node, 0, parse_token_type_string);
-        if (cmd_node == NULL || !cmd_node->has_source()) continue;
+        tnode_t<plain_statement> statement(&parse_tree, &node);
+        tnode_t<tok_string> cmd_node = statement.child<0>();
+
+        // Skip decorated statements.
+        if (get_decoration(statement) != parse_statement_decoration_none) continue;
+
+        auto msource = cmd_node.source_range();
+        if (!msource) continue;
 
         // Now see if its source range contains our cursor, including at the end.
-        if (subcmd_cursor_pos >= cmd_node->source_start &&
-            subcmd_cursor_pos <= cmd_node->source_start + cmd_node->source_length) {
+        if (subcmd_cursor_pos >= msource->start &&
+            subcmd_cursor_pos <= msource->start + msource->length) {
             // Success!
             matching_cmd_node = cmd_node;
             break;
@@ -607,17 +607,16 @@ bool reader_expand_abbreviation_in_command(const wcstring &cmdline, size_t curso
 
     // Now if we found a command node, expand it.
     bool result = false;
-    if (matching_cmd_node != NULL) {
-        assert(matching_cmd_node->type == parse_token_type_string);
-        const wcstring token = matching_cmd_node->get_source(subcmd);
+    if (matching_cmd_node) {
+        const wcstring token = matching_cmd_node.get_source(subcmd);
         wcstring abbreviation;
         if (expand_abbreviation(token, &abbreviation)) {
             // There was an abbreviation! Replace the token in the full command. Maintain the
             // relative position of the cursor.
             if (output != NULL) {
                 output->assign(cmdline);
-                output->replace(subcmd_offset + matching_cmd_node->source_start,
-                                matching_cmd_node->source_length, abbreviation);
+                source_range_t r = *matching_cmd_node.source_range();
+                output->replace(subcmd_offset + r.start, r.length, abbreviation);
             }
             result = true;
         }
@@ -2592,6 +2591,15 @@ const wchar_t *reader_readline(int nchars) {
                 }
                 break;
             }
+            case R_PAGER_TOGGLE_SEARCH: {
+                if (data->is_navigating_pager_contents()) {
+                    bool sfs = data->pager.is_search_field_shown();
+                    data->pager.set_search_field_shown(!sfs);
+                    data->pager.set_fully_disclosed(true);
+                    reader_repaint_needed();
+                }
+                break;
+            }
             case R_KILL_LINE: {
                 editable_line_t *el = data->active_edit_line();
                 const wchar_t *buff = el->text.c_str();
@@ -2971,9 +2979,9 @@ const wchar_t *reader_readline(int nchars) {
 
                     // Now do the selection.
                     select_completion_in_direction(direction);
-                } else if (c == R_DOWN_LINE && !data->pager.empty()) {
-                    // We pressed down with a non-empty pager contents, begin navigation.
-                    select_completion_in_direction(direction_south);
+                } else if (!data->pager.empty()) {
+                    // We pressed a direction with a non-empty pager, begin navigation.
+                    select_completion_in_direction(c == R_DOWN_LINE ? direction_south : direction_north);
                 } else {
                     // Not navigating the pager contents.
                     editable_line_t *el = data->active_edit_line();
@@ -3187,15 +3195,10 @@ const wchar_t *reader_readline(int nchars) {
                 // Other, if a normal character, we add it to the command.
                 if (!fish_reserved_codepoint(c) && (c >= L' ' || c == L'\n' || c == L'\r') &&
                     c != 0x7F) {
-                    bool allow_expand_abbreviations = false;
-                    if (data->is_navigating_pager_contents()) {
-                        data->pager.set_search_field_shown(true);
-                    } else {
-                        allow_expand_abbreviations = true;
-                    }
 
                     // Regular character.
                     editable_line_t *el = data->active_edit_line();
+                    bool allow_expand_abbreviations = (el == &data->command_line);
                     insert_char(data->active_edit_line(), c, allow_expand_abbreviations);
 
                     // End paging upon inserting into the normal command line.

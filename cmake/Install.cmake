@@ -17,6 +17,8 @@ SET(mandir ${CMAKE_INSTALL_MANDIR})
 SET(rel_datadir ${CMAKE_INSTALL_DATADIR})
 SET(datadir ${CMAKE_INSTALL_FULL_DATADIR})
 
+SET(docdir ${CMAKE_INSTALL_DOCDIR})
+
 # Comment at the top of some .in files
 SET(configure_input
 "This file was generated from a corresponding .in file.\
@@ -109,10 +111,15 @@ FISH_CREATE_DIRS(${rel_datadir}/pkgconfig ${extra_completionsdir}
 
 # @echo "Installing pkgconfig file"
 # $v $(INSTALL) -m 644 fish.pc $(DESTDIR)$(datadir)/pkgconfig
+CONFIGURE_FILE(fish.pc.in fish.pc.noversion)
+ADD_CUSTOM_COMMAND(OUTPUT fish.pc
+  COMMAND sed '/Version/d' fish.pc.noversion > fish.pc
+  COMMAND echo -n "Version: " >> fish.pc
+  COMMAND sed 's/FISH_BUILD_VERSION=//\;s/\"//g' ${FBVF} >> fish.pc
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS ${FBVF} ${CMAKE_CURRENT_BINARY_DIR}/fish.pc.noversion)
 
-# main CMakeFiles.txt sets ${FISH_BUILD_VERSION}, not ${fish_build_version}
-set(fish_build_version ${FISH_BUILD_VERSION})
-CONFIGURE_FILE(fish.pc.in fish.pc)
+ADD_CUSTOM_TARGET(build_fish_pc ALL DEPENDS fish.pc)
 
 INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/fish.pc
         DESTINATION ${rel_datadir}/pkgconfig)
@@ -135,6 +142,8 @@ INSTALL(DIRECTORY share/groff
         DESTINATION ${rel_datadir}/fish)
 
 # $v test -z "$(wildcard share/man/man1/*.1)" || $(INSTALL) -m 644 $(filter-out $(addprefix share/man/man1/, $(CONDEMNED_PAGES)), $(wildcard share/man/man1/*.1)) $(DESTDIR)$(datadir)/fish/man/man1/
+# CONDEMNED_PAGES is managed by the LIST() function after the glob
+# Building the man pages is optional: if doxygen isn't installed, they're not built
 INSTALL(FILES ${HELP_MANPAGES}
         DESTINATION ${rel_datadir}/fish/man/man1)
 
@@ -159,12 +168,6 @@ INSTALL(DIRECTORY share/tools/web_config
         PATTERN "*.js"
         PATTERN "*.fish")
 
-#$v test -z "$(wildcard share/man/man1/*.1)" || $(INSTALL) -m 644 $(filter-out $(addprefix share/man/man1/, $(CONDEMNED_PAGES)), $(wildcard share/man/man1/*.1)) #$(DESTDIR)$(datadir)/fish/man/man1/
-#TODO: CONDEMNED_PAGES
-# Building the man pages is optional: if doxygen isn't installed, they're not built
-INSTALL(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/share/man/
-        DESTINATION ${rel_datadir}/fish/man/ OPTIONAL)
-
 # @echo "Installing more man pages";
 # $v $(INSTALL) -m 755 -d $(DESTDIR)$(mandir)/man1;
 # $v for i in $(MANUALS); do \
@@ -174,14 +177,36 @@ INSTALL(DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/share/man/
 # Building the man pages is optional: if doxygen isn't installed, they're not built
 INSTALL(FILES ${MANUALS} DESTINATION ${mandir}/man1/ OPTIONAL)
 
+#install-doc: $(user_doc)
+#    @echo "Installing online user documentation";
+#    $v $(INSTALL) -m 755 -d $(DESTDIR)$(docdir)
+#    $v for i in user_doc/html/* CHANGELOG.md; do \
+#        if test -f $$i; then \
+#            $(INSTALL) -m 644 $$i $(DESTDIR)$(docdir); \
+#        fi; \
+#    done;
+# Building the manual is optional
+INSTALL(DIRECTORY user_doc/html/ # Trailing slash is important!
+        DESTINATION ${docdir} OPTIONAL)
+INSTALL(FILES CHANGELOG.md DESTINATION ${docdir})
+
 # $v $(INSTALL) -m 644 share/lynx.lss $(DESTDIR)$(datadir)/fish/
 INSTALL(FILES share/lynx.lss DESTINATION ${rel_datadir}/fish/)
 
+# These files are built by cmake/gettext.cmake, but using GETTEXT_PROCESS_PO_FILES's
+# INSTALL_DESTINATION leads to them being installed as ${lang}.gmo, not fish.mo
+# The ${languages} array comes from cmake/gettext.cmake
+IF(GETTEXT_FOUND)
+  FOREACH(lang ${languages})
+    INSTALL(FILES ${CMAKE_CURRENT_BINARY_DIR}/${lang}.gmo DESTINATION
+            ${CMAKE_INSTALL_LOCALEDIR}/${lang}/LC_MESSAGES/ RENAME fish.mo)
+  ENDFOREACH()
+ENDIF()
+
 # Group install targets into a InstallTargets folder
-SET_PROPERTY(TARGET 
+SET_PROPERTY(TARGET build_fish_pc CHECK-FISH-BUILD-VERSION-FILE
                     test_invocation test_fishscript
                     test_prep tests_buildroot_target
-                    build_lexicon_filter
              PROPERTY FOLDER cmake/InstallTargets)
 
 # Make a target build_root that installs into the buildroot directory, for testing.
