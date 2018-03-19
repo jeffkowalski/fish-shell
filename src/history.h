@@ -53,11 +53,7 @@ enum history_search_type_t {
     // Search for commands containing the given glob pattern.
     HISTORY_SEARCH_TYPE_CONTAINS_GLOB,
     // Search for commands starting with the given glob pattern.
-    HISTORY_SEARCH_TYPE_PREFIX_GLOB,
-    // Search for commands containing the given PCRE pattern.
-    HISTORY_SEARCH_TYPE_CONTAINS_PCRE,
-    // Search for commands starting with the given PCRE pattern.
-    HISTORY_SEARCH_TYPE_PREFIX_PCRE
+    HISTORY_SEARCH_TYPE_PREFIX_GLOB
 };
 
 typedef uint32_t history_identifier_t;
@@ -124,7 +120,7 @@ class history_t {
     void add(const history_item_t &item, bool pending = false);
 
     // Lock for thread safety.
-    std::mutex lock;
+    fish_mutex_t lock;
 
     // Internal function.
     void clear_file_state();
@@ -220,7 +216,7 @@ class history_t {
     history_item_t item_at_index_assume_locked(size_t idx);
 
    public:
-    explicit history_t(const wcstring &);  // constructor
+    explicit history_t(wcstring );  // constructor
 
     // Returns history with the given name, creating it if necessary.
     static history_t &history_with_name(const wcstring &name);
@@ -362,15 +358,8 @@ class history_search_t {
         : history(), term(), search_type(HISTORY_SEARCH_TYPE_CONTAINS), case_sensitive(true) {}
 };
 
-/// Init history library. The history file won't actually be loaded until the first time a history
-/// search is performed.
-void history_init();
-
 /// Saves the new history to disk.
-void history_destroy();
-
-/// Perform sanity checks.
-void history_sanity_check();
+void history_save_all();
 
 /// Return the prefix for the files to be used for command and read history.
 wcstring history_session_id();

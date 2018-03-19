@@ -25,7 +25,7 @@ if status --is-interactive
         # These "XXX nostring" hacks were added for 2.3.1
         set_color --bold
         echo "You appear to be trying to launch an old fish binary with newer scripts "
-        echo "installed into" (set_color --underline)"$__fish_datadir"
+        echo "installed into" (set_color --underline)"$__fish_data_dir"
         set_color normal
         echo -e "\nThis is an unsupported configuration.\n"
         set_color yellow
@@ -74,7 +74,7 @@ if set -q XDG_DATA_HOME
     set userdatadir $XDG_DATA_HOME
 end
 
-# __fish_datadir, __fish_sysconfdir, __fish_help_dir, __fish_bin_dir
+# __fish_data_dir, __fish_sysconf_dir, __fish_help_dir, __fish_bin_dir
 # are expected to have been set up by read_init from fish.cpp
 
 # Grab extra directories (as specified by the build process, usually for
@@ -82,28 +82,35 @@ end
 set -l __extra_completionsdir
 set -l __extra_functionsdir
 set -l __extra_confdir
-if test -f $__fish_datadir/__fish_build_paths.fish
-    source $__fish_datadir/__fish_build_paths.fish
+if test -f $__fish_data_dir/__fish_build_paths.fish
+    source $__fish_data_dir/__fish_build_paths.fish
 end
 
 # Set up function and completion paths. Make sure that the fish
 # default functions/completions are included in the respective path.
 
 if not set -q fish_function_path
-    set fish_function_path $configdir/fish/functions $__fish_sysconfdir/functions $__extra_functionsdir $__fish_datadir/functions
+    set fish_function_path $configdir/fish/functions $__fish_sysconf_dir/functions $__extra_functionsdir $__fish_data_dir/functions
 end
 
-if not contains -- $__fish_datadir/functions $fish_function_path
-    set fish_function_path $fish_function_path $__fish_datadir/functions
+if not contains -- $__fish_data_dir/functions $fish_function_path
+    set fish_function_path $fish_function_path $__fish_data_dir/functions
 end
 
 if not set -q fish_complete_path
-    set fish_complete_path $configdir/fish/completions $__fish_sysconfdir/completions $__extra_completionsdir $__fish_datadir/completions $userdatadir/fish/generated_completions
+    set fish_complete_path $configdir/fish/completions $__fish_sysconf_dir/completions $__extra_completionsdir $__fish_data_dir/completions $userdatadir/fish/generated_completions
 end
 
-if not contains -- $__fish_datadir/completions $fish_complete_path
-    set fish_complete_path $fish_complete_path $__fish_datadir/completions
+if not contains -- $__fish_data_dir/completions $fish_complete_path
+    set fish_complete_path $fish_complete_path $__fish_data_dir/completions
 end
+
+# : is a sh/bash-compatibility function, but because its name can cause problems on many
+# systems, it is saved as colon.fish and not :.fish, which means that it's never autoloaded
+# since the name of the file and the name of the function differ. Force evaluation of colon.fish
+# as a function by simply trying to  load the non-existent function colon, which will pull in
+# colon.fish and lead to `:` being recognized. Sourced up here so it can be used later safely.
+type -q colon; or true # just to reset $status
 
 #
 # This is a Solaris-specific test to modify the PATH so that
@@ -222,7 +229,7 @@ __fish_set_locale
 # As last part of initialization, source the conf directories.
 # Implement precedence (User > Admin > Extra (e.g. vendors) > Fish) by basically doing "basename".
 set -l sourcelist
-for file in $configdir/fish/conf.d/*.fish $__fish_sysconfdir/conf.d/*.fish $__extra_confdir/*.fish
+for file in $configdir/fish/conf.d/*.fish $__fish_sysconf_dir/conf.d/*.fish $__extra_confdir/*.fish
     set -l basename (string replace -r '^.*/' '' -- $file)
     contains -- $basename $sourcelist
     and continue

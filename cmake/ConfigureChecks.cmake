@@ -14,6 +14,11 @@ IF(APPLE)
   SET(CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS} "-Werror=unguarded-availability")
 ENDIF()
 
+# Detect WSL. Does not match against native Windows/WIN32.
+if (CMAKE_HOST_SYSTEM_VERSION MATCHES ".*-Microsoft")
+  SET(WSL 1)
+endif()
+
 # Set up the config.h file.
 SET(PACKAGE_NAME "fish")
 SET(PACKAGE_TARNAME "fish")
@@ -41,8 +46,10 @@ CHECK_CXX_SYMBOL_EXISTS(killpg "sys/types.h;signal.h" HAVE_KILLPG)
 CHECK_CXX_SYMBOL_EXISTS(lrand48_r stdlib.h HAVE_LRAND48_R)
 # mkostemp is in stdlib in glibc and FreeBSD, but unistd on macOS
 CHECK_CXX_SYMBOL_EXISTS(mkostemp "stdlib.h;unistd.h" HAVE_MKOSTEMP)
+SET(HAVE_CURSES_H ${CURSES_HAVE_CURSES_H})
 SET(HAVE_NCURSES_CURSES_H ${CURSES_HAVE_NCURSES_CURSES_H})
 SET(HAVE_NCURSES_H ${CURSES_HAVE_NCURSES_H})
+CHECK_INCLUDE_FILES("curses.h;term.h" HAVE_TERM_H)
 CHECK_INCLUDE_FILE_CXX("ncurses/term.h" HAVE_NCURSES_TERM_H)
 CHECK_INCLUDE_FILE_CXX(siginfo.h HAVE_SIGINFO_H)
 CHECK_INCLUDE_FILE_CXX(spawn.h HAVE_SPAWN_H)
@@ -60,7 +67,6 @@ CHECK_INCLUDE_FILE_CXX(sys/ioctl.h HAVE_SYS_IOCTL_H)
 CHECK_INCLUDE_FILE_CXX(sys/select.h HAVE_SYS_SELECT_H)
 CHECK_INCLUDE_FILES("sys/types.h;sys/sysctl.h" HAVE_SYS_SYSCTL_H)
 CHECK_INCLUDE_FILE_CXX(termios.h HAVE_TERMIOS_H) # Needed for TIOCGWINSZ
-CHECK_INCLUDE_FILE_CXX(term.h HAVE_TERM_H)
 CHECK_CXX_SYMBOL_EXISTS(wcscasecmp wchar.h HAVE_WCSCASECMP)
 CHECK_CXX_SYMBOL_EXISTS(wcsdup wchar.h HAVE_WCSDUP)
 CHECK_CXX_SYMBOL_EXISTS(wcslcpy wchar.h HAVE_WCSLCPY)
@@ -112,5 +118,15 @@ SET(CMAKE_REQUIRED_LIBRARIES)
 IF(NOT TPARM_TAKES_VARARGS)
   SET(TPARM_SOLARIS_KLUDGE 1)
 ENDIF()
+
+CHECK_CXX_SOURCE_COMPILES("
+#include <memory>
+
+int main () {
+  std::unique_ptr<int> foo = std::make_unique<int>();
+}
+"
+  HAVE_STD__MAKE_UNIQUE
+)
 
 FIND_PROGRAM(SED sed)

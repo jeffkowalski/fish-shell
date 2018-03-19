@@ -16,12 +16,12 @@
 #include <unistd.h>
 #include <wchar.h>
 
-#if HAVE_NCURSES_H
+#if HAVE_CURSES_H
+#include <curses.h>
+#elif HAVE_NCURSES_H
 #include <ncurses.h>
 #elif HAVE_NCURSES_CURSES_H
 #include <ncurses/curses.h>
-#else
-#include <curses.h>
 #endif
 #if HAVE_TERM_H
 #include <term.h>
@@ -40,12 +40,14 @@
 
 #include "builtin_bind.h"
 #include "common.h"
+#include "complete.h"
 #include "env.h"
 #include "env_universal_common.h"
 #include "event.h"
 #include "expand.h"
 #include "fallback.h"  // IWYU pragma: keep
 #include "fish_version.h"
+#include "function.h"
 #include "history.h"
 #include "input.h"
 #include "input_common.h"
@@ -61,8 +63,8 @@
 #define DEFAULT_TERM2 "dumb"
 
 /// Some configuration path environment variables.
-#define FISH_DATADIR_VAR L"__fish_datadir"
-#define FISH_SYSCONFDIR_VAR L"__fish_sysconfdir"
+#define FISH_DATADIR_VAR L"__fish_data_dir"
+#define FISH_SYSCONFDIR_VAR L"__fish_sysconf_dir"
 #define FISH_HELPDIR_VAR L"__fish_help_dir"
 #define FISH_BIN_DIR L"__fish_bin_dir"
 
@@ -109,29 +111,26 @@ static void init_curses();
 
 /// This is used to convert a serialized env_var_t back into a list. It is used when reading legacy
 /// (fish 2.x) encoded vars stored in the universal variable file and the environment.
-static void tokenize_variable_array(const wcstring &val, wcstring_list_t &out) {
-    out.clear();  // ensure the output var is empty -- this will normally be a no-op
-
+static wcstring_list_t tokenize_variable_array(const wcstring &val) {
     // Zero element arrays are externally encoded as this placeholder string.
-    if (val == ENV_NULL) return;
+    if (val == ENV_NULL) return {};
 
+    wcstring_list_t out;
     size_t pos = 0, end = val.size();
     while (pos <= end) {
         size_t next_pos = val.find(ARRAY_SEP, pos);
         if (next_pos == wcstring::npos) {
             next_pos = end;
         }
-        out.resize(out.size() + 1);
-        out.back().assign(val, pos, next_pos - pos);
+        out.emplace_back(val, pos, next_pos - pos);
         pos = next_pos + 1;  // skip the separator, or skip past the end
     }
+    return out;
 }
 
 /// This is used to convert a serialized env_var_t back into a list.
 wcstring_list_t decode_serialized(const wcstring &s) {
-    wcstring_list_t values;
-    tokenize_variable_array(s, values);
-    return values;
+    return tokenize_variable_array(s);
 }
 
 // Struct representing one level in the function variable stack.
@@ -158,11 +157,7 @@ class env_node_t {
     bool contains_any_of(const wcstring_list_t &vars) const;
 };
 
-class variable_entry_t {
-    wcstring value; /**< Value of the variable */
-};
-
-static std::mutex env_lock;
+static fish_mutex_t env_lock;
 
 static bool local_scope_exports(const env_node_t *n);
 
@@ -327,7 +322,7 @@ bool string_set_contains(const T &set, const wchar_t *val) {
 
 /// Check if a variable may not be set using the set command.
 static bool is_read_only(const wchar_t *val) {
-    const string_set_t env_read_only = {L"PWD", L"SHLVL", L"_", L"history", L"status", L"version"};
+    const string_set_t env_read_only = {L"PWD", L"SHLVL", L"history", L"status", L"version", L"pid", L"hostname", L"current_cmd"};
     return string_set_contains(env_read_only, val);
 }
 
@@ -548,8 +543,8 @@ static bool initialize_curses_using_fallback(const char *term) {
     auto term_var = env_get(L"TERM");
     if (term_var.missing_or_empty()) return false;
 
-    const char *term_env = wcs2str(term_var->as_string());
-    if (!strcmp(term_env, DEFAULT_TERM1) || !strcmp(term_env, DEFAULT_TERM2)) return false;
+    auto term_env = wcs2string(term_var->as_string());
+    if (term_env == DEFAULT_TERM1 || term_env == DEFAULT_TERM2) return false;
 
     if (is_interactive_session) debug(1, _(L"Using fallback terminal type '%s'."), term);
 
@@ -566,6 +561,30 @@ static bool initialize_curses_using_fallback(const char *term) {
 static void init_path_vars() {
     for (const wchar_t *var_name : colon_delimited_variable) {
         fix_colon_delimited_var(var_name);
+    }
+}
+
+/// Update the value of g_guessed_fish_emoji_width
+static void guess_emoji_width() {
+    wcstring term;
+    if (auto term_var = env_get(L"TERM_PROGRAM")) {
+        term = term_var->as_string();
+    }
+
+    double version = 0;
+    if (auto version_var = env_get(L"TERM_PROGRAM_VERSION")) {
+        std::string narrow_version = wcs2string(version_var->as_string());
+        version = strtod(narrow_version.c_str(), NULL);
+    }
+
+    // iTerm2 defaults to Unicode 8 sizes.
+    // See https://gitlab.com/gnachman/iterm2/wikis/unicodeversionswitching
+
+    if (term == L"Apple_Terminal" && version >= 400) {
+        // Apple Terminal on High Sierra
+        g_guessed_fish_emoji_width = 2;
+    } else {
+        g_guessed_fish_emoji_width = 1;
     }
 }
 
@@ -606,7 +625,7 @@ static void init_curses() {
     term_has_xn = tigetflag((char *)"xenl") == 1;  // does terminal have the eat_newline_glitch
     update_fish_color_support();
     // Invalidate the cached escape sequences since they may no longer be valid.
-    cached_esc_sequences.clear();
+    cached_layouts.clear();
     curses_initialized = true;
 }
 
@@ -701,7 +720,7 @@ void env_set_read_limit() {
     }
 }
 
-wcstring env_get_pwd_slash(void) {
+wcstring env_get_pwd_slash() {
     auto pwd_var = env_get(L"PWD");
     if (pwd_var.missing_or_empty()) {
         return L"";
@@ -740,27 +759,14 @@ void misc_init() {
         setvbuf(stdout, NULL, _IONBF, 0);
     }
 
-#ifdef OS_IS_CYGWIN
+#if defined(OS_IS_CYGWIN) || defined(WSL)
     // MS Windows tty devices do not currently have either a read or write timestamp. Those
     // respective fields of `struct stat` are always the current time. Which means we can't
     // use them. So we assume no external program has written to the terminal behind our
     // back. This makes multiline promptusable. See issue #2859 and
     // https://github.com/Microsoft/BashOnWindows/issues/545
     has_working_tty_timestamps = false;
-#else
-    // This covers preview builds of Windows Subsystem for Linux (WSL).
-    FILE *procsyskosrel;
-    if ((procsyskosrel = wfopen(L"/proc/sys/kernel/osrelease", "r"))) {
-        wcstring osrelease;
-        fgetws2(&osrelease, procsyskosrel);
-        if (osrelease.find(L"3.4.0-Microsoft") != wcstring::npos) {
-            has_working_tty_timestamps = false;
-        }
-    }
-    if (procsyskosrel) {
-        fclose(procsyskosrel);
-    }
-#endif  // OS_IS_MS_WINDOWS
+#endif
 }
 
 static void env_universal_callbacks(callback_data_list_t &callbacks) {
@@ -796,6 +802,14 @@ static void handle_escape_delay_change(const wcstring &op, const wcstring &var_n
     update_wait_on_escape_ms();
 }
 
+static void handle_change_emoji_width(const wcstring &op, const wcstring &var_name) {
+    int new_width = 0;
+    if (auto width_str = env_get(L"fish_emoji_width")) {
+        new_width = fish_wcstol(width_str->as_string().c_str());
+    }
+    g_fish_emoji_width = std::max(0, new_width);
+}
+
 static void handle_term_size_change(const wcstring &op, const wcstring &var_name) {
     UNUSED(op);
     UNUSED(var_name);
@@ -812,6 +826,18 @@ static void handle_fish_history_change(const wcstring &op, const wcstring &var_n
     UNUSED(op);
     UNUSED(var_name);
     reader_change_history(history_session_id().c_str());
+}
+
+static void handle_function_path_change(const wcstring &op, const wcstring &var_name) {
+    UNUSED(op);
+    UNUSED(var_name);
+    function_invalidate_path();
+}
+
+static void handle_complete_path_change(const wcstring &op, const wcstring &var_name) {
+    UNUSED(op);
+    UNUSED(var_name);
+    complete_invalidate_path();
 }
 
 static void handle_tz_change(const wcstring &op, const wcstring &var_name) {
@@ -833,6 +859,7 @@ static void handle_locale_change(const wcstring &op, const wcstring &var_name) {
 static void handle_curses_change(const wcstring &op, const wcstring &var_name) {
     UNUSED(op);
     UNUSED(var_name);
+    guess_emoji_width();
     init_curses();
 }
 
@@ -854,8 +881,11 @@ static void setup_var_dispatch_table() {
     var_dispatch_table.emplace(L"fish_term256", handle_fish_term_change);
     var_dispatch_table.emplace(L"fish_term24bit", handle_fish_term_change);
     var_dispatch_table.emplace(L"fish_escape_delay_ms", handle_escape_delay_change);
+    var_dispatch_table.emplace(L"fish_emoji_width", handle_change_emoji_width);
     var_dispatch_table.emplace(L"LINES", handle_term_size_change);
     var_dispatch_table.emplace(L"COLUMNS", handle_term_size_change);
+    var_dispatch_table.emplace(L"fish_complete_path", handle_complete_path_change);
+    var_dispatch_table.emplace(L"fish_function_path", handle_function_path_change);
     var_dispatch_table.emplace(L"fish_read_limit", handle_read_limit_change);
     var_dispatch_table.emplace(L"fish_history", handle_fish_history_change);
     var_dispatch_table.emplace(L"TZ", handle_tz_change);
@@ -909,6 +939,7 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     init_curses();
     init_input();
     init_path_vars();
+    guess_emoji_width();
 
     // Set up the USER and PATH variables
     setup_path();
@@ -924,6 +955,14 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     // Set up the version variable.
     wcstring version = str2wcstring(get_fish_version());
     env_set_one(L"version", ENV_GLOBAL, version);
+
+    // Set the $pid variable (%self replacement)
+    env_set_one(L"pid", ENV_GLOBAL, to_string<long>(getpid()));
+
+    // Set the $hostname variable
+    wcstring hostname = L"fish";
+    get_hostname_identifier(hostname);
+    env_set_one(L"hostname", ENV_GLOBAL, hostname);
 
     // Set up SHLVL variable. Not we can't use env_get because SHLVL is read-only, and therefore was
     // not inherited from the environment.
@@ -1282,7 +1321,7 @@ const wcstring_list_t &env_var_t::as_list() const { return vals; }
 
 /// Return a string representation of the var. At the present time this uses the legacy 2.x
 /// encoding.
-wcstring env_var_t::as_string(void) const {
+wcstring env_var_t::as_string() const {
     if (this->vals.empty()) return wcstring(ENV_NULL);
 
     wchar_t sep = (flags & flag_colon_delimit) ? L':' : ARRAY_SEP;

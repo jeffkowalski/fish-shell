@@ -3,21 +3,25 @@ This section is for changes merged to the `major` branch that are not also merge
 
 ## Deprecations
 - The `IFS` variable is deprecated and will be removed in fish 4.0 (#4156).
+- The `function --on-process-exit` event will be removed in future (#4700). Use the `fish_exit` event instead.
 
 ## Notable non-backward compatible changes
 - `.` command no longer exists -- use `source` (#4294).
-- `read` now requires at least one var name (#4220).
+- `read` now uses `-s` as short for `--silent` (à la `bash`); `--shell`'s abbreviation (formerly `-s`) is now `-S` instead (#4490).
 - `set x[1] x[2] a b` is no longer valid syntax (#4236).
-- For loop control variables are no longer local to the for block (#1935).
+- `for` loop control variables are no longer local to the `for` block (#1935).
 - A literal `{}` now expands to itself, rather than nothing. This makes working with `find -exec` easier. (#1109, #4632)
 - Successive commas in brace expansions are handled in less surprising manner (`{,,,}` expands to four empty strings rather than an empty string, a comma and an empty string again). (#3002, #4632).
+- `%` is no longer used for process and job expansion. `$pid` and `$last_pid` have taken the place of `%self` and `%last` respectively. (#4230, #1202)
+- The new `math` builtin (see below) does not support logical expressions; `test` should be used instead (#4777).
 
 ## Notable fixes and improvements
 - `wait` builtin is added for waiting on processes (#4498).
 - `read` has a new `--delimiter` option as a better alternative to the `IFS` variable (#4256).
+- `read` writes directly to stdout if called without arguments (#4407)
 - `set` has a new `--append` and `--prepend` option (#1326).
 - `set` has a new `--show` option to show lots of information about variables (#4265).
-- `complete` now has a `-k` and `--keep-order` option to keep the order of the OPTION_ARGUMENTS (#361).
+- `complete` now has a `-k` and `--keep-order` option to keep the order of the `OPTION_ARGUMENTS` (#361).
 - Local exported (`set -lx`) vars are now visible to functions (#1091).
 - `abbr` has been reimplemented to be faster. This means the old `fish_user_abbreviations` variable is ignored (#4048).
 - Setting variables is much faster (#4200, #4341).
@@ -25,7 +29,6 @@ This section is for changes merged to the `major` branch that are not also merge
 - `math` is now a builtin rather than a wrapper around `bc` (#3157).
 - `history search` supports globs for wildcard searching (#3136).
 - `bind` has a new `--silent` option to ignore bind requests for named keys not available under the current `$TERMINAL` (#4188, #4431)
-- `read` writes directly to stdout if called without arguments (#4407)
 - Globs are faster (#4579)
 - `string` reads from stdin faster (#4610)
 - `cd` tab completions no longer descend into the deepest unambiguous path (#4649)
@@ -36,6 +39,15 @@ This section is for changes merged to the `major` branch that are not also merge
 - Typing normal characters while the completion pager is active no longer shows the search field. Instead it enters them into the command line, and ends paging (#2249).
 - A new input binding `pager-toggle-search` toggles the search field in the completions pager on and off. By default this is bound to control-s.
 - Slicing $history (in particular, `$history[1]` for the last executed command) is much faster.
+- The pager will now show the full command instead of just its last line if the number of completions is large (#4702).
+- Tildes in file names are now properly escaped in completions (#2274)
+- A pipe at the end of a line now allows the job to continue on the next line (#1285)
+- The names `argparse`, `read`, `set`, `status`, `test` and `[` are now reserved and not allowed as function names. This prevents users unintentionally breaking stuff (#3000).
+- Wrapping completions (from `complete -w` or `function -w`) can now inject arguments. For example, `complete gco -w 'git checkout'` now works properly (#1976). The `alias` function has been updated to respect this behavior.
+- The `jobs` builtin now has a `-q` and `--quiet` option to silence the output.
+- fish now supports `&&`, `||`, and `!` (#4620).
+- The machine hostname, where available, is now exposed as `$hostname` which is now a reserved variable. This drops the dependency on the `hostname` executable (#4422).
+- `functions --handlers` can be used to show event handlers (#4694).
 
 ## Other significant changes
 - Command substitution output is now limited to 10 MB by default (#3822).
@@ -44,10 +56,12 @@ This section is for changes merged to the `major` branch that are not also merge
   - `bd` (#4472)
   - `jhipster` (#4472)
   - `ngrok` (#4642)
+  - `port`
 - Improved completions for
   - `git` (#4395, #4396, #4592)
   - `brew`
   - `diskutil`
+  - `yarn`
 
 --
 

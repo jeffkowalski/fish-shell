@@ -51,6 +51,7 @@ static pthread_t main_thread_id = 0;
 static bool thread_asserts_cfg_for_testing = false;
 
 wchar_t ellipsis_char;
+const wchar_t *ellipsis_str = nullptr;
 wchar_t omitted_newline_char;
 wchar_t obfuscation_read_char;
 bool g_profiling_active = false;
@@ -67,12 +68,28 @@ static pid_t initial_fg_process_group = -1;
 /// This struct maintains the current state of the terminal size. It is updated on demand after
 /// receiving a SIGWINCH. Do not touch this struct directly, it's managed with a rwlock. Use
 /// common_get_width()/common_get_height().
-static std::mutex termsize_lock;
+static fish_mutex_t termsize_lock;
 static struct winsize termsize = {USHRT_MAX, USHRT_MAX, USHRT_MAX, USHRT_MAX};
 static volatile bool termsize_valid = false;
 
 static char *wcs2str_internal(const wchar_t *in, char *out);
 static void debug_shared(const wchar_t msg_level, const wcstring &msg);
+
+const wcstring whitespace = L" \t\r\n\v";
+const char *whitespace_narrow = " \t\r\n\v";
+
+bool is_whitespace(const wchar_t input) {
+    for (auto c : whitespace) {
+        if (c == input) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool is_whitespace(const wcstring &input) {
+    return input.find_first_not_of(whitespace) == wcstring::npos;
+}
 
 bool has_working_tty_timestamps = true;
 
@@ -313,7 +330,10 @@ char *wcs2str(const wchar_t *in) {
     // Here we probably allocate a buffer probably much larger than necessary.
     char *out = (char *)malloc(MAX_UTF8_BYTES * wcslen(in) + 1);
     assert(out);
-    return wcs2str_internal(in, out);
+    //Instead of returning the return value of wcs2str_internal, return `out` directly.
+    //This eliminates false warnings in coverity about resource leaks.
+    wcs2str_internal(in, out);
+    return out;
 }
 
 char *wcs2str(const wcstring &in) { return wcs2str(in.c_str()); }
@@ -497,7 +517,14 @@ void fish_setlocale() {
     // true/false value since the code points are in the BMP but we're going to be paranoid. This
     // is also technically wrong if we're not in a Unicode locale but we expect (or hope)
     // can_be_encoded() will return false in that case.
-    ellipsis_char = can_be_encoded(L'\u2026') ? L'\u2026' : L'$';          // "horizontal ellipsis"
+    if (can_be_encoded(L'\u2026')) {
+        ellipsis_char = L'\u2026';
+        ellipsis_str = L"\u2026";
+    }
+    else {
+        ellipsis_char = L'$'; // "horizontal ellipsis"
+        ellipsis_str = L"...";
+    }
     omitted_newline_char = can_be_encoded(L'\u23CE') ? L'\u23CE' : L'~';   // "return"
     obfuscation_read_char = can_be_encoded(L'\u25CF') ? L'\u25CF' : L'#';  // "black circle"
 }
@@ -992,7 +1019,6 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                 case L'|':
                 case L';':
                 case L'"':
-                case L'%':
                 case L'~': {
                     if (!no_tilde || c != L'~') {
                         need_escape = 1;
@@ -1271,10 +1297,11 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
     const bool unescape_special = static_cast<bool>(flags & UNESCAPE_SPECIAL);
     const bool allow_incomplete = static_cast<bool>(flags & UNESCAPE_INCOMPLETE);
 
-    int bracket_count = 0;
+    bool brace_text_start = false;
+    int brace_count = 0;
 
     bool errored = false;
-    enum { mode_unquoted, mode_single_quotes, mode_double_quotes } mode = mode_unquoted;
+    enum { mode_unquoted, mode_single_quotes, mode_double_quotes, mode_braces } mode = mode_unquoted;
 
     for (size_t input_position = 0; input_position < input_len && !errored; input_position++) {
         const wchar_t c = input[input_position];
@@ -1303,12 +1330,6 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                 case L'~': {
                     if (unescape_special && (input_position == 0)) {
                         to_append_or_none = HOME_DIRECTORY;
-                    }
-                    break;
-                }
-                case L'%': {
-                    if (unescape_special && (input_position == 0)) {
-                        to_append_or_none = PROCESS_EXPAND;
                     }
                     break;
                 }
@@ -1341,21 +1362,32 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                 }
                 case L'{': {
                     if (unescape_special) {
-                        bracket_count++;
-                        to_append_or_none = BRACKET_BEGIN;
+                        brace_count++;
+                        to_append_or_none = BRACE_BEGIN;
                     }
                     break;
                 }
                 case L'}': {
                     if (unescape_special) {
-                        bracket_count--;
-                        to_append_or_none = BRACKET_END;
+                        assert(brace_count > 0 && "imbalanced brackets are a tokenizer error, we shouldn't be able to get here");
+                        brace_count--;
+                        brace_text_start = brace_text_start && brace_count > 0;
+                        to_append_or_none = BRACE_END;
                     }
                     break;
                 }
                 case L',': {
-                    if (unescape_special && bracket_count > 0) {
-                        to_append_or_none = BRACKET_SEP;
+                    if (unescape_special && brace_count > 0) {
+                        to_append_or_none = BRACE_SEP;
+                        brace_text_start = false;
+                    }
+                    break;
+                }
+                case L'\n':
+                case L'\t':
+                case L' ': {
+                    if (unescape_special && brace_count > 0) {
+                        to_append_or_none = brace_text_start ? BRACE_SPACE : NOT_A_WCHAR;
                     }
                     break;
                 }
@@ -1369,7 +1401,12 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                     to_append_or_none = unescape_special ? wint_t(INTERNAL_SEPARATOR) : NOT_A_WCHAR;
                     break;
                 }
-                default: { break; }
+                default: {
+                    if (unescape_special && brace_count > 0) {
+                        brace_text_start = true;
+                    }
+                    break;
+                }
             }
         } else if (mode == mode_single_quotes) {
             if (c == L'\\') {
@@ -1848,11 +1885,7 @@ void format_size_safe(char buff[128], unsigned long long sz) {
                 if (isz > 9) {
                     append_ull(buff, isz, &idx, max_len);
                 } else {
-                    if (isz == 0) {
-                        append_str(buff, "0", &idx, max_len);
-                    } else {
-                        append_ull(buff, isz, &idx, max_len);
-                    }
+                    append_ull(buff, isz, &idx, max_len);
 
                     // Maybe append a single fraction digit.
                     unsigned long long remainder = sz % 1024;
@@ -1923,9 +1956,9 @@ __attribute__((noinline)) void debug_thread_error(void) {
 
 void set_main_thread() { main_thread_id = pthread_self(); }
 
-void configure_thread_assertions_for_testing(void) { thread_asserts_cfg_for_testing = true; }
+void configure_thread_assertions_for_testing() { thread_asserts_cfg_for_testing = true; }
 
-bool is_forked_child(void) {
+bool is_forked_child() {
     // Just bail if nobody's called setup_fork_guards, e.g. some of our tools.
     if (!initial_pid) return false;
 
@@ -1937,16 +1970,16 @@ bool is_forked_child(void) {
     return is_child_of_fork;
 }
 
-void setup_fork_guards(void) {
+void setup_fork_guards() {
     // Notice when we fork by stashing our pid. This seems simpler than pthread_atfork().
     initial_pid = getpid();
 }
 
-void save_term_foreground_process_group(void) {
+void save_term_foreground_process_group() {
     initial_fg_process_group = tcgetpgrp(STDIN_FILENO);
 }
 
-void restore_term_foreground_process_group(void) {
+void restore_term_foreground_process_group() {
     if (initial_fg_process_group == -1) return;
     // This is called during shutdown and from a signal handler. We don't bother to complain on
     // failure because doing so is unlikely to be noticed.
@@ -1984,16 +2017,11 @@ void assert_is_background_thread(const char *who) {
     }
 }
 
-void assert_is_locked(void *vmutex, const char *who, const char *caller) {
-    std::mutex *mutex = static_cast<std::mutex *>(vmutex);
-
-    // Note that std::mutex.try_lock() is allowed to return false when the mutex isn't
-    // actually locked; fortunately we are checking the opposite so we're safe.
-    if (mutex->try_lock()) {
+void fish_mutex_t::assert_is_locked(const char *who, const char *caller) const {
+    if (!is_locked_) {
         debug(0, "%s is not locked when it should be in '%s'", who, caller);
         debug(0, "Break on debug_thread_error to debug.");
         debug_thread_error();
-        mutex->unlock();
     }
 }
 
@@ -2073,6 +2101,9 @@ bool fish_reserved_codepoint(wchar_t c) {
 void redirect_tty_output() {
     struct termios t;
     int fd = open("/dev/null", O_WRONLY);
+    if (fd == -1) {
+        __fish_assert("Could not open /dev/null!", __FILE__, __LINE__, errno);
+    }
     if (tcgetattr(STDIN_FILENO, &t) == -1 && errno == EIO) dup2(fd, STDIN_FILENO);
     if (tcgetattr(STDOUT_FILENO, &t) == -1 && errno == EIO) dup2(fd, STDOUT_FILENO);
     if (tcgetattr(STDERR_FILENO, &t) == -1 && errno == EIO) dup2(fd, STDERR_FILENO);

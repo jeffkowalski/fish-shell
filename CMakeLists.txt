@@ -7,7 +7,7 @@ IF(POLICY CMP0067)
   CMAKE_POLICY(SET CMP0067 OLD)
 ENDIF()
 
-PROJECT(fish CXX)
+PROJECT(fish)
 
 # We are C++11.
 SET(CMAKE_CXX_STANDARD 11)
@@ -27,6 +27,12 @@ SOURCE_GROUP("Builtins" REGULAR_EXPRESSION "builtin_.*")
 SET_PROPERTY(GLOBAL PROPERTY USE_FOLDERS ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
+
+IF(CMAKE_CURRENT_SOURCE_DIR STREQUAL CMAKE_CURRENT_BINARY_DIR)
+  SET(FISH_IN_TREE_BUILD TRUE)
+ELSE()
+  SET(FISH_IN_TREE_BUILD FALSE)
+ENDIF()
 
 # All objects that the system needs to build fish, except fish.cpp
 SET(FISH_SRCS
@@ -87,23 +93,22 @@ SET_SOURCE_FILES_PROPERTIES(src/fish_version.cpp
 # Set up PCRE2
 INCLUDE(cmake/PCRE2.cmake)
 
-# Set up muparser.
-INCLUDE(muparser-2.2.5/CMakeLists.txt)
-
 # Set up the docs.
 INCLUDE(cmake/Docs.cmake)
 
 # Define a function to link dependencies.
 FUNCTION(FISH_LINK_DEPS target)
-  TARGET_LINK_LIBRARIES(${target} fishlib)
+  TARGET_LINK_LIBRARIES(${target} fishlib tinyexpr)
 ENDFUNCTION(FISH_LINK_DEPS)
+
+ADD_LIBRARY(tinyexpr STATIC src/tinyexpr.c src/tinyexpr.h)
 
 # Define libfish.a.
 ADD_LIBRARY(fishlib STATIC ${FISH_SRCS})
 TARGET_SOURCES(fishlib PRIVATE ${FISH_HEADERS})
 TARGET_LINK_LIBRARIES(fishlib
   ${CURSES_LIBRARY} ${CURSES_EXTRA_LIBRARY} Threads::Threads ${CMAKE_DL_LIBS}
-  ${PCRE2_LIB} muparser ${Intl_LIBRARIES})
+  ${PCRE2_LIB} ${Intl_LIBRARIES})
 
 # Define fish.
 ADD_EXECUTABLE(fish src/fish.cpp)

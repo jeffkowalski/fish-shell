@@ -47,6 +47,7 @@
 #include "proc.h"
 #include "reader.h"
 #include "wildcard.h"
+#include "wcstringutil.h"
 #include "wutil.h"  // IWYU pragma: keep
 #ifdef KERN_PROCARGS2
 #else
@@ -374,9 +375,9 @@ class process_iterator_t {
     bool next_process(wcstring *out_str, pid_t *out_pid);
 };
 
-process_iterator_t::process_iterator_t(void) { dir = opendir("/proc"); }
+process_iterator_t::process_iterator_t() { dir = opendir("/proc"); }
 
-process_iterator_t::~process_iterator_t(void) {
+process_iterator_t::~process_iterator_t() {
     if (dir) closedir(dir);
 }
 
@@ -564,74 +565,13 @@ static void find_process(const wchar_t *proc, expand_flags_t flags,
     }
 }
 
-/// Process id expansion.
-static bool expand_pid(const wcstring &instr_with_sep, expand_flags_t flags,
-                       std::vector<completion_t> *out, parse_error_list_t *errors) {
-    // Hack. If there's no INTERNAL_SEP and no PROCESS_EXPAND, then there's nothing to do. Check out
-    // this "null terminated string."
-    const wchar_t some_chars[] = {INTERNAL_SEPARATOR, PROCESS_EXPAND, L'\0'};
-    if (instr_with_sep.find_first_of(some_chars) == wcstring::npos) {
-        // Nothing to do.
-        append_completion(out, instr_with_sep);
-        return true;
-    }
-
-    // expand_string calls us with internal separators in instr...sigh.
-    wcstring instr = instr_with_sep;
-    remove_internal_separator(&instr, false);
-
-    if (instr.empty() || instr.at(0) != PROCESS_EXPAND) {
-        // Not a process expansion.
-        append_completion(out, instr);
-        return true;
-    }
-
-    const wchar_t *const in = instr.c_str();
-
-    // We know we are a process expansion now.
-    assert(in[0] == PROCESS_EXPAND);
-
-    if (flags & EXPAND_FOR_COMPLETIONS) {
-        if (wcsncmp(in + 1, SELF_STR, wcslen(in + 1)) == 0) {
-            append_completion(out, &SELF_STR[wcslen(in + 1)], COMPLETE_SELF_DESC, 0);
-        } else if (wcsncmp(in + 1, LAST_STR, wcslen(in + 1)) == 0) {
-            append_completion(out, &LAST_STR[wcslen(in + 1)], COMPLETE_LAST_DESC, 0);
-        }
-    } else {
-        if (wcscmp((in + 1), SELF_STR) == 0) {
-            append_completion(out, to_string<long>(getpid()));
-            return true;
-        }
-        if (wcscmp((in + 1), LAST_STR) == 0) {
-            if (proc_last_bg_pid > 0) {
-                append_completion(out, to_string<long>(proc_last_bg_pid));
-            }
-            return true;
-        }
-    }
-
-    // This is sort of crummy - find_process doesn't return any indication of success, so instead we
-    // check to see if it inserted any completions.
-    const size_t prev_count = out->size();
-    find_process(in + 1, flags, out);
-
-    if (prev_count == out->size() && !(flags & EXPAND_FOR_COMPLETIONS)) {
-        // We failed to find anything.
-        append_syntax_error(errors, 1, FAILED_EXPANSION_PROCESS_ERR_MSG,
-                            escape_string(in + 1, ESCAPE_NO_QUOTED).c_str());
-        return false;
-    }
-
-    return true;
-}
-
 /// Parse an array slicing specification Returns 0 on success. If a parse error occurs, returns the
 /// index of the bad token. Note that 0 can never be a bad index because the string always starts
 /// with [.
 static size_t parse_slice(const wchar_t *in, wchar_t **end_ptr, std::vector<long> &idx,
                           std::vector<size_t> &source_positions, size_t array_size) {
     const long size = (long)array_size;
-    size_t pos = 1;  // skip past the opening square bracket
+    size_t pos = 1;  // skip past the opening square brace
 
     while (1) {
         while (iswspace(in[pos]) || (in[pos] == INTERNAL_SEPARATOR)) pos++;
@@ -907,39 +847,39 @@ static bool expand_variables(const wcstring &instr, std::vector<completion_t> *o
     return true;
 }
 
-/// Perform bracket expansion.
-static expand_error_t expand_brackets(const wcstring &instr, expand_flags_t flags,
+/// Perform brace expansion.
+static expand_error_t expand_braces(const wcstring &instr, expand_flags_t flags,
                                       std::vector<completion_t> *out, parse_error_list_t *errors) {
     bool syntax_error = false;
-    int bracket_count = 0;
+    int brace_count = 0;
 
-    const wchar_t *bracket_begin = NULL, *bracket_end = NULL;
+    const wchar_t *brace_begin = NULL, *brace_end = NULL;
     const wchar_t *last_sep = NULL;
 
     const wchar_t *item_begin;
-    size_t length_preceding_brackets, length_following_brackets, tot_len;
+    size_t length_preceding_braces, length_following_braces, tot_len;
 
     const wchar_t *const in = instr.c_str();
 
-    // Locate the first non-nested bracket pair.
+    // Locate the first non-nested brace pair.
     for (const wchar_t *pos = in; (*pos) && !syntax_error; pos++) {
         switch (*pos) {
-            case BRACKET_BEGIN: {
-                if (bracket_count == 0) bracket_begin = pos;
-                bracket_count++;
+            case BRACE_BEGIN: {
+                if (brace_count == 0) brace_begin = pos;
+                brace_count++;
                 break;
             }
-            case BRACKET_END: {
-                bracket_count--;
-                if (bracket_count < 0) {
+            case BRACE_END: {
+                brace_count--;
+                if (brace_count < 0) {
                     syntax_error = true;
-                } else if (bracket_count == 0) {
-                    bracket_end = pos;
+                } else if (brace_count == 0) {
+                    brace_end = pos;
                 }
                 break;
             }
-            case BRACKET_SEP: {
-                if (bracket_count == 1) last_sep = pos;
+            case BRACE_SEP: {
+                if (brace_count == 1) last_sep = pos;
                 break;
             }
             default: {
@@ -948,72 +888,79 @@ static expand_error_t expand_brackets(const wcstring &instr, expand_flags_t flag
         }
     }
 
-    if (bracket_count > 0) {
+    if (brace_count > 0) {
         if (!(flags & EXPAND_FOR_COMPLETIONS)) {
             syntax_error = true;
         } else {
-            // The user hasn't typed an end bracket yet; make one up and append it, then expand
+            // The user hasn't typed an end brace yet; make one up and append it, then expand
             // that.
             wcstring mod;
             if (last_sep) {
-                mod.append(in, bracket_begin - in + 1);
+                mod.append(in, brace_begin - in + 1);
                 mod.append(last_sep + 1);
-                mod.push_back(BRACKET_END);
+                mod.push_back(BRACE_END);
             } else {
                 mod.append(in);
-                mod.push_back(BRACKET_END);
+                mod.push_back(BRACE_END);
             }
 
             // Note: this code looks very fishy, apparently it has never worked.
-            return expand_brackets(mod, 1, out, errors);
+            return expand_braces(mod, 1, out, errors);
         }
     }
 
     // Expand a literal "{}" to itself because it is useless otherwise,
     // and this eases e.g. `find -exec {}`. See #1109.
-    if (bracket_begin + 1 == bracket_end) {
+    if (brace_begin + 1 == brace_end) {
         wcstring newstr = instr;
-        newstr.at(bracket_begin - in) = L'{';
-        newstr.at(bracket_end - in) = L'}';
-        return expand_brackets(newstr, flags, out, errors);
+        newstr.at(brace_begin - in) = L'{';
+        newstr.at(brace_end - in) = L'}';
+        return expand_braces(newstr, flags, out, errors);
     }
 
     if (syntax_error) {
-        append_syntax_error(errors, SOURCE_LOCATION_UNKNOWN, _(L"Mismatched brackets"));
+        append_syntax_error(errors, SOURCE_LOCATION_UNKNOWN, _(L"Mismatched braces"));
         return EXPAND_ERROR;
     }
 
-    if (bracket_begin == NULL) {
+    if (brace_begin == NULL) {
         append_completion(out, instr);
         return EXPAND_OK;
     }
 
-    length_preceding_brackets = (bracket_begin - in);
-    length_following_brackets = wcslen(bracket_end) - 1;
-    tot_len = length_preceding_brackets + length_following_brackets;
-    item_begin = bracket_begin + 1;
-    for (const wchar_t *pos = (bracket_begin + 1); true; pos++) {
-        if (bracket_count == 0 && ((*pos == BRACKET_SEP) || (pos == bracket_end))) {
+    length_preceding_braces = (brace_begin - in);
+    length_following_braces = wcslen(brace_end) - 1;
+    tot_len = length_preceding_braces + length_following_braces;
+    item_begin = brace_begin + 1;
+    for (const wchar_t *pos = (brace_begin + 1); true; pos++) {
+        if (brace_count == 0 && ((*pos == BRACE_SEP) || (pos == brace_end))) {
             assert(pos >= item_begin);
             size_t item_len = pos - item_begin;
+            wcstring item = wcstring(item_begin, item_len);
+            item = trim(item, (const wchar_t[]) { BRACE_SPACE, L'\0' });
+            for (auto &c : item) {
+                if (c == BRACE_SPACE) {
+                    c = ' ';
+                }
+            }
 
             wcstring whole_item;
             whole_item.reserve(tot_len + item_len + 2);
-            whole_item.append(in, length_preceding_brackets);
-            whole_item.append(item_begin, item_len);
-            whole_item.append(bracket_end + 1);
-            expand_brackets(whole_item, flags, out, errors);
+            whole_item.append(in, length_preceding_braces);
+            whole_item.append(item.begin(), item.end());
+            whole_item.append(brace_end + 1);
+            expand_braces(whole_item, flags, out, errors);
 
             item_begin = pos + 1;
-            if (pos == bracket_end) break;
+            if (pos == brace_end) break;
         }
 
-        if (*pos == BRACKET_BEGIN) {
-            bracket_count++;
+        if (*pos == BRACE_BEGIN) {
+            brace_count++;
         }
 
-        if (*pos == BRACKET_END) {
-            bracket_count--;
+        if (*pos == BRACE_END) {
+            brace_count--;
         }
     }
     return EXPAND_OK;
@@ -1028,8 +975,7 @@ static bool expand_cmdsubst(const wcstring &input, std::vector<completion_t> *ou
 
     const wchar_t *const in = input.c_str();
 
-    int parse_ret;
-    switch (parse_ret = parse_util_locate_cmdsubst(in, &paren_begin, &paren_end, false)) {
+    switch (parse_util_locate_cmdsubst(in, &paren_begin, &paren_end, false)) {
         case -1: {
             append_syntax_error(errors, SOURCE_LOCATION_UNKNOWN, L"Mismatched parenthesis");
             return false;
@@ -1336,12 +1282,12 @@ static expand_error_t expand_stage_variables(const wcstring &input, std::vector<
     return EXPAND_OK;
 }
 
-static expand_error_t expand_stage_brackets(const wcstring &input, std::vector<completion_t> *out,
+static expand_error_t expand_stage_braces(const wcstring &input, std::vector<completion_t> *out,
                                             expand_flags_t flags, parse_error_list_t *errors) {
-    return expand_brackets(input, flags, out, errors);
+    return expand_braces(input, flags, out, errors);
 }
 
-static expand_error_t expand_stage_home_and_pid(const wcstring &input,
+static expand_error_t expand_stage_home(const wcstring &input,
                                                 std::vector<completion_t> *out,
                                                 expand_flags_t flags, parse_error_list_t *errors) {
     wcstring next = input;
@@ -1349,16 +1295,7 @@ static expand_error_t expand_stage_home_and_pid(const wcstring &input,
     if (!(EXPAND_SKIP_HOME_DIRECTORIES & flags)) {
         expand_home_directory(next);
     }
-
-    if (flags & EXPAND_FOR_COMPLETIONS) {
-        if (!next.empty() && next.at(0) == PROCESS_EXPAND) {
-            expand_pid(next, flags, out, NULL);
-            return EXPAND_OK;
-        }
-        append_completion(out, next);
-    } else if (!expand_pid(next, flags, out, errors)) {
-        return EXPAND_ERROR;
-    }
+    append_completion(out, next);
     return EXPAND_OK;
 }
 
@@ -1419,7 +1356,7 @@ static expand_error_t expand_stage_wildcards(const wcstring &input, std::vector<
                     paths = env_var_t(name, for_cd ? L"." : L"");
                 }
 
-                for (auto next_path : paths->as_list()) {
+                for (const wcstring &next_path : paths->as_list()) {
                     effective_working_dirs.push_back(
                         path_apply_working_directory(next_path, working_dir));
                 }
@@ -1442,7 +1379,7 @@ static expand_error_t expand_stage_wildcards(const wcstring &input, std::vector<
         }
 
         std::sort(expanded.begin(), expanded.end(), completion_t::is_naturally_less_than);
-        out->insert(out->end(), expanded.begin(), expanded.end());
+        std::move(expanded.begin(), expanded.end(), std::back_inserter(*out));
     } else {
         // Can't fully justify this check. I think it's that SKIP_WILDCARDS is used when completing
         // to mean don't do file expansions, so if we're not doing file expansions, just drop this
@@ -1464,7 +1401,7 @@ expand_error_t expand_string(const wcstring &input, std::vector<completion_t> *o
 
     // Our expansion stages.
     const expand_stage_t stages[] = {expand_stage_cmdsubst, expand_stage_variables,
-                                     expand_stage_brackets, expand_stage_home_and_pid,
+                                     expand_stage_braces, expand_stage_home,
                                      expand_stage_wildcards};
 
     // Load up our single initial completion.

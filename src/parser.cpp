@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <utility>
 
 #include "common.h"
 #include "env.h"
@@ -102,11 +103,11 @@ static wcstring user_presentable_path(const wcstring &path) {
 parser_t::parser_t() : cancellation_requested(false), is_within_fish_initialization(false) {}
 
 // Out of line destructor to enable forward declaration of parse_execution_context_t
-parser_t::~parser_t() {}
+parser_t::~parser_t() = default;
 
 static parser_t s_principal_parser;
 
-parser_t &parser_t::principal_parser(void) {
+parser_t &parser_t::principal_parser() {
     ASSERT_IS_NOT_FORKED_CHILD();
     ASSERT_IS_MAIN_THREAD();
     return s_principal_parser;
@@ -116,7 +117,7 @@ void parser_t::set_is_within_fish_initialization(bool flag) {
     is_within_fish_initialization = flag;
 }
 
-void parser_t::skip_all_blocks(void) {
+void parser_t::skip_all_blocks() {
     // Tell all blocks to skip.
     // This may be called from a signal handler!
     s_principal_parser.cancellation_requested = true;
@@ -483,13 +484,13 @@ const wchar_t *parser_t::get_function_name(int level) {
 
 int parser_t::get_lineno() const {
     int lineno = -1;
-    if (!execution_contexts.empty()) {
-        lineno = execution_contexts.back()->get_current_line_number();
+    if (execution_context) {
+        lineno = execution_context->get_current_line_number();
 
         // If we are executing a function, we have to add in its offset.
         const wchar_t *function_name = is_function();
         if (function_name != NULL) {
-            lineno += function_get_definition_offset(function_name);
+            lineno += function_get_definition_lineno(function_name);
         }
     }
     return lineno;
@@ -518,13 +519,10 @@ const wchar_t *parser_t::current_filename() const {
 }
 
 wcstring parser_t::current_line() {
-    if (execution_contexts.empty()) {
+    if (!execution_context) {
         return wcstring();
     }
-    const parse_execution_context_t *context = execution_contexts.back().get();
-    assert(context != NULL);
-
-    int source_offset = context->get_current_source_offset();
+    int source_offset = execution_context->get_current_source_offset();
     if (source_offset < 0) {
         return wcstring();
     }
@@ -554,8 +552,8 @@ wcstring parser_t::current_line() {
     parse_error_t empty_error = {};
     empty_error.source_start = source_offset;
 
-    wcstring line_info =
-        empty_error.describe_with_prefix(context->get_source(), prefix, is_interactive, skip_caret);
+    wcstring line_info = empty_error.describe_with_prefix(execution_context->get_source(), prefix,
+                                                          is_interactive, skip_caret);
     if (!line_info.empty()) {
         line_info.push_back(L'\n');
     }
@@ -647,47 +645,26 @@ int parser_t::eval(wcstring cmd, const io_chain_t &io, enum block_type_t block_t
         fwprintf(stderr, L"%ls\n", backtrace_and_desc.c_str());
         return 1;
     }
-    return this->eval(ps, io, block_type);
-}
-
-int parser_t::eval(parsed_source_ref_t ps, const io_chain_t &io, enum block_type_t block_type) {
-    CHECK_BLOCK(1);
-    assert(block_type == TOP || block_type == SUBST);
-
-    if (ps->tree.empty()) {
-        return 0;
-    }
-
-    // Determine the initial eval level. If this is the first context, it's -1; otherwise it's the
-    // eval level of the top context. This is sort of wonky because we're stitching together a
-    // global notion of eval level from these separate objects. A better approach would be some
-    // profile object that all contexts share, and that tracks the eval levels on its own.
-    int exec_eval_level =
-        (execution_contexts.empty() ? -1 : execution_contexts.back()->current_eval_level());
-
-    // Append to the execution context stack.
-    execution_contexts.push_back(make_unique<parse_execution_context_t>(ps, this, exec_eval_level));
-    const parse_execution_context_t *ctx = execution_contexts.back().get();
-
-    // Execute the first node.
-    this->eval_block_node(0, io, block_type);
-
-    // Clean up the execution context stack.
-    assert(!execution_contexts.empty() && execution_contexts.back().get() == ctx);
-    execution_contexts.pop_back();
-
+    this->eval(ps, io, block_type);
     return 0;
 }
 
-int parser_t::eval_block_node(node_offset_t node_idx, const io_chain_t &io,
-                              enum block_type_t block_type) {
-    // Paranoia. It's a little frightening that we're given only a node_idx and we interpret this in
-    // the topmost execution context's tree. What happens if two trees were to be interleaved?
-    // Fortunately that cannot happen (yet); in the future we probably want some sort of reference
-    // counted trees.
-    parse_execution_context_t *ctx = execution_contexts.back().get();
-    assert(ctx != NULL);
+void parser_t::eval(parsed_source_ref_t ps, const io_chain_t &io, enum block_type_t block_type) {
+    CHECK_BLOCK(1);
+    assert(block_type == TOP || block_type == SUBST);
+    if (!ps->tree.empty()) {
+        // Execute the first node.
+        tnode_t<grammar::job_list> start{&ps->tree, &ps->tree.front()};
+        this->eval_node(ps, start, io, block_type);
+    }
+}
 
+template <typename T>
+int parser_t::eval_node(parsed_source_ref_t ps, tnode_t<T> node, const io_chain_t &io,
+                        enum block_type_t block_type) {
+    static_assert(
+        std::is_same<T, grammar::statement>::value || std::is_same<T, grammar::job_list>::value,
+        "Unexpected node type");
     CHECK_BLOCK(1);
 
     // Handle cancellation requests. If our block stack is currently empty, then we already did
@@ -711,12 +688,24 @@ int parser_t::eval_block_node(node_offset_t node_idx, const io_chain_t &io,
 
     // Start it up
     scope_block_t *scope_block = this->push_block<scope_block_t>(block_type);
-    int result = ctx->eval_node_at_offset(node_idx, scope_block, io);
+
+    // Create and set a new execution context.
+    using exc_ctx_ref_t = std::unique_ptr<parse_execution_context_t>;
+    scoped_push<exc_ctx_ref_t> exc(&execution_context,
+                                   make_unique<parse_execution_context_t>(ps, this));
+    int result = execution_context->eval_node(node, scope_block, io);
+    exc.restore();
     this->pop_block(scope_block);
 
     job_reap(0);  // reap again
     return result;
 }
+
+// Explicit instantiations. TODO: use overloads instead?
+template int parser_t::eval_node(parsed_source_ref_t, tnode_t<grammar::statement>,
+                                 const io_chain_t &, enum block_type_t);
+template int parser_t::eval_node(parsed_source_ref_t, tnode_t<grammar::job_list>,
+                                 const io_chain_t &, enum block_type_t);
 
 bool parser_t::detect_errors_in_argument_list(const wcstring &arg_list_src, wcstring *out,
                                               const wchar_t *prefix) {
@@ -797,19 +786,9 @@ void parser_t::get_backtrace(const wcstring &src, const parse_error_list_t &erro
     }
 }
 
-block_t::block_t(block_type_t t)
-    : block_type(t),
-      skip(false),
-      tok_pos(),
-      node_offset(NODE_OFFSET_INVALID),
-      loop_status(LOOP_NORMAL),
-      job(),
-      src_filename(),
-      src_lineno(),
-      wants_pop_env(false),
-      event_blocks() {}
+block_t::block_t(block_type_t t) : block_type(t) {}
 
-block_t::~block_t() {}
+block_t::~block_t() = default;
 
 wcstring block_t::description() const {
     wcstring result;
@@ -879,8 +858,8 @@ if_block_t::if_block_t() : block_t(IF) {}
 
 event_block_t::event_block_t(const event_t &evt) : block_t(EVENT), event(evt) {}
 
-function_block_t::function_block_t(const process_t *p, const wcstring &n, bool shadows)
-    : block_t(shadows ? FUNCTION_CALL : FUNCTION_CALL_NO_SHADOW), process(p), name(n) {}
+function_block_t::function_block_t(const process_t *p, wcstring n, bool shadows)
+    : block_t(shadows ? FUNCTION_CALL : FUNCTION_CALL_NO_SHADOW), process(p), name(std::move(n)) {}
 
 source_block_t::source_block_t(const wchar_t *src) : block_t(SOURCE), source_file(src) {}
 

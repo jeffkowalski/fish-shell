@@ -25,7 +25,6 @@ AC_SUBST(HAVE_DOXYGEN)
 AC_SUBST(LDFLAGS_FISH)
 AC_SUBST(WCHAR_T_BITS)
 AC_SUBST(EXTRA_PCRE2)
-AC_SUBST(EXTRA_MUPARSER)
 
 #
 # If needed, run autoconf to regenerate the configure file
@@ -400,6 +399,15 @@ AC_TRY_LINK( [ #include <wchar.h> ],
              [AC_MSG_RESULT(no)],
              )
 
+AC_MSG_CHECKING([for std::make_unique])
+AC_TRY_LINK( [ #include <memory> ],
+             [ std::unique_ptr<int> foo = std::make_unique<int>(); ],
+             [ AC_MSG_RESULT(yes)
+               AC_DEFINE(HAVE_STD__MAKE_UNIQUE, 1, Define to 1 if you have the `std::make_unique' function.)
+             ],
+             [AC_MSG_RESULT(no)],
+             )
+
 if test x$local_gettext != xno; then
   AC_CHECK_FUNCS( gettext )
 
@@ -672,26 +680,6 @@ if test "x$included_pcre2" = "xyes"; then
   CXXFLAGS="$CXXFLAGS $PCRE2_CXXFLAGS"
   LIBS="$LIBS $PCRE2_LIBS"
 fi
-
-
-
-# ========
-# MuParser math expression library configuration.
-EXTRA_MUPARSER=
-
-# Build configure/Makefile for muparser
-AC_MSG_NOTICE([using included MuParser library])
-# unfortunately these get added to the global configuration
-ac_configure_args="$ac_configure_args --enable-shared=no --enable-samples=no --enable-debug=no"
-AC_CONFIG_SUBDIRS([muparser-2.2.5])
-
-MUPARSER_CXXFLAGS='-I$(MUPARSER_DIR)/include'
-MUPARSER_LIBS='-L$(MUPARSER_LIBDIR) -lmuparser'
-
-# Make the binary depend on the MuParser libraries so they get built
-EXTRA_MUPARSER='$(MUPARSER_LIB)'
-CXXFLAGS="$CXXFLAGS $MUPARSER_CXXFLAGS"
-LIBS="$LIBS $MUPARSER_LIBS"
 
 # Allow configurable extra directories.
 AC_SUBST(extra_completionsdir)
