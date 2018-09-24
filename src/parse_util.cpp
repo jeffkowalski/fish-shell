@@ -16,6 +16,7 @@
 #include "common.h"
 #include "expand.h"
 #include "fallback.h"  // IWYU pragma: keep
+#include "future_feature_flags.h"
 #include "parse_constants.h"
 #include "parse_util.h"
 #include "tnode.h"
@@ -418,14 +419,18 @@ void parse_util_token_extent(const wchar_t *buff, size_t cursor_pos, const wchar
 wcstring parse_util_unescape_wildcards(const wcstring &str) {
     wcstring result;
     result.reserve(str.size());
+    bool unesc_qmark = !feature_test(features_t::qmark_noglob);
 
     const wchar_t *const cs = str.c_str();
     for (size_t i = 0; cs[i] != L'\0'; i++) {
         if (cs[i] == L'*') {
             result.push_back(ANY_STRING);
-        } else if (cs[i] == L'?') {
+        } else if (cs[i] == L'?' && unesc_qmark) {
             result.push_back(ANY_CHAR);
-        } else if (cs[i] == L'\\' && (cs[i + 1] == L'*' || cs[i + 1] == L'?')) {
+        } else if (cs[i] == L'\\' && cs[i + 1] == L'*') {
+            result.push_back(cs[i + 1]);
+            i += 1;
+        } else if (cs[i] == L'\\' && cs[i + 1] == L'?' && unesc_qmark) {
             result.push_back(cs[i + 1]);
             i += 1;
         } else if (cs[i] == L'\\' && cs[i + 1] == L'\\') {
@@ -1122,14 +1127,12 @@ static bool detect_errors_in_plain_statement(const wcstring &buff_src,
         }
     }
 
-    if (maybe_t<wcstring> mcommand = command_for_plain_statement(pst, buff_src)) {
-        wcstring command = std::move(*mcommand);
+    if (maybe_t<wcstring> unexp_command = command_for_plain_statement(pst, buff_src)) {
+        wcstring command;
         // Check that we can expand the command.
-        if (!expand_one(command, EXPAND_SKIP_CMDSUBST | EXPAND_SKIP_VARIABLES | EXPAND_SKIP_JOBS,
-                        NULL)) {
-            // TODO: leverage the resulting errors.
-            errored = append_syntax_error(parse_errors, source_start, ILLEGAL_CMD_ERR_MSG,
-                                          command.c_str());
+        if (expand_to_command_and_args(*unexp_command, &command, nullptr, parse_errors) ==
+            EXPAND_ERROR) {
+            errored = true;
         }
 
         // Check that pipes are sound.

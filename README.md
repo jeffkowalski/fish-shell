@@ -13,6 +13,10 @@ fish generally works like other shells, like bash or zsh. A few important differ
 
 Detailed user documentation is available by running `help` within fish, and also at <https://fishshell.com/docs/current/index.html>
 
+You can quickly play with fish right in your browser by clicking the button below:
+
+[![Try in browser](https://cdn.rawgit.com/rootnroll/library/assets/try.svg)](https://rootnroll.com/d/fish-shell/)
+
 ## Getting fish
 
 ### macOS
@@ -73,6 +77,8 @@ The following optional features also have specific requirements:
 * the `fish_config` web configuration tool requires Python (2.7+ or 3.3 +) and a web browser
 * system clipboard integration (with the default Ctrl-V and Ctrl-X bindings) require either the
   `xsel` or `pbcopy`/`pbpaste` utilities
+* full completions for `yarn` and `bower` require the `jq` utility
+* full completions for `yarn` and `npm` require the `all-the-package-names` NPM module
 
 ### Switching to fish
 

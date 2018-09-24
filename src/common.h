@@ -17,11 +17,14 @@
 #include <sys/ioctl.h>  // IWYU pragma: keep
 #endif
 
+#include <algorithm>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
+#include <tuple>
 #include <vector>
 
 #include "fallback.h"  // IWYU pragma: keep
@@ -281,8 +284,11 @@ inline bool is_whitespace(const wchar_t *input) { return is_whitespace(wcstring(
 /// See https://developer.gnome.org/glib/stable/glib-I18N.html#N-:CAPS
 #define N_(wstr) wstr
 
-/// Test if a list of stirngs contains a particular string.
-bool contains(const wcstring_list_t &list, const wcstring &str);
+/// Test if a vector contains a value.
+template <typename T1, typename T2>
+bool contains(const std::vector<T1> &vec, const T2 &val) {
+    return std::find(vec.begin(), vec.end(), val) != vec.end();
+}
 
 /// Print a stack trace to stderr.
 void show_stackframe(const wchar_t msg_level, int frame_count = 100, int skip_levels = 0);
@@ -321,10 +327,17 @@ bool string_prefixes_string(const wchar_t *proposed_prefix, const wchar_t *value
 /// Test if a string is a suffix of another.
 bool string_suffixes_string(const wcstring &proposed_suffix, const wcstring &value);
 bool string_suffixes_string(const wchar_t *proposed_suffix, const wcstring &value);
+bool string_suffixes_string_case_insensitive(const wcstring &proposed_suffix, const wcstring &value);
 
 /// Test if a string prefixes another without regard to case. Returns true if a is a prefix of b.
 bool string_prefixes_string_case_insensitive(const wcstring &proposed_prefix,
                                              const wcstring &value);
+
+/// Split a string by a separator character.
+wcstring_list_t split_string(const wcstring &val, wchar_t sep);
+
+/// Join a list of strings by a separator character.
+wcstring join_strings(const wcstring_list_t &vals, wchar_t sep);
 
 enum fuzzy_match_type_t {
     // We match the string exactly: FOOBAR matches FOOBAR.
@@ -514,7 +527,7 @@ char **make_null_terminated_array(const std::vector<std::string> &lst);
 // Helper class for managing a null-terminated array of null-terminated strings (of some char type).
 template <typename CharType_t>
 class null_terminated_array_t {
-    CharType_t **array;
+    CharType_t **array{NULL};
 
     // No assignment or copying.
     void operator=(null_terminated_array_t rhs);
@@ -538,11 +551,22 @@ class null_terminated_array_t {
     }
 
    public:
-    null_terminated_array_t() : array(NULL) {}
+    null_terminated_array_t() = default;
+
     explicit null_terminated_array_t(const string_list_t &argv)
         : array(make_null_terminated_array(argv)) {}
 
     ~null_terminated_array_t() { this->free(); }
+
+    null_terminated_array_t(null_terminated_array_t &&rhs) : array(rhs.array) {
+        rhs.array = nullptr;
+    }
+
+    null_terminated_array_t operator=(null_terminated_array_t &&rhs) {
+        free();
+        array = rhs.array;
+        rhs.array = nullptr;
+    }
 
     void set(const string_list_t &argv) {
         this->free();
@@ -550,6 +574,7 @@ class null_terminated_array_t {
     }
 
     const CharType_t *const *get() const { return array; }
+    CharType_t **get() { return array; }
 
     void clear() { this->free(); }
 };
@@ -573,20 +598,25 @@ typedef std::lock_guard<std::recursive_mutex> scoped_rlock;
 //
 template <typename DATA>
 class acquired_lock {
-    scoped_lock lock;
-    acquired_lock(fish_mutex_t &lk, DATA *v) : lock(lk), value(*v) {}
+    std::unique_lock<fish_mutex_t> lock;
+    acquired_lock(fish_mutex_t &lk, DATA *v) : lock(lk), value(v) {}
 
     template <typename T>
     friend class owning_lock;
 
+    DATA *value;
+
    public:
-    // No copying, move only
+    // No copying, move construction only
     acquired_lock &operator=(const acquired_lock &) = delete;
     acquired_lock(const acquired_lock &) = delete;
     acquired_lock(acquired_lock &&) = default;
     acquired_lock &operator=(acquired_lock &&) = default;
 
-    DATA &value;
+    DATA *operator->() { return value; }
+    const DATA *operator->() const { return value; }
+    DATA &operator*() { return *value; }
+    const DATA &operator*() const { return *value; }
 };
 
 // A lock that owns a piece of data
@@ -635,6 +665,44 @@ class scoped_push {
             restored = true;
         }
     }
+};
+
+/// A helper class for managing and automatically closing a file descriptor.
+class autoclose_fd_t {
+    int fd_;
+
+   public:
+    // Closes the fd if not already closed.
+    void close();
+
+    // Returns the fd.
+    int fd() const { return fd_; }
+
+    // Returns the fd, transferring ownership to the caller.
+    int acquire() {
+        int temp = fd_;
+        fd_ = -1;
+        return temp;
+    }
+
+    // Resets to a new fd, taking ownership.
+    void reset(int fd) {
+        if (fd == fd_) return;
+        close();
+        fd_ = fd;
+    }
+
+    autoclose_fd_t(const autoclose_fd_t &) = delete;
+    void operator=(const autoclose_fd_t &) = delete;
+    autoclose_fd_t(autoclose_fd_t &&rhs) : fd_(rhs.fd_) { rhs.fd_ = -1; }
+
+    void operator=(autoclose_fd_t &&rhs) {
+        close();
+        std::swap(this->fd_, rhs.fd_);
+    }
+
+    explicit autoclose_fd_t(int fd = -1) : fd_(fd) {}
+    ~autoclose_fd_t() { close(); }
 };
 
 /// Appends a path component, with a / if necessary.
@@ -692,6 +760,11 @@ wcstring escape_string(const wchar_t *in, escape_flags_t flags,
                        escape_string_style_t style = STRING_STYLE_SCRIPT);
 wcstring escape_string(const wcstring &in, escape_flags_t flags,
                        escape_string_style_t style = STRING_STYLE_SCRIPT);
+
+/// \return a string representation suitable for debugging (not for presenting to the user). This
+/// replaces non-ASCII characters with either tokens like <BRACE_SEP> or <\xfdd7>. No other escapes
+/// are made (i.e. this is a lossy escape).
+wcstring debug_escape(const wcstring &in);
 
 /// Expand backslashed escapes and substitute them with their unescaped counterparts. Also
 /// optionally change the wildcards, the tilde character and a few more into constants which are
@@ -853,6 +926,22 @@ static const wchar_t *enum_to_str(T enum_val, const enum_map<T> map[]) {
     }
     return NULL;
 };
+
+template<typename... Args>
+using tuple_list = std::vector<std::tuple<Args...>>;
+
+//Given a container mapping one X to many Y, return a list of {X,Y}
+template<typename X, typename Y>
+inline tuple_list<X, Y> flatten(const std::unordered_map<X, std::vector<Y>> &list) {
+    tuple_list<X, Y> results(list.size() * 1.5); //just a guess as to the initial size
+    for (auto &kv : list) {
+        for (auto &v : kv.second) {
+            results.emplace_back(std::make_tuple(kv.first, v));
+        }
+    }
+
+    return results;
+}
 
 void redirect_tty_output();
 

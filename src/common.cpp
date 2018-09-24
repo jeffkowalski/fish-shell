@@ -38,6 +38,7 @@
 #include "env.h"
 #include "expand.h"
 #include "fallback.h"  // IWYU pragma: keep
+#include "future_feature_flags.h"
 #include "proc.h"
 #include "wildcard.h"
 #include "wutil.h"  // IWYU pragma: keep
@@ -525,8 +526,16 @@ void fish_setlocale() {
         ellipsis_char = L'$'; // "horizontal ellipsis"
         ellipsis_str = L"...";
     }
-    omitted_newline_char = can_be_encoded(L'\u23CE') ? L'\u23CE' : L'~';   // "return"
-    obfuscation_read_char = can_be_encoded(L'\u25CF') ? L'\u25CF' : L'#';  // "black circle"
+    if (is_windows_subsystem_for_linux()) {
+        //neither of \u23CE and \u25CF can be displayed in the default fonts on Windows, though
+        //they can be *encoded* just fine. Use alternative glyphs.
+        omitted_newline_char = can_be_encoded(L'\u00b6') ? L'\u00b6' : L'~';   // "pilcrow"
+        obfuscation_read_char = can_be_encoded(L'\u2022') ? L'\u2022' : L'*';  // "bullet"
+    }
+    else {
+        omitted_newline_char = can_be_encoded(L'\u23CE') ? L'\u23CE' : L'~';   // "return"
+        obfuscation_read_char = can_be_encoded(L'\u25CF') ? L'\u25CF' : L'#';  // "black circle"
+    }
 }
 
 long read_blocked(int fd, void *buf, size_t count) {
@@ -795,9 +804,8 @@ wcstring reformat_for_screen(const wcstring &msg) {
 }
 
 /// Escape a string in a fashion suitable for using as a URL. Store the result in out_str.
-static void escape_string_url(const wchar_t *orig_in, wcstring &out) {
-    const std::string &in = wcs2string(orig_in);
-    for (auto c1 : in) {
+static void escape_string_url(const wcstring &in, wcstring &out) {
+    for (auto& c1 : in) {
         // This silliness is so we get the correct result whether chars are signed or unsigned.
         unsigned int c2 = (unsigned int)c1 & 0xFF;
         if (!(c2 & 0x80) &&
@@ -846,27 +854,24 @@ static bool unescape_string_url(const wchar_t *in, wcstring *out) {
 }
 
 /// Escape a string in a fashion suitable for using as a fish var name. Store the result in out_str.
-static void escape_string_var(const wchar_t *orig_in, wcstring &out) {
+static void escape_string_var(const wcstring &in, wcstring &out) {
     bool prev_was_hex_encoded = false;
-    const std::string &in = wcs2string(orig_in);
     for (auto c1 : in) {
-        // This silliness is so we get the correct result whether chars are signed or unsigned.
-        unsigned int c2 = (unsigned int)c1 & 0xFF;
-        if (!(c2 & 0x80) && isalnum(c2) && (!prev_was_hex_encoded || !is_hex_digit(c2))) {
+        if (c1 >= 0 && c1 <= 127 && isalnum(c1) && (!prev_was_hex_encoded || !is_hex_digit(c1))) {
             // ASCII alphanumerics don't need to be encoded.
             if (prev_was_hex_encoded) {
                 out.push_back(L'_');
                 prev_was_hex_encoded = false;
             }
-            out.push_back((wchar_t)c2);
-        } else if (c2 == '_') {
+            out.push_back(c1);
+        } else if (c1 == L'_') {
             // Underscores are encoded by doubling them.
             out.append(L"__");
             prev_was_hex_encoded = false;
         } else {
             // All other chars need to have their UTF-8 representation encoded in hex.
             wchar_t buf[4];
-            swprintf(buf, sizeof buf / sizeof buf[0], L"_%02X", c2);
+            swprintf(buf, sizeof buf / sizeof buf[0], L"_%02X", c1);
             out.append(buf);
             prev_was_hex_encoded = true;
         }
@@ -920,9 +925,11 @@ static bool unescape_string_var(const wchar_t *in, wcstring *out) {
 static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring &out,
                                  escape_flags_t flags) {
     const wchar_t *in = orig_in;
-    bool escape_all = static_cast<bool>(flags & ESCAPE_ALL);
-    bool no_quoted = static_cast<bool>(flags & ESCAPE_NO_QUOTED);
-    bool no_tilde = static_cast<bool>(flags & ESCAPE_NO_TILDE);
+    const bool escape_all = static_cast<bool>(flags & ESCAPE_ALL);
+    const bool no_quoted = static_cast<bool>(flags & ESCAPE_NO_QUOTED);
+    const bool no_tilde = static_cast<bool>(flags & ESCAPE_NO_TILDE);
+    const bool no_caret = feature_test(features_t::stderr_nocaret);
+    const bool no_qmark = feature_test(features_t::qmark_noglob);
 
     int need_escape = 0;
     int need_complex_escape = 0;
@@ -932,7 +939,7 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
         return;
     }
 
-    while (*in != 0) {
+    for (size_t i = 0; i < in_len; i++) {
         if ((*in >= ENCODE_DIRECT_BASE) && (*in < ENCODE_DIRECT_BASE + 256)) {
             int val = *in - ENCODE_DIRECT_BASE;
             int tmp;
@@ -974,7 +981,7 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                     need_escape = need_complex_escape = 1;
                     break;
                 }
-                case L'\e': {
+                case L'\x1B': {
                     out += L'\\';
                     out += L'e';
                     need_escape = need_complex_escape = 1;
@@ -988,8 +995,7 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                     break;
                 }
                 case ANY_CHAR: {
-                    // Experimental fix for #1614. The hope is that any time these appear in a
-                    // string, they came from wildcard expansion.
+                    // See #1614
                     out += L'?';
                     break;
                 }
@@ -1001,6 +1007,7 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                     out += L"**";
                     break;
                 }
+
                 case L'&':
                 case L'$':
                 case L' ':
@@ -1020,7 +1027,8 @@ static void escape_string_script(const wchar_t *orig_in, size_t in_len, wcstring
                 case L';':
                 case L'"':
                 case L'~': {
-                    if (!no_tilde || c != L'~') {
+                    bool char_is_normal = (c == L'~' && no_tilde) || (c == L'^' && no_caret) || (c == L'?' && no_qmark);
+                    if (!char_is_normal) {
                         need_escape = 1;
                         if (escape_all) out += L'\\';
                     }
@@ -1097,15 +1105,52 @@ wcstring escape_string(const wcstring &in, escape_flags_t flags, escape_string_s
             break;
         }
         case STRING_STYLE_URL: {
-            DIE("STRING_STYLE_URL not implemented");
+            escape_string_url(in, result);
             break;
         }
         case STRING_STYLE_VAR: {
-            escape_string_var(in.c_str(), result);
+            escape_string_var(in, result);
             break;
         }
     }
 
+    return result;
+}
+
+wcstring debug_escape(const wcstring &in) {
+    wcstring result;
+    result.reserve(in.size());
+    for (wchar_t wc : in) {
+        uint32_t c = static_cast<uint32_t>(wc);
+        if (c <= 127 && isprint(c)) {
+            result.push_back(wc);
+            continue;
+        }
+
+#define TEST(x)                             \
+    case x:                                 \
+        append_format(result, L"<%s>", #x); \
+        break;
+        switch (wc) {
+            TEST(HOME_DIRECTORY)
+            TEST(VARIABLE_EXPAND)
+            TEST(VARIABLE_EXPAND_SINGLE)
+            TEST(BRACE_BEGIN)
+            TEST(BRACE_END)
+            TEST(BRACE_SEP)
+            TEST(BRACE_SPACE)
+            TEST(INTERNAL_SEPARATOR)
+            TEST(VARIABLE_EXPAND_EMPTY)
+            TEST(EXPAND_SENTINAL)
+            TEST(ANY_CHAR)
+            TEST(ANY_STRING)
+            TEST(ANY_STRING_RECURSIVE)
+            TEST(ANY_SENTINAL)
+            default:
+                append_format(result, L"<\\x%02x>", c);
+                break;
+        }
+    }
     return result;
 }
 
@@ -1235,9 +1280,9 @@ size_t read_unquoted_escape(const wchar_t *input, wcstring *result, bool allow_i
             }
             break;
         }
-        // \e means escape.
+        // \x1B means escape.
         case L'e': {
-            result_char_or_none = L'\e';
+            result_char_or_none = L'\x1B';
             break;
         }
         // \f means form feed.
@@ -1349,7 +1394,7 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                     break;
                 }
                 case L'?': {
-                    if (unescape_special) {
+                    if (unescape_special && !feature_test(features_t::qmark_noglob)) {
                         to_append_or_none = ANY_CHAR;
                     }
                     break;
@@ -1369,7 +1414,11 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                 }
                 case L'}': {
                     if (unescape_special) {
-                        assert(brace_count > 0 && "imbalanced brackets are a tokenizer error, we shouldn't be able to get here");
+                        // HACK: The completion machinery sometimes hands us partial tokens.
+                        // We can't parse them properly, but it shouldn't hurt,
+                        // so we don't assert here.
+                        // See #4954.
+                        // assert(brace_count > 0 && "imbalanced brackets are a tokenizer error, we shouldn't be able to get here");
                         brace_count--;
                         brace_text_start = brace_text_start && brace_count > 0;
                         to_append_or_none = BRACE_END;
@@ -1387,7 +1436,7 @@ static bool unescape_string_internal(const wchar_t *const input, const size_t in
                 case L'\t':
                 case L' ': {
                     if (unescape_special && brace_count > 0) {
-                        to_append_or_none = brace_text_start ? BRACE_SPACE : NOT_A_WCHAR;
+                        to_append_or_none = brace_text_start ? wint_t(BRACE_SPACE) : NOT_A_WCHAR;
                     }
                     break;
                 }
@@ -1699,6 +1748,12 @@ bool string_suffixes_string(const wchar_t *proposed_suffix, const wcstring &valu
            value.compare(value.size() - suffix_size, suffix_size, proposed_suffix) == 0;
 }
 
+bool string_suffixes_string_case_insensitive(const wcstring &proposed_suffix, const wcstring &value) {
+    size_t suffix_size = proposed_suffix.size();
+    return suffix_size <= value.size() &&
+           wcsncasecmp(value.c_str() + (value.size() - suffix_size), proposed_suffix.c_str(), suffix_size) == 0;
+}
+
 /// Returns true if seq, represented as a subsequence, is contained within string.
 static bool subsequence_in_string(const wcstring &seq, const wcstring &str) {
     // Impossible if seq is larger than string.
@@ -1787,8 +1842,31 @@ int string_fuzzy_match_t::compare(const string_fuzzy_match_t &rhs) const {
     return 0;  // equal
 }
 
-bool contains(const wcstring_list_t &list, const wcstring &str) {
-    return std::find(list.begin(), list.end(), str) != list.end();
+wcstring_list_t split_string(const wcstring &val, wchar_t sep) {
+    wcstring_list_t out;
+    size_t pos = 0, end = val.size();
+    while (pos <= end) {
+        size_t next_pos = val.find(sep, pos);
+        if (next_pos == wcstring::npos) {
+            next_pos = end;
+        }
+        out.emplace_back(val, pos, next_pos - pos);
+        pos = next_pos + 1;  // skip the separator, or skip past the end
+    }
+    return out;
+}
+
+wcstring join_strings(const wcstring_list_t &vals, wchar_t sep) {
+    wcstring result;
+    bool first = true;
+    for (const wcstring &s : vals) {
+        if (!first) {
+            result.push_back(sep);
+        }
+        result.append(s);
+        first = false;
+    }
+    return result;
 }
 
 int create_directory(const wcstring &d) {
@@ -1928,6 +2006,14 @@ void convert_wide_array_to_narrow(const null_terminated_array_t<wchar_t> &wide_a
         list.push_back(wcs2string(arr[i]));
     }
     output->set(list);
+}
+
+void autoclose_fd_t::close() {
+    if (fd_ < 0) return;
+    if (::close(fd_) == -1) {
+        wperror(L"close");
+    }
+    fd_ = -1;
 }
 
 void append_path_component(wcstring &path, const wcstring &component) {
