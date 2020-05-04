@@ -5,11 +5,6 @@
 #include "parse_grammar.h"
 #include "parse_tree.h"
 
-struct source_range_t {
-    uint32_t start;
-    uint32_t length;
-};
-
 // Check if a child type is possible for a parent type at a given index.
 template <typename Parent, typename Child, size_t Index>
 constexpr bool child_type_possible_at_index() {
@@ -102,11 +97,14 @@ class tnode_t {
     uint8_t child_count() const { return nodeptr ? nodeptr->child_count : 0; }
 
     maybe_t<source_range_t> source_range() const {
-        if (nodeptr->source_start == NODE_OFFSET_INVALID) return none();
+        if (!nodeptr || nodeptr->source_start == NODE_OFFSET_INVALID) return none();
         return source_range_t{nodeptr->source_start, nodeptr->source_length};
     }
 
     wcstring get_source(const wcstring &str) const {
+        if (!nodeptr) {
+            return L"";
+        }
         return nodeptr->get_source(str);
     }
 
@@ -220,10 +218,11 @@ tnode_t<Type> parse_node_tree_t::find_child(const parse_node_t &parent) const {
     return tnode_t<Type>(this, &this->find_child(parent, Type::token));
 }
 
-template <typename Type>
-tnode_t<Type> parse_node_tree_t::find_last_node(const parse_node_t *parent) const {
-    return tnode_t<Type>(this, this->find_last_node_of_type(Type::token, parent));
-}
+/// Return the arguments under an arguments_list or arguments_or_redirection_list
+/// Do not return more than max.
+using variable_assignment_node_list_t = std::vector<tnode_t<grammar::variable_assignment>>;
+variable_assignment_node_list_t get_variable_assignment_nodes(
+    tnode_t<grammar::variable_assignments>, size_t max = -1);
 
 /// Given a plain statement, get the command from the child node. Returns the command string on
 /// success, none on failure.
@@ -234,14 +233,14 @@ maybe_t<wcstring> command_for_plain_statement(tnode_t<grammar::plain_statement> 
 parse_statement_decoration_t get_decoration(tnode_t<grammar::plain_statement> stmt);
 
 /// Return the type for a boolean statement.
-enum parse_bool_statement_type_t bool_statement_type(tnode_t<grammar::job_decorator> stmt);
+parse_job_decoration_t bool_statement_type(tnode_t<grammar::job_decorator> stmt);
 
-enum parse_bool_statement_type_t bool_statement_type(tnode_t<grammar::job_conjunction_continuation> stmt);
+parse_job_decoration_t bool_statement_type(tnode_t<grammar::job_conjunction_continuation> cont);
 
-/// Given a redirection, get the redirection type (or none) and target (file path, or fd).
-maybe_t<redirection_type_t> redirection_type(tnode_t<grammar::redirection> redirection,
-                                             const wcstring &src, int *out_fd,
-                                             wcstring *out_target);
+/// Given a redirection node, get the parsed redirection and target of the redirection (file path,
+/// or fd).
+maybe_t<pipe_or_redir_t> redirection_for_node(tnode_t<grammar::redirection> redirection,
+                                              const wcstring &src, wcstring *out_target);
 
 /// Return the arguments under an arguments_list or arguments_or_redirection_list
 /// Do not return more than max.
@@ -256,7 +255,7 @@ bool job_node_is_background(tnode_t<grammar::job>);
 /// If the conjunction is has a decorator (and/or), return it; otherwise return none. This only
 /// considers the leading conjunction, e.g. in `and true || false` only the 'true' conjunction will
 /// return 'and'.
-parse_bool_statement_type_t get_decorator(tnode_t<grammar::job_conjunction>);
+parse_job_decoration_t get_decorator(tnode_t<grammar::job_conjunction>);
 
 /// Return whether the statement is part of a pipeline.
 /// This doesn't detect e.g. pipelines involving our parent's block statements.

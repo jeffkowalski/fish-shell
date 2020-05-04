@@ -47,7 +47,7 @@ function __fish_heroku_using_command
     return 1
 end
 
-set -l heroku_looking -c heroku -n '__fish_heroku_needs_command'
+set -l heroku_looking -c heroku -n __fish_heroku_needs_command
 
 # Main commands
 complete $heroku_looking -xa addons -d 'list installed addons'
@@ -107,7 +107,7 @@ complete $heroku_looking -xa addons:upgrade -d 'upgrade an existing addon'
 complete -c heroku -n '__fish_heroku_using_command addons:upgrade' -fa '(__fish_list_installed_addons)'
 
 # Apps options and subcommands
-complete -c heroku -n '__fish_heroku_using_command apps' -s o -l org -l ORG    -d "the org to list the apps for"
+complete -c heroku -n '__fish_heroku_using_command apps' -s o -l org -l ORG -d "the org to list the apps for"
 complete -c heroku -n '__fish_heroku_using_command apps' -s A -l all -d "list all apps in the org. Not just joined apps"
 complete -c heroku -n '__fish_heroku_using_command apps' -s p -l personal -d "list apps in personal account when a default org is set"
 

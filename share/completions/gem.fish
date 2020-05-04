@@ -4,28 +4,28 @@
 
 #####
 # Global options
-complete -c gem -n '__fish_use_subcommand' -s h -l help -d "Print usage informations and quit"
-complete -c gem -n '__fish_use_subcommand' -s v -l version -d "Print the version and quit"
+complete -c gem -n __fish_use_subcommand -s h -l help -d "Print usage informations and quit"
+complete -c gem -n __fish_use_subcommand -s v -l version -d "Print the version and quit"
 
 #####
 # Subcommands
-complete -c gem -n '__fish_use_subcommand' -xa 'build\t"'(_ "Build a gem from a gemspec")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'cert\t"'(_ "Adjust RubyGems certificate settings")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'check\t"'(_ "Check installed gems")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'cleanup\t"'(_ "Cleanup old versions of installed gems in the local repository")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'contents\t"'(_ "Display the contents of the installed gems")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'dependency\t"'(_ "Show the dependencies of an installed gem")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'environment\t"'(_ "Display RubyGems environmental information")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'help\t"'(_ "Provide help on the 'gem' command")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'install\t"'(_ "Install a gem into the local repository")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'list\t"'(_ "Display all gems whose name starts with STRING")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'query\t"'(_ "Query gem information in local or remote repositories")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'rdoc\t"'(_ "Generates RDoc for pre-installed gems")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'search\t"'(_ "Display all gems whose name contains STRING")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'specification\t"'(_ "Display gem specification (in yaml)")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'uninstall\t"'(_ "Uninstall a gem from the local repository")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'unpack\t"'(_ "Unpack an installed gem to the current directory")'"'
-complete -c gem -n '__fish_use_subcommand' -xa 'update\t"'(_ "Update the named gem (or all installed gems) in the local repository")'"'
+complete -c gem -n __fish_use_subcommand -xa "build\tBuild a gem from a gemspec"
+complete -c gem -n __fish_use_subcommand -xa "cert\tAdjust RubyGems certificate settings"
+complete -c gem -n __fish_use_subcommand -xa "check\tCheck installed gems"
+complete -c gem -n __fish_use_subcommand -xa "cleanup\tCleanup old versions of installed gems in the local repository"
+complete -c gem -n __fish_use_subcommand -xa "contents\tDisplay the contents of the installed gems"
+complete -c gem -n __fish_use_subcommand -xa "dependency\tShow the dependencies of an installed gem"
+complete -c gem -n __fish_use_subcommand -xa "environment\tDisplay RubyGems environmental information"
+complete -c gem -n __fish_use_subcommand -xa "help\tProvide help on the 'gem' command"
+complete -c gem -n __fish_use_subcommand -xa "install\tInstall a gem into the local repository"
+complete -c gem -n __fish_use_subcommand -xa "list\tDisplay all gems whose name starts with STRING"
+complete -c gem -n __fish_use_subcommand -xa "query\tQuery gem information in local or remote repositories"
+complete -c gem -n __fish_use_subcommand -xa "rdoc\tGenerates RDoc for pre-installed gems"
+complete -c gem -n __fish_use_subcommand -xa "search\tDisplay all gems whose name contains STRING"
+complete -c gem -n __fish_use_subcommand -xa "specification\tDisplay gem specification (in yaml)"
+complete -c gem -n __fish_use_subcommand -xa "uninstall\tUninstall a gem from the local repository"
+complete -c gem -n __fish_use_subcommand -xa "unpack\tUnpack an installed gem to the current directory"
+complete -c gem -n __fish_use_subcommand -xa "update\tUpdate the named gem (or all installed gems) in the local repository"
 
 #####
 # Subcommand switches
@@ -84,12 +84,12 @@ complete $dep_opt -s p -l pipe -d "Pipe Format (name --version ver)"
 ##
 # environment
 set -l env_opt -c gem -n 'contains environment (commandline -poc)'
-complete $env_opt -xa 'packageversion\t"'(_ "display the package version")'" gemdir\t"'(_ "display the path where gems are installed")'" gempath\t"'(_ "display path used to search for gems")'" version\t"'(_ "display the gem format version")'" remotesources\t"'(_ "display the remote gem servers")'"'
+complete $env_opt -xa "packageversion\tdisplay the package version gemdir\tdisplay the path where gems are installed gempath\tdisplay path used to search for gems version\tdisplay the gem format version remotesources\tdisplay the remote gem servers"
 
 ##
 # help
 set -l help_opt -c gem -n 'contains help (commandline -poc)'
-complete $help_opt -xa 'commands\t"'(_ "list all 'gem' commands")'" examples\t"'(_ "show some examples of usage")'" build cert check cleanup contents dependency environment help install list query rdoc search specification uninstall unpack update'
+complete $help_opt -xa "commands\tlist all 'gem' commands examples\tshow some examples of usage build cert check cleanup contents dependency environment help install list query rdoc search specification uninstall unpack update"
 
 ##
 # install
@@ -99,10 +99,8 @@ complete $install_opt -s l -l local -d "Restrict operations to the LOCAL domain 
 complete $install_opt -s r -l remote -d "Restrict operations to the REMOTE domain"
 complete $install_opt -s b -l both -d "Allow LOCAL and REMOTE operations"
 complete $install_opt -s i -l install-dir -d "Gem repository directory to get installed gems" -x
-complete $install_opt -s d -l rdoc -d "Generate RDoc documentation for the gem on install"
-complete $install_opt -l no-rdoc -d "Don't generate RDoc documentation for the gem on install"
-complete $install_opt -l ri -d "Generate RI documentation for the gem on install"
-complete $install_opt -l no-ri -d "Don't generate RI documentation for the gem on install"
+complete $install_opt -s N -l no-document -d "Disable documentation generation on install"
+complete $install_opt -l document -a '(__fish_append , rdoc ri)' -d "Specify the documentation types you wish to generate"
 complete $install_opt -s f -l force -d "Force gem to install, bypassing dependency checks"
 complete $install_opt -l no-force -d "Don't force gem to install, bypassing dependency checks"
 complete $install_opt -s t -l test -d "Run unit tests prior to installation"
@@ -180,10 +178,8 @@ complete $unpack_opt -s v -l version -d "Specify version of gem to unpack" -x
 # update
 set -l update_opt -c gem -n 'contains update (commandline -poc)'
 complete $update_opt -s i -l install-dir -d "Gem repository directory to get installed gems"
-complete $update_opt -s d -l rdoc -d "Generate RDoc documentation for the gem on install"
-complete $update_opt -l no-rdoc -d "Don't generate RDoc documentation for the gem on install"
-complete $update_opt -l ri -d "Generate RI documentation for the gem on install"
-complete $update_opt -l no-ri -d "Don't generate RI documentation for the gem on install"
+complete $update_opt -s N -l no-document -d "Disable documentation generation on update"
+complete $update_opt -l document -a '(__fish_append , rdoc ri)' -d "Specify the documentation types you wish to generate"
 complete $update_opt -s f -l force -d "Force gem to install, bypassing dependency checks"
 complete $update_opt -l no-force -d "Don't force gem to install, bypassing dependency checks"
 complete $update_opt -s t -l test -d "Run unit tests prior to installation"

@@ -18,6 +18,8 @@ function mktemp
                 set opts $opts d
             case -t
                 set opts $opts t
+            case -u
+                set opts $opts u
             case --
                 set -e argv[1]
                 break
@@ -45,10 +47,10 @@ function mktemp
         exit 1
     end
 
-    # GNU sed treats the final occurrence of a sequence of X's as the template token.
-    # BSD sed only treats X's as the template token if they suffix the string.
+    # GNU mktemp treats the final occurrence of a sequence of X's as the template token.
+    # BSD mktemp only treats X's as the template token if they suffix the string.
     # So let's outlaw them anywhere besides the end.
-    # Similarly GNU sed requires at least 3 X's, BSD sed requires none. Let's require 3.
+    # Similarly GNU mktemp requires at least 3 X's, BSD mktemp requires none. Let's require 3.
     begin
         set -l chars (string split '' -- $template)
         set -l found_x
@@ -69,6 +71,9 @@ function mktemp
     end
 
     set -l args
+    if contains u $opts
+        set args $args -u
+    end
     if contains d $opts
         set args $args -d
     end
@@ -88,7 +93,7 @@ function mktemp
     end
     set args $args $template
 
-    command mktemp $args
+    realpath (command mktemp $args)
 end
 
 function _mktemp_help

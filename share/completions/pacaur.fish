@@ -1,10 +1,7 @@
-# Completions for pacaur
-
 set -l progname pacaur
-complete -e -c $progname
 complete -c $progname -f
 
-set -l listinstalled "(pacman -Q | string replace ' ' \t)"
+set -l listinstalled "(__fish_print_packages --installed)"
 # This might be an issue if another package manager is also installed (e.g. for containers)
 set -l listall "(__fish_print_packages)"
 set -l listrepos "(__fish_print_pacman_repos)"
@@ -25,9 +22,9 @@ set -l upgrade '__fish_contains_opt -s U upgrade'
 set -l files '__fish_contains_opt -s F files'
 
 # HACK: We only need these three to coerce fish to stop file completion and complete options
-complete -c $progname -n $noopt -a "-D" -d "Modify the package database"
-complete -c $progname -n $noopt -a "-Q" -d "Query the package database"
-complete -c $progname -n $noopt -a "-C" -d "Manage .pac* files"
+complete -c $progname -n $noopt -a -D -d "Modify the package database"
+complete -c $progname -n $noopt -a -Q -d "Query the package database"
+complete -c $progname -n $noopt -a -C -d "Manage .pac* files"
 # Primary operations
 complete -c $progname -s D -f -l database -n $noopt -d 'Modify the package database'
 complete -c $progname -s Q -f -l query -n $noopt -d 'Query the package database'
@@ -39,14 +36,14 @@ complete -c $progname -s F -f -l files -n $noopt -d 'Query the files database'
 complete -c $progname -s V -f -l version -d 'Display version and exit'
 complete -c $progname -s h -f -l help -d 'Display help'
 # pacaur operations
-complete -c $progname -n $noopt -s s    -l search      -d "(AUR) Search for packages"
-complete -c $progname -n $noopt -s i    -l info        -d "(AUR) Show info for packages"
-complete -c $progname -n $noopt -s m    -l makepkg     -d "(AUR) Clone the packages' build files and build them"
-complete -c $progname -n $noopt -s y    -l sync        -d "(AUR) Clone build files, build and install packages"
-complete -c $progname -n $noopt -s k    -l check       -d "(AUR) Check foreign packages for updates"
-complete -c $progname -n $noopt -s u    -l update      -d "(AUR) Update foreign packages"
+complete -c $progname -n $noopt -s s -l search -d "(AUR) Search for packages"
+complete -c $progname -n $noopt -s i -l info -d "(AUR) Show info for packages"
+complete -c $progname -n $noopt -s m -l makepkg -d "(AUR) Clone the packages' build files and build them"
+complete -c $progname -n $noopt -s y -l sync -d "(AUR) Clone build files, build and install packages"
+complete -c $progname -n $noopt -s k -l check -d "(AUR) Check foreign packages for updates"
+complete -c $progname -n $noopt -s u -l update -d "(AUR) Update foreign packages"
 complete -c $progname -n "$noopt; and not __fish_contains_opt -s d download" -s d -l download -d "(AUR) Clone the packages' build files"
-complete -c $progname -n "$noopt; and __fish_contains_opt -s d download"     -s d -l download -d "Download dependencies recursively"
+complete -c $progname -n "$noopt; and __fish_contains_opt -s d download" -s d -l download -d "Download dependencies recursively"
 
 
 # General options
@@ -63,19 +60,19 @@ complete -c $progname -n $hasopt -l hookdir -d 'Hook file directory'
 complete -c $progname -n $hasopt -l logfile -d 'Specify alternative log file'
 complete -c $progname -n $hasopt -l noconfirm -d 'Bypass any question' -f
 # General options (pacaur only)
-complete -c $progname -n $hasopt -s a -l aur            -d 'Apply only for AUR targets'
-complete -c $progname -n $hasopt -s r -l repo           -d 'Apply only for specified repo'
-complete -c $progname -n $hasopt -s r -l edit           -d 'Edit build files'
-complete -c $progname -n $hasopt      -l noedit         -d 'Do not edit build files'
-complete -c $progname -n $hasopt      -l rebuild        -d 'Always rebuild packages'
-complete -c $progname -n $hasopt      -l silent         -d 'Redirect output to the log in the clone directory'
-complete -c $progname -n $hasopt      -l domain      -x -d 'Point at a domain other than the default aur.archlinux.org'
-complete -c $progname -n $hasopt      -l devel          -d 'Use devel packages'
-complete -c $progname -n $hasopt      -l ignore-ood     -d 'Ignore all results marked as out of date'
-complete -c $progname -n $hasopt      -l no-ignore-ood  -d 'Do not ignore all results marked as out of date'
-complete -c $progname -n $hasopt      -l sort           -d 'Sort ascending by key'  -xa "name votes popularity"
-complete -c $progname -n $hasopt      -l rsort          -d 'Sort descending by key' -xa "name votes popularity"
-complete -c $progname -n $hasopt      -l by             -d 'Search by field'  -xa "name name-desc maintainer"
+complete -c $progname -n $hasopt -s a -l aur -d 'Apply only for AUR targets'
+complete -c $progname -n $hasopt -s r -l repo -d 'Apply only for specified repo'
+complete -c $progname -n $hasopt -s r -l edit -d 'Edit build files'
+complete -c $progname -n $hasopt -l noedit -d 'Do not edit build files'
+complete -c $progname -n $hasopt -l rebuild -d 'Always rebuild packages'
+complete -c $progname -n $hasopt -l silent -d 'Redirect output to the log in the clone directory'
+complete -c $progname -n $hasopt -l domain -x -d 'Point at a domain other than the default aur.archlinux.org'
+complete -c $progname -n $hasopt -l devel -d 'Use devel packages'
+complete -c $progname -n $hasopt -l ignore-ood -d 'Ignore all results marked as out of date'
+complete -c $progname -n $hasopt -l no-ignore-ood -d 'Do not ignore all results marked as out of date'
+complete -c $progname -n $hasopt -l sort -d 'Sort ascending by key' -xa "name votes popularity"
+complete -c $progname -n $hasopt -l rsort -d 'Sort descending by key' -xa "name votes popularity"
+complete -c $progname -n $hasopt -l by -d 'Search by field' -xa "name name-desc maintainer"
 
 # Transaction options (sync, remove, upgrade)
 for condition in sync remove upgrade
@@ -161,6 +158,5 @@ complete -c $progname -n "$files" -l machinereadable -d 'Show in machine readabl
 
 # Upgrade options
 # Theoretically, pacman reads packages in all formats that libarchive supports
-# In practice, it's going to be tar.xz or tar.gz
-# Using "pkg.tar.*" here would change __fish_complete_suffix's descriptions to "unknown"
-complete -c $progname -n "$upgrade" -xa '(__fish_complete_suffix .pkg.tar\{,.xz,.gz\})' -d 'Package file'
+# In practice, it's going to be tar.xz or tar.gz or tar.zst
+complete -c $progname -n "$upgrade" -xa '(__fish_complete_suffix pkg.tar.zst; __fish_complete_suffix pkg.tar.xz; __fish_complete_suffix pkg.tar.gz)' -d 'Package file'

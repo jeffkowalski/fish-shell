@@ -1,7 +1,7 @@
 set -l cmds list store restore stop-all start stop restart switch-to status enable disable reenable is-enabled edit
 
 function __fish_netctl_get_profiles
-  command netctl list | sed -e 's/^[ \t*]*//'
+    command netctl list | string trim -l -c ' *'\t
 end
 
 complete -f -c netctl -l help -d 'Display help'
@@ -20,4 +20,4 @@ complete -f -c netctl -n "not __fish_seen_subcommand_from $cmds" -a disable -d '
 complete -f -c netctl -n "not __fish_seen_subcommand_from $cmds" -a reenable -d 'Reenable the systemd unit for a profile'
 complete -f -c netctl -n "not __fish_seen_subcommand_from $cmds" -a is-enabled -d 'Check whether the unit is enabled'
 complete -f -c netctl -n "not __fish_seen_subcommand_from $cmds" -a edit -d 'Open the specified profile in an editor'
-complete -f -c netctl -n "__fish_seen_subcommand_from start stop restart switch-to status enable disable reenable is-enabled edit" -a '(__fish_netctl_get_profiles)' -d 'Profile'
+complete -f -c netctl -n "__fish_seen_subcommand_from start stop restart switch-to status enable disable reenable is-enabled edit" -a '(__fish_netctl_get_profiles)' -d Profile

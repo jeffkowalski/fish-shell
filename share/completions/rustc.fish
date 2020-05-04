@@ -1,7 +1,3 @@
-# Tab completion for rustc (https://github.com/rust-lang/rust).
-# vim: tabstop=8 expandtab shiftwidth=4 softtabstop=4
-complete -e -c rustc
-
 complete -c rustc -s h -l help
 
 complete -c rustc -x -l cfg
@@ -67,6 +63,3 @@ for line in $rust_docs
     complete -c rustc -x -s D -l deny -a (string escape -- "$docs[1]") -d "$docs[2]"
     complete -c rustc -x -s F -l forbid -a (string escape -- "$docs[1]") -d "$docs[2]"
 end
-
-set -e rust_codegen
-

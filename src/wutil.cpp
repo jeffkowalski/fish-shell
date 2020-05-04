@@ -7,11 +7,11 @@
 #include <fcntl.h>
 #include <libgen.h>
 #include <limits.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <sys/stat.h>
+
+#include <cstring>
 #if defined(__linux__)
 #include <sys/statfs.h>
 #endif
@@ -19,54 +19,53 @@
 #include <sys/statvfs.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <wchar.h>
 #include <wctype.h>
 
+#include <atomic>
+#include <cwchar>
 #include <string>
 #include <unordered_map>
 
 #include "common.h"
 #include "fallback.h"  // IWYU pragma: keep
-#include "wutil.h"     // IWYU pragma: keep
+#include "flog.h"
+#include "wutil.h"  // IWYU pragma: keep
 
-typedef std::string cstring;
+using cstring = std::string;
 
-const file_id_t kInvalidFileID = {(dev_t)-1LL, (ino_t)-1LL, (uint64_t)-1LL, -1, -1, -1, -1};
-
-#ifndef PATH_MAX
-#ifdef MAXPATHLEN
-#define PATH_MAX MAXPATHLEN
-#else
-/// Fallback length of MAXPATHLEN. Hopefully a sane value.
-#define PATH_MAX 4096
-#endif
-#endif
+const file_id_t kInvalidFileID = {static_cast<dev_t>(-1LL),
+                                  static_cast<ino_t>(-1LL),
+                                  static_cast<uint64_t>(-1LL),
+                                  -1,
+                                  -1,
+                                  -1,
+                                  -1};
 
 /// Map used as cache by wgettext.
 static owning_lock<std::unordered_map<wcstring, wcstring>> wgettext_map;
 
 bool wreaddir_resolving(DIR *dir, const wcstring &dir_path, wcstring &out_name, bool *out_is_dir) {
-    struct dirent d;
-    struct dirent *result = NULL;
-    int retval = readdir_r(dir, &d, &result);
-    if (retval || !result) {
-        out_name = L"";
+    struct dirent *result = readdir(dir);
+    if (!result) {
+        out_name.clear();
         return false;
     }
 
-    out_name = str2wcstring(d.d_name);
-    if (!out_is_dir) return true;
+    out_name = str2wcstring(result->d_name);
+    if (!out_is_dir) {
+        return true;
+    }
 
     // The caller cares if this is a directory, so check.
     bool is_dir = false;
     // We may be able to skip stat, if the readdir can tell us the file type directly.
     bool check_with_stat = true;
 #ifdef HAVE_STRUCT_DIRENT_D_TYPE
-    if (d.d_type == DT_DIR) {
+    if (result->d_type == DT_DIR) {
         // Known directory.
         is_dir = true;
         check_with_stat = false;
-    } else if (d.d_type == DT_LNK || d.d_type == DT_UNKNOWN) {
+    } else if (result->d_type == DT_LNK || result->d_type == DT_UNKNOWN) {
         // We want to treat symlinks to directories as directories. Use stat to resolve it.
         check_with_stat = true;
     } else {
@@ -79,7 +78,7 @@ bool wreaddir_resolving(DIR *dir, const wcstring &dir_path, wcstring &out_name, 
         // We couldn't determine the file type from the dirent; check by stat'ing it.
         cstring fullpath = wcs2string(dir_path);
         fullpath.push_back('/');
-        fullpath.append(d.d_name);
+        fullpath.append(result->d_name);
         struct stat buf;
         if (stat(fullpath.c_str(), &buf) != 0) {
             is_dir = false;
@@ -92,34 +91,24 @@ bool wreaddir_resolving(DIR *dir, const wcstring &dir_path, wcstring &out_name, 
 }
 
 bool wreaddir(DIR *dir, wcstring &out_name) {
-    // We need to use a union to ensure that the dirent struct is large enough to avoid stomping on
-    // the stack. Some platforms incorrectly defined the `d_name[]` member as being one element
-    // long when it should be at least NAME_MAX + 1.
-    union {
-        struct dirent d;
-        char c[offsetof(struct dirent, d_name) + NAME_MAX + 1];
-    } d_u;
-    struct dirent *result = NULL;
-
-    int retval = readdir_r(dir, &d_u.d, &result);
-    if (retval || !result) {
-        out_name = L"";
+    struct dirent *result = readdir(dir);
+    if (!result) {
+        out_name.clear();
         return false;
     }
 
-    out_name = str2wcstring(d_u.d.d_name);
+    out_name = str2wcstring(result->d_name);
     return true;
 }
 
 bool wreaddir_for_dirs(DIR *dir, wcstring *out_name) {
-    struct dirent d;
-    struct dirent *result = NULL;
+    struct dirent *result = nullptr;
     while (!result) {
-        int retval = readdir_r(dir, &d, &result);
-        if (retval || !result) break;
+        result = readdir(dir);
+        if (!result) break;
 
 #if HAVE_STRUCT_DIRENT_D_TYPE
-        switch (d.d_type) {
+        switch (result->d_type) {
             case DT_DIR:
             case DT_LNK:
             case DT_UNKNOWN: {
@@ -138,88 +127,55 @@ bool wreaddir_for_dirs(DIR *dir, wcstring *out_name) {
     if (result && out_name) {
         *out_name = str2wcstring(result->d_name);
     }
-    return result != NULL;
+    return result != nullptr;
 }
 
-const wcstring wgetcwd() {
+wcstring wgetcwd() {
     char cwd[PATH_MAX];
     char *res = getcwd(cwd, sizeof(cwd));
     if (res) {
         return str2wcstring(res);
     }
 
-    debug(0, _(L"getcwd() failed with errno %d/%s"), errno, strerror(errno));
+    FLOGF(error, _(L"getcwd() failed with errno %d/%s"), errno, std::strerror(errno));
     return wcstring();
 }
 
-int wchdir(const wcstring &dir) {
-    cstring tmp = wcs2string(dir);
-    return chdir(tmp.c_str());
-}
-
-FILE *wfopen(const wcstring &path, const char *mode) {
-    int permissions = 0, options = 0;
-    size_t idx = 0;
-    switch (mode[idx++]) {
-        case 'r': {
-            permissions = O_RDONLY;
-            break;
-        }
-        case 'w': {
-            permissions = O_WRONLY;
-            options = O_CREAT | O_TRUNC;
-            break;
-        }
-        case 'a': {
-            permissions = O_WRONLY;
-            options = O_CREAT | O_APPEND;
-            break;
-        }
-        default: {
-            errno = EINVAL;
-            return NULL;
-        }
-    }
-    // Skip binary.
-    if (mode[idx] == 'b') idx++;
-
-    // Consider append option.
-    if (mode[idx] == '+') permissions = O_RDWR;
-
-    int fd = wopen_cloexec(path, permissions | options, 0666);
-    if (fd < 0) return NULL;
-    FILE *result = fdopen(fd, mode);
-    if (result == NULL) close(fd);
-    return result;
-}
-
-bool set_cloexec(int fd) {
+int set_cloexec(int fd, bool should_set) {
+    // Note we don't want to overwrite existing flags like O_NONBLOCK which may be set. So fetch the
+    // existing flags and modify them.
     int flags = fcntl(fd, F_GETFD, 0);
     if (flags < 0) {
-        return false;
+        return -1;
     }
-    if (flags & FD_CLOEXEC) {
-        return true;
+    int new_flags = flags;
+    if (should_set) {
+        new_flags |= FD_CLOEXEC;
+    } else {
+        new_flags &= ~FD_CLOEXEC;
     }
-    return fcntl(fd, F_SETFD, flags | FD_CLOEXEC) >= 0;
+    if (flags == new_flags) {
+        return 0;
+    } else {
+        return fcntl(fd, F_SETFD, new_flags);
+    }
 }
 
-static int wopen_internal(const wcstring &pathname, int flags, mode_t mode, bool cloexec) {
+int open_cloexec(const std::string &path, int flags, mode_t mode) {
+    return open_cloexec(path.c_str(), flags, mode);
+}
+
+int open_cloexec(const char *path, int flags, mode_t mode) {
     ASSERT_IS_NOT_FORKED_CHILD();
-    cstring tmp = wcs2string(pathname);
     int fd;
 
 #ifdef O_CLOEXEC
     // Prefer to use O_CLOEXEC. It has to both be defined and nonzero.
-    if (cloexec) {
-        fd = open(tmp.c_str(), flags | O_CLOEXEC, mode);
-    } else {
-        fd = open(tmp.c_str(), flags, mode);
-    }
+    fd = open(path, flags | O_CLOEXEC, mode);
 #else
-    fd = open(tmp.c_str(), flags, mode);
+    fd = open(path, flags, mode);
     if (fd >= 0 && !set_cloexec(fd)) {
-        close(fd);
+        exec_close(fd);
         fd = -1;
     }
 #endif
@@ -227,13 +183,30 @@ static int wopen_internal(const wcstring &pathname, int flags, mode_t mode, bool
 }
 
 int wopen_cloexec(const wcstring &pathname, int flags, mode_t mode) {
-    return wopen_internal(pathname, flags, mode, true);
+    cstring tmp = wcs2string(pathname);
+    return open_cloexec(tmp, flags, mode);
 }
 
 DIR *wopendir(const wcstring &name) {
     const cstring tmp = wcs2string(name);
     return opendir(tmp.c_str());
 }
+
+dir_t::dir_t(const wcstring &path) {
+    const cstring tmp = wcs2string(path);
+    this->dir = opendir(tmp.c_str());
+}
+
+dir_t::~dir_t() {
+    if (this->dir != nullptr) {
+        closedir(this->dir);
+        this->dir = nullptr;
+    }
+}
+
+bool dir_t::valid() const { return this->dir != nullptr; }
+
+bool dir_t::read(wcstring &name) const { return wreaddir(this->dir, name); }
 
 int wstat(const wcstring &file_name, struct stat *buf) {
     const cstring tmp = wcs2string(file_name);
@@ -258,9 +231,9 @@ int wunlink(const wcstring &file_name) {
 void wperror(const wchar_t *s) {
     int e = errno;
     if (s[0] != L'\0') {
-        fwprintf(stderr, L"%ls: ", s);
+        std::fwprintf(stderr, L"%ls: ", s);
     }
-    fwprintf(stderr, L"%s\n", strerror(e));
+    std::fwprintf(stderr, L"%s\n", std::strerror(e));
 }
 
 int make_fd_nonblocking(int fd) {
@@ -285,21 +258,29 @@ int make_fd_blocking(int fd) {
 
 int fd_check_is_remote(int fd) {
 #if defined(__linux__)
-    struct statfs buf{0};
+    struct statfs buf {};
     if (fstatfs(fd, &buf) < 0) {
         return -1;
     }
     // Linux has constants for these like NFS_SUPER_MAGIC, SMB_SUPER_MAGIC, CIFS_MAGIC_NUMBER but
     // these are in varying headers. Simply hard code them.
-    switch (buf.f_type) {
-        case 0x6969:      // NFS_SUPER_MAGIC
-        case 0x517B:      // SMB_SUPER_MAGIC
-        case 0xFF534D42:  // CIFS_MAGIC_NUMBER
+    // NOTE: The cast is necessary for 32-bit systems because of the 4-byte CIFS_MAGIC_NUMBER
+    switch (static_cast<unsigned int>(buf.f_type)) {
+        case 0x6969:       // NFS_SUPER_MAGIC
+        case 0x517B:       // SMB_SUPER_MAGIC
+        case 0xFE534D42U:  // SMB2_MAGIC_NUMBER - not in the manpage
+        case 0xFF534D42U:  // CIFS_MAGIC_NUMBER
             return 1;
         default:
             // Other FSes are assumed local.
             return 0;
     }
+#elif defined(ST_LOCAL)
+    // ST_LOCAL is a flag to statvfs, which is itself standardized.
+    // In practice the only system to use this path is NetBSD.
+    struct statvfs buf {};
+    if (fstatvfs(fd, &buf) < 0) return -1;
+    return (buf.f_flag & ST_LOCAL) ? 0 : 1;
 #elif defined(MNT_LOCAL)
     struct statfs buf {};
     if (fstatfs(fd, &buf) < 0) return -1;
@@ -310,7 +291,7 @@ int fd_check_is_remote(int fd) {
 }
 
 static inline void safe_append(char *buffer, const char *s, size_t buffsize) {
-    strncat(buffer, s, buffsize - strlen(buffer) - 1);
+    std::strncat(buffer, s, buffsize - std::strlen(buffer) - 1);
 }
 
 // In general, strerror is not async-safe, and therefore we cannot use it directly. So instead we
@@ -320,10 +301,10 @@ const char *safe_strerror(int err) {
 #if defined(__UCLIBC__)
     // uClibc does not have sys_errlist, however, its strerror is believed to be async-safe.
     // See issue #808.
-    return strerror(err);
+    return std::strerror(err);
 #elif defined(HAVE__SYS__ERRS) || defined(HAVE_SYS_ERRLIST)
 #ifdef HAVE_SYS_ERRLIST
-    if (err >= 0 && err < sys_nerr && sys_errlist[err] != NULL) {
+    if (err >= 0 && err < sys_nerr && sys_errlist[err] != nullptr) {
         return sys_errlist[err];
     }
 #elif defined(HAVE__SYS__ERRS)
@@ -365,52 +346,138 @@ void safe_perror(const char *message) {
     safe_append(buff, safe_strerror(err), sizeof buff);
     safe_append(buff, "\n", sizeof buff);
 
-    ignore_result(write(STDERR_FILENO, buff, strlen(buff)));
+    ignore_result(write(STDERR_FILENO, buff, std::strlen(buff)));
     errno = err;
 }
 
+/// Wide character realpath. The last path component does not need to be valid. If an error occurs,
+/// wrealpath() returns none() and errno is likely set.
 maybe_t<wcstring> wrealpath(const wcstring &pathname) {
     if (pathname.empty()) return none();
 
     cstring real_path;
     cstring narrow_path = wcs2string(pathname);
 
-    // Strip trailing slashes. This is needed to be bug-for-bug compatible with GNU realpath which
-    // treats "/a//" as equivalent to "/a" whether or not /a exists.
+    // Strip trailing slashes. This is treats "/a//" as equivalent to "/a" if /a is a non-directory.
     while (narrow_path.size() > 1 && narrow_path.at(narrow_path.size() - 1) == '/') {
         narrow_path.erase(narrow_path.size() - 1, 1);
     }
 
     char tmpbuf[PATH_MAX];
     char *narrow_res = realpath(narrow_path.c_str(), tmpbuf);
+
     if (narrow_res) {
         real_path.append(narrow_res);
     } else {
+        // Check if everything up to the last path component is valid.
         size_t pathsep_idx = narrow_path.rfind('/');
+
         if (pathsep_idx == 0) {
             // If the only pathsep is the first character then it's an absolute path with a
             // single path component and thus doesn't need conversion.
             real_path = narrow_path;
         } else {
-            char tmpbuff[PATH_MAX];
+            // Only call realpath() on the portion up to the last component.
+            errno = 0;
+
             if (pathsep_idx == cstring::npos) {
-                // No pathsep means a single path component relative to pwd.
-                narrow_res = realpath(".", tmpbuff);
-                assert(narrow_res != NULL && "realpath unexpectedly returned null");
-                pathsep_idx = 0;
+                // If there is no "/", this is a file in $PWD, so give the realpath to that.
+                narrow_res = realpath(".", tmpbuf);
             } else {
+                errno = 0;
                 // Only call realpath() on the portion up to the last component.
-                narrow_res = realpath(narrow_path.substr(0, pathsep_idx).c_str(), tmpbuff);
-                if (!narrow_res) return none();
-                pathsep_idx++;
+                narrow_res = realpath(narrow_path.substr(0, pathsep_idx).c_str(), tmpbuf);
             }
+
+            if (!narrow_res) return none();
+
+            pathsep_idx++;
             real_path.append(narrow_res);
-            // This test is to deal with pathological cases such as /../../x => //x.
+
+            // This test is to deal with cases such as /../../x => //x.
             if (real_path.size() > 1) real_path.append("/");
+
             real_path.append(narrow_path.substr(pathsep_idx, cstring::npos));
         }
     }
     return str2wcstring(real_path);
+}
+
+wcstring normalize_path(const wcstring &path) {
+    // Count the leading slashes.
+    const wchar_t sep = L'/';
+    size_t leading_slashes = 0;
+    for (wchar_t c : path) {
+        if (c != sep) break;
+        leading_slashes++;
+    }
+
+    wcstring_list_t comps = split_string(path, sep);
+    wcstring_list_t new_comps;
+    for (wcstring &comp : comps) {
+        if (comp.empty() || comp == L".") {
+            continue;
+        } else if (comp != L"..") {
+            new_comps.push_back(std::move(comp));
+        } else if (!new_comps.empty() && new_comps.back() != L"..") {
+            // '..' with a real path component, drop that path component.
+            new_comps.pop_back();
+        } else if (leading_slashes == 0) {
+            // We underflowed the .. and are a relative (not absolute) path.
+            new_comps.push_back(L"..");
+        }
+    }
+    wcstring result = join_strings(new_comps, sep);
+    // Prepend one or two leading slashes.
+    // Two slashes are preserved. Three+ slashes are collapsed to one. (!)
+    result.insert(0, leading_slashes > 2 ? 1 : leading_slashes, sep);
+    // Ensure ./ normalizes to . and not empty.
+    if (result.empty()) result.push_back(L'.');
+    return result;
+}
+
+wcstring path_normalize_for_cd(const wcstring &wd, const wcstring &path) {
+    // Fast paths.
+    const wchar_t sep = L'/';
+    assert(!wd.empty() && wd.front() == sep && wd.back() == sep &&
+           "Invalid working directory, it must start and end with /");
+    if (path.empty()) {
+        return wd;
+    } else if (path.front() == sep) {
+        return path;
+    } else if (path.front() != L'.') {
+        return wd + path;
+    }
+
+    // Split our strings by the sep.
+    wcstring_list_t wd_comps = split_string(wd, sep);
+    wcstring_list_t path_comps = split_string(path, sep);
+
+    // Remove empty segments from wd_comps.
+    // In particular this removes the leading and trailing empties.
+    wd_comps.erase(std::remove(wd_comps.begin(), wd_comps.end(), L""), wd_comps.end());
+
+    // Erase leading . and .. components from path_comps, popping from wd_comps as we go.
+    size_t erase_count = 0;
+    for (const wcstring &comp : path_comps) {
+        bool erase_it = false;
+        if (comp.empty() || comp == L".") {
+            erase_it = true;
+        } else if (comp == L".." && !wd_comps.empty()) {
+            erase_it = true;
+            wd_comps.pop_back();
+        }
+        if (erase_it) {
+            erase_count++;
+        } else {
+            break;
+        }
+    }
+    // Append un-erased elements to wd_comps and join them, then prepend the leading /.
+    std::move(path_comps.begin() + erase_count, path_comps.end(), std::back_inserter(wd_comps));
+    wcstring result = join_strings(wd_comps, sep);
+    result.insert(0, 1, L'/');
+    return result;
 }
 
 wcstring wdirname(const wcstring &path) {
@@ -438,8 +505,8 @@ static void wgettext_really_init() {
 /// For wgettext: Internal init function. Automatically called when a translation is first
 /// requested.
 static void wgettext_init_if_necessary() {
-    static pthread_once_t once = PTHREAD_ONCE_INIT;
-    pthread_once(&once, wgettext_really_init);
+    static std::once_flag s_wgettext_init{};
+    std::call_once(s_wgettext_init, wgettext_really_init);
 }
 
 const wcstring &wgettext(const wchar_t *in) {
@@ -510,7 +577,7 @@ int fish_iswgraph(wint_t wc) {
 /// Convenience variants on fish_wcwswidth().
 ///
 /// See fallback.h for the normal definitions.
-int fish_wcswidth(const wchar_t *str) { return fish_wcswidth(str, wcslen(str)); }
+int fish_wcswidth(const wchar_t *str) { return fish_wcswidth(str, std::wcslen(str)); }
 
 /// Convenience variants on fish_wcwswidth().
 ///
@@ -518,7 +585,7 @@ int fish_wcswidth(const wchar_t *str) { return fish_wcswidth(str, wcslen(str)); 
 int fish_wcswidth(const wcstring &str) { return fish_wcswidth(str.c_str(), str.size()); }
 
 locale_t fish_c_locale() {
-    static locale_t loc = newlocale(LC_ALL_MASK, "C", NULL);
+    static const locale_t loc = newlocale(LC_ALL_MASK, "C", nullptr);
     return loc;
 }
 
@@ -541,7 +608,7 @@ int fish_wcstoi(const wchar_t *str, const wchar_t **endptr, int base) {
 
     errno = 0;
     wchar_t *_endptr;
-    long result = wcstol(str, &_endptr, base);
+    long result = std::wcstol(str, &_endptr, base);
     if (result > INT_MAX) {
         result = INT_MAX;
         errno = ERANGE;
@@ -558,7 +625,7 @@ int fish_wcstoi(const wchar_t *str, const wchar_t **endptr, int base) {
         }
     }
     if (endptr) *endptr = _endptr;
-    return (int)result;
+    return static_cast<int>(result);
 }
 
 /// An enhanced version of wcstol().
@@ -579,7 +646,7 @@ long fish_wcstol(const wchar_t *str, const wchar_t **endptr, int base) {
 
     errno = 0;
     wchar_t *_endptr;
-    long result = wcstol(str, &_endptr, base);
+    long result = std::wcstol(str, &_endptr, base);
     while (iswspace(*_endptr)) ++_endptr;  // skip trailing whitespace
     if (!errno && *_endptr) {
         if (_endptr == str) {
@@ -610,7 +677,7 @@ long long fish_wcstoll(const wchar_t *str, const wchar_t **endptr, int base) {
 
     errno = 0;
     wchar_t *_endptr;
-    long long result = wcstoll(str, &_endptr, base);
+    long long result = std::wcstoll(str, &_endptr, base);
     while (iswspace(*_endptr)) ++_endptr;  // skip trailing whitespace
     if (!errno && *_endptr) {
         if (_endptr == str) {
@@ -643,7 +710,7 @@ unsigned long long fish_wcstoull(const wchar_t *str, const wchar_t **endptr, int
 
     errno = 0;
     wchar_t *_endptr;
-    unsigned long long result = wcstoull(str, &_endptr, base);
+    unsigned long long result = std::wcstoull(str, &_endptr, base);
     while (iswspace(*_endptr)) ++_endptr;  // skip trailing whitespace
     if (!errno && *_endptr) {
         if (_endptr == str) {
@@ -654,6 +721,29 @@ unsigned long long fish_wcstoull(const wchar_t *str, const wchar_t **endptr, int
     }
     if (endptr) *endptr = _endptr;
     return result;
+}
+
+/// Like wcstod(), but wcstod() is enormously expensive on some platforms so this tries to have a
+/// fast path.
+double fish_wcstod(const wchar_t *str, wchar_t **endptr) {
+    // The "fast path." If we're all ASCII and we fit inline, use strtod().
+    char narrow[128];
+    size_t len = std::wcslen(str);
+    size_t len_plus_0 = 1 + len;
+    auto is_digit = [](wchar_t c) { return '0' <= c && c <= '9'; };
+    if (len_plus_0 <= sizeof narrow && std::all_of(str, str + len, is_digit)) {
+        // Fast path. Copy the string into a local buffer and run strtod() on it.
+        // We can ignore the locale-taking version because we are limited to ASCII digits.
+        std::copy(str, str + len_plus_0, narrow);
+        char *narrow_endptr = nullptr;
+        double ret = strtod(narrow, endptr ? &narrow_endptr : nullptr);
+        if (endptr) {
+            assert(narrow_endptr && "narrow_endptr should not be null");
+            *endptr = const_cast<wchar_t *>(str + (narrow_endptr - narrow));
+        }
+        return ret;
+    }
+    return wcstod_l(str, endptr, fish_c_locale());
 }
 
 file_id_t file_id_t::from_stat(const struct stat &buf) {
@@ -694,6 +784,15 @@ file_id_t file_id_for_path(const wcstring &path) {
     file_id_t result = kInvalidFileID;
     struct stat buf = {};
     if (0 == wstat(path, &buf)) {
+        result = file_id_t::from_stat(buf);
+    }
+    return result;
+}
+
+file_id_t file_id_for_path(const std::string &path) {
+    file_id_t result = kInvalidFileID;
+    struct stat buf = {};
+    if (0 == stat(path.c_str(), &buf)) {
         result = file_id_t::from_stat(buf);
     }
     return result;

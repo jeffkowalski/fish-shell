@@ -4,7 +4,7 @@ set ::env(fish_escape_delay_ms) 10
 spawn $fish_key_reader -c
 
 # Do we get the expected startup prompt?
-expect -ex "Press a key" {
+expect -ex "Press a key:" {
     puts "saw expected startup prompt"
 } unmatched {
     puts stderr "didn't see expected startup prompt"
@@ -31,7 +31,7 @@ expect -ex "char: \\u1234\r\nbind \\e\\u1234 'do something'\r\n" {
 # Is a NULL char echoed correctly?
 sleep 0.020
 send -null
-expect -ex "char: \\c@\r\nbind \\c@ 'do something'\r\n" {
+expect -ex "char: \\c@\r\nbind -k nul 'do something'\r\n" {
     puts "\\c@ handled"
 } unmatched {
     puts stderr "\\c@ not handled"

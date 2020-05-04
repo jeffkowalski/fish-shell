@@ -1,14 +1,12 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 # Script to produce an OS X installer .pkg and .app(.zip)
 
-VERSION=`git describe --always --dirty 2>/dev/null`
+VERSION=$(git describe --always --dirty 2>/dev/null)
 if test -z "$VERSION" ; then
   echo "Could not get version from git"
-  VERSION=`sed -E -n 's/^.*PACKAGE_VERSION "([0-9a-z.\-]+)"/\1/p' osx/config.h`
-  if test -z "$VERSION"; then
-    echo "Could not get version from osx/config.h"
-    exit 1
+  if test -f version; then
+    VERSION=$(cat version)
   fi
 fi
 
@@ -16,26 +14,26 @@ echo "Version is $VERSION"
 
 set -x
 
-make distclean
-
 #Exit on error
 set -e
 
-PKGDIR=`mktemp -d`
+# Respect MAC_CODESIGN_ID and MAC_PRODUCTSIGN_ID, or default for ad-hoc.
+# Note the :- means "or default" and the following - is the value.
+MAC_CODESIGN_ID=${MAC_CODESIGN_ID:--}
+MAC_PRODUCTSIGN_ID=${MAC_PRODUCTSIGN_ID:--}
 
+PKGDIR=$(mktemp -d)
+
+SRC_DIR=$PWD
 OUTPUT_PATH=${FISH_ARTEFACT_PATH:-~/fish_built}
 
-mkdir -p $PKGDIR/root $PKGDIR/intermediates $PKGDIR/dst
-xcodebuild install -scheme install_tree -configuration Release DSTROOT=$PKGDIR/root/
-pkgbuild --scripts build_tools/osx_package_scripts --root $PKGDIR/root/ --identifier 'com.ridiculousfish.fish-shell-pkg' --version "$VERSION"  $PKGDIR/intermediates/fish.pkg
-
-productbuild  --package-path $PKGDIR/intermediates --distribution build_tools/osx_distribution.xml --resources build_tools/osx_package_resources/ $OUTPUT_PATH/fish-$VERSION.pkg
-
+mkdir -p "$PKGDIR/build" "$PKGDIR/root" "$PKGDIR/intermediates" "$PKGDIR/dst"
+{ cd "$PKGDIR/build" && cmake -DMAC_INJECT_GET_TASK_ALLOW=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DMAC_CODESIGN_ID="${MAC_CODESIGN_ID}" "$SRC_DIR" && make -j 12 && env DESTDIR="$PKGDIR/root/" make install; }
+pkgbuild --scripts "$SRC_DIR/build_tools/osx_package_scripts" --root "$PKGDIR/root/" --identifier 'com.ridiculousfish.fish-shell-pkg' --version "$VERSION" "$PKGDIR/intermediates/fish.pkg"
+productbuild  --package-path "$PKGDIR/intermediates" --distribution "$SRC_DIR/build_tools/osx_distribution.xml" --resources "$SRC_DIR/build_tools/osx_package_resources/" "$OUTPUT_PATH/fish-$VERSION.pkg"
+productsign --sign "${MAC_PRODUCTSIGN_ID}" "$OUTPUT_PATH/fish-$VERSION.pkg" "$OUTPUT_PATH/fish-$VERSION-signed.pkg" && mv "$OUTPUT_PATH/fish-$VERSION-signed.pkg" "$OUTPUT_PATH/fish-$VERSION.pkg"
 
 # Make the app
-xcodebuild -scheme fish.app -configuration Release DSTROOT=/tmp/fish_app/ SYMROOT=DerivedData/fish/Build/Products
+{ cd "$PKGDIR/build" && make signed_fish_macapp && zip -r "$OUTPUT_PATH/fish-$VERSION.app.zip" fish.app; }
 
-cd DerivedData/fish/Build/Products/Release/
-zip -r $OUTPUT_PATH/fish-$VERSION.app.zip fish.app
-
-rm -r $PKGDIR
+rm -r "$PKGDIR"

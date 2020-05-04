@@ -16,16 +16,16 @@ function __fish_journalctl_is_field
 end
 
 function __fish_journalctl_field_values
-    set -l token (commandline -t | cut -d"=" -f 1)
+    set -l token (commandline -t | string split -f1 =)
     command journalctl -F $token 2>/dev/null | while read value
         echo $token=$value
     end
 end
 
 complete -c journalctl -n "not __fish_journalctl_is_field" -a '(__fish_journalctl_fields)' -d "Journal field" -f
-complete -c journalctl -n "not __fish_journalctl_is_field" -a '(command journalctl -F _EXE 2>/dev/null)' -d "Executable"
-complete -c journalctl -n "not __fish_journalctl_is_field" -a '+' -d "OR"
-complete -c journalctl -n "__fish_journalctl_is_field" -a '(__fish_journalctl_field_values)' -f -r
+complete -c journalctl -n "not __fish_journalctl_is_field" -a '(command journalctl -F _EXE 2>/dev/null)' -d Executable
+complete -c journalctl -n "not __fish_journalctl_is_field" -a '+' -d OR
+complete -c journalctl -n __fish_journalctl_is_field -a '(__fish_journalctl_field_values)' -f -r
 
 complete -c journalctl -f -s h -l help -d 'Prints a short help text and exits'
 complete -c journalctl -f -l version -d 'Prints a short version string and exits'

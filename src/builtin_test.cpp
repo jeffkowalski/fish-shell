@@ -3,26 +3,30 @@
 // Implemented from scratch (yes, really) by way of IEEE 1003.1 as reference.
 #include "config.h"  // IWYU pragma: keep
 
-#include <errno.h>
-#include <stdarg.h>
+#include "builtin.h"
+
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <wchar.h>
 
+#include <cerrno>
 #include <cmath>
+#include <cstdarg>
+#include <cstring>
+#include <cwchar>
+#include <cwctype>
 #include <memory>
 #include <string>
 #include <type_traits>
 #include <utility>
 
-#include "builtin.h"
 #include "common.h"
 #include "io.h"
+#include "parser.h"
 #include "wutil.h"  // IWYU pragma: keep
 
-using std::unique_ptr;
 using std::move;
+using std::unique_ptr;
 
 namespace {
 namespace test_expressions {
@@ -111,53 +115,52 @@ static bool unary_primary_evaluate(test_expressions::token_t token, const wcstri
 
 enum { UNARY_PRIMARY = 1 << 0, BINARY_PRIMARY = 1 << 1 };
 
-static const struct token_info_t {
+struct token_info_t {
     token_t tok;
-    const wchar_t *string;
     unsigned int flags;
-} token_infos[] = {{test_unknown, L"", 0},
-                   {test_bang, L"!", 0},
-                   {test_filetype_b, L"-b", UNARY_PRIMARY},
-                   {test_filetype_c, L"-c", UNARY_PRIMARY},
-                   {test_filetype_d, L"-d", UNARY_PRIMARY},
-                   {test_filetype_e, L"-e", UNARY_PRIMARY},
-                   {test_filetype_f, L"-f", UNARY_PRIMARY},
-                   {test_filetype_G, L"-G", UNARY_PRIMARY},
-                   {test_filetype_g, L"-g", UNARY_PRIMARY},
-                   {test_filetype_h, L"-h", UNARY_PRIMARY},
-                   {test_filetype_k, L"-k", UNARY_PRIMARY},
-                   {test_filetype_L, L"-L", UNARY_PRIMARY},
-                   {test_filetype_O, L"-O", UNARY_PRIMARY},
-                   {test_filetype_p, L"-p", UNARY_PRIMARY},
-                   {test_filetype_S, L"-S", UNARY_PRIMARY},
-                   {test_filesize_s, L"-s", UNARY_PRIMARY},
-                   {test_filedesc_t, L"-t", UNARY_PRIMARY},
-                   {test_fileperm_r, L"-r", UNARY_PRIMARY},
-                   {test_fileperm_u, L"-u", UNARY_PRIMARY},
-                   {test_fileperm_w, L"-w", UNARY_PRIMARY},
-                   {test_fileperm_x, L"-x", UNARY_PRIMARY},
-                   {test_string_n, L"-n", UNARY_PRIMARY},
-                   {test_string_z, L"-z", UNARY_PRIMARY},
-                   {test_string_equal, L"=", BINARY_PRIMARY},
-                   {test_string_not_equal, L"!=", BINARY_PRIMARY},
-                   {test_number_equal, L"-eq", BINARY_PRIMARY},
-                   {test_number_not_equal, L"-ne", BINARY_PRIMARY},
-                   {test_number_greater, L"-gt", BINARY_PRIMARY},
-                   {test_number_greater_equal, L"-ge", BINARY_PRIMARY},
-                   {test_number_lesser, L"-lt", BINARY_PRIMARY},
-                   {test_number_lesser_equal, L"-le", BINARY_PRIMARY},
-                   {test_combine_and, L"-a", 0},
-                   {test_combine_or, L"-o", 0},
-                   {test_paren_open, L"(", 0},
-                   {test_paren_close, L")", 0}};
+};
 
 const token_info_t *token_for_string(const wcstring &str) {
-    for (size_t i = 0; i < sizeof token_infos / sizeof *token_infos; i++) {
-        if (str == token_infos[i].string) {
-            return &token_infos[i];
-        }
-    }
-    return &token_infos[0];  // unknown
+    static const std::map<wcstring, const token_info_t> token_infos = {
+        {L"", {test_unknown, 0}},
+        {L"!", {test_bang, 0}},
+        {L"-b", {test_filetype_b, UNARY_PRIMARY}},
+        {L"-c", {test_filetype_c, UNARY_PRIMARY}},
+        {L"-d", {test_filetype_d, UNARY_PRIMARY}},
+        {L"-e", {test_filetype_e, UNARY_PRIMARY}},
+        {L"-f", {test_filetype_f, UNARY_PRIMARY}},
+        {L"-G", {test_filetype_G, UNARY_PRIMARY}},
+        {L"-g", {test_filetype_g, UNARY_PRIMARY}},
+        {L"-h", {test_filetype_h, UNARY_PRIMARY}},
+        {L"-k", {test_filetype_k, UNARY_PRIMARY}},
+        {L"-L", {test_filetype_L, UNARY_PRIMARY}},
+        {L"-O", {test_filetype_O, UNARY_PRIMARY}},
+        {L"-p", {test_filetype_p, UNARY_PRIMARY}},
+        {L"-S", {test_filetype_S, UNARY_PRIMARY}},
+        {L"-s", {test_filesize_s, UNARY_PRIMARY}},
+        {L"-t", {test_filedesc_t, UNARY_PRIMARY}},
+        {L"-r", {test_fileperm_r, UNARY_PRIMARY}},
+        {L"-u", {test_fileperm_u, UNARY_PRIMARY}},
+        {L"-w", {test_fileperm_w, UNARY_PRIMARY}},
+        {L"-x", {test_fileperm_x, UNARY_PRIMARY}},
+        {L"-n", {test_string_n, UNARY_PRIMARY}},
+        {L"-z", {test_string_z, UNARY_PRIMARY}},
+        {L"=", {test_string_equal, BINARY_PRIMARY}},
+        {L"!=", {test_string_not_equal, BINARY_PRIMARY}},
+        {L"-eq", {test_number_equal, BINARY_PRIMARY}},
+        {L"-ne", {test_number_not_equal, BINARY_PRIMARY}},
+        {L"-gt", {test_number_greater, BINARY_PRIMARY}},
+        {L"-ge", {test_number_greater_equal, BINARY_PRIMARY}},
+        {L"-lt", {test_number_lesser, BINARY_PRIMARY}},
+        {L"-le", {test_number_lesser_equal, BINARY_PRIMARY}},
+        {L"-a", {test_combine_and, 0}},
+        {L"-o", {test_combine_or, 0}},
+        {L"(", {test_paren_open, 0}},
+        {L")", {test_paren_close, 0}}};
+
+    auto t = token_infos.find(str);
+    if (t != token_infos.end()) return &t->second;
+    return &token_infos.find(L"")->second;
 }
 
 // Grammar.
@@ -214,7 +217,7 @@ struct range_t {
 /// Base class for expressions.
 class expression {
    protected:
-    expression(token_t what, range_t where) : token(what), range(std::move(where)) {}
+    expression(token_t what, range_t where) : token(what), range(where) {}
 
    public:
     const token_t token;
@@ -263,7 +266,7 @@ class combining_expression : public expression {
     const std::vector<token_t> combiners;
 
     combining_expression(token_t tok, range_t where, std::vector<unique_ptr<expression>> exprs,
-                         const std::vector<token_t> &combs)
+                         std::vector<token_t> combs)
         : expression(tok, where), subjects(std::move(exprs)), combiners(std::move(combs)) {
         // We should have one more subject than combiner.
         assert(subjects.size() == combiners.size() + 1);
@@ -285,7 +288,7 @@ class parenthetical_expression : public expression {
 };
 
 void test_parser::add_error(const wchar_t *fmt, ...) {
-    assert(fmt != NULL);
+    assert(fmt != nullptr);
     va_list va;
     va_start(va, fmt);
     this->errors.push_back(vformat_string(fmt, va));
@@ -293,12 +296,12 @@ void test_parser::add_error(const wchar_t *fmt, ...) {
 }
 
 unique_ptr<expression> test_parser::error(const wchar_t *fmt, ...) {
-    assert(fmt != NULL);
+    assert(fmt != nullptr);
     va_list va;
     va_start(va, fmt);
     this->errors.push_back(vformat_string(fmt, va));
     va_end(va);
-    return NULL;
+    return nullptr;
 }
 
 unique_ptr<expression> test_parser::parse_unary_expression(unsigned int start, unsigned int end) {
@@ -308,11 +311,11 @@ unique_ptr<expression> test_parser::parse_unary_expression(unsigned int start, u
     token_t tok = token_for_string(arg(start))->tok;
     if (tok == test_bang) {
         unique_ptr<expression> subject(parse_unary_expression(start + 1, end));
-        if (subject.get()) {
+        if (subject) {
             return make_unique<unary_operator>(tok, range_t(start, subject->range.end),
                                                move(subject));
         }
-        return NULL;
+        return nullptr;
     }
     return parse_primary(start, end);
 }
@@ -320,7 +323,7 @@ unique_ptr<expression> test_parser::parse_unary_expression(unsigned int start, u
 /// Parse a combining expression (AND, OR).
 unique_ptr<expression> test_parser::parse_combining_expression(unsigned int start,
                                                                unsigned int end) {
-    if (start >= end) return NULL;
+    if (start >= end) return nullptr;
 
     std::vector<unique_ptr<expression>> subjects;
     std::vector<token_t> combiners;
@@ -360,7 +363,7 @@ unique_ptr<expression> test_parser::parse_combining_expression(unsigned int star
     }
 
     if (subjects.empty()) {
-        return NULL;  // no subjects
+        return nullptr;  // no subjects
     }
     // Our new expression takes ownership of all expressions we created. The token we pass is
     // irrelevant.
@@ -379,7 +382,7 @@ unique_ptr<expression> test_parser::parse_unary_primary(unsigned int start, unsi
 
     // All our unary primaries are prefix, so the operator is at start.
     const token_info_t *info = token_for_string(arg(start));
-    if (!(info->flags & UNARY_PRIMARY)) return NULL;
+    if (!(info->flags & UNARY_PRIMARY)) return nullptr;
 
     return make_unique<unary_primary>(info->tok, range_t(start, start + 2), arg(start + 1));
 }
@@ -413,7 +416,7 @@ unique_ptr<expression> test_parser::parse_binary_primary(unsigned int start, uns
 
     // All our binary primaries are infix, so the operator is at start + 1.
     const token_info_t *info = token_for_string(arg(start + 1));
-    if (!(info->flags & BINARY_PRIMARY)) return NULL;
+    if (!(info->flags & BINARY_PRIMARY)) return nullptr;
 
     return make_unique<binary_primary>(info->tok, range_t(start, start + 3), arg(start),
                                        arg(start + 2));
@@ -421,15 +424,15 @@ unique_ptr<expression> test_parser::parse_binary_primary(unsigned int start, uns
 
 unique_ptr<expression> test_parser::parse_parenthentical(unsigned int start, unsigned int end) {
     // We need at least three arguments: open paren, argument, close paren.
-    if (start + 3 >= end) return NULL;
+    if (start + 3 >= end) return nullptr;
 
     // Must start with an open expression.
     const token_info_t *open_paren = token_for_string(arg(start));
-    if (open_paren->tok != test_paren_open) return NULL;
+    if (open_paren->tok != test_paren_open) return nullptr;
 
     // Parse a subexpression.
     unique_ptr<expression> subexpr = parse_expression(start + 1, end);
-    if (!subexpr) return NULL;
+    if (!subexpr) return nullptr;
 
     // Parse a close paren.
     unsigned close_index = subexpr->range.end;
@@ -452,7 +455,7 @@ unique_ptr<expression> test_parser::parse_primary(unsigned int start, unsigned i
         return error(L"Missing argument at index %u", start);
     }
 
-    unique_ptr<expression> expr = NULL;
+    unique_ptr<expression> expr = nullptr;
     if (!expr) expr = parse_parenthentical(start, end);
     if (!expr) expr = parse_unary_primary(start, end);
     if (!expr) expr = parse_binary_primary(start, end);
@@ -463,7 +466,7 @@ unique_ptr<expression> test_parser::parse_primary(unsigned int start, unsigned i
 // See IEEE 1003.1 breakdown of the behavior for different parameter counts.
 unique_ptr<expression> test_parser::parse_3_arg_expression(unsigned int start, unsigned int end) {
     assert(end - start == 3);
-    unique_ptr<expression> result = NULL;
+    unique_ptr<expression> result = nullptr;
 
     const token_info_t *center_token = token_for_string(arg(start + 1));
     if (center_token->flags & BINARY_PRIMARY) {
@@ -488,12 +491,12 @@ unique_ptr<expression> test_parser::parse_3_arg_expression(unsigned int start, u
 
 unique_ptr<expression> test_parser::parse_4_arg_expression(unsigned int start, unsigned int end) {
     assert(end - start == 4);
-    unique_ptr<expression> result = NULL;
+    unique_ptr<expression> result = nullptr;
 
     token_t first_token = token_for_string(arg(start))->tok;
     if (first_token == test_bang) {
         unique_ptr<expression> subject(parse_3_arg_expression(start + 1, end));
-        if (subject.get()) {
+        if (subject) {
             result = make_unique<unary_operator>(first_token, range_t(start, subject->range.end),
                                                  move(subject));
         }
@@ -514,7 +517,6 @@ unique_ptr<expression> test_parser::parse_expression(unsigned int start, unsigne
     switch (argc) {
         case 0: {
             DIE("argc should not be zero");  // should have been caught by the above test
-            break;
         }
         case 1: {
             return error(L"Missing argument at index %u", start + 1);
@@ -528,7 +530,9 @@ unique_ptr<expression> test_parser::parse_expression(unsigned int start, unsigne
         case 4: {
             return parse_4_arg_expression(start, end);
         }
-        default: { return parse_combining_expression(start, end); }
+        default: {
+            return parse_combining_expression(start, end);
+        }
     }
 }
 
@@ -538,7 +542,8 @@ unique_ptr<expression> test_parser::parse_args(const wcstring_list_t &args, wcst
     assert(args.size() > 1);
 
     test_parser parser(args);
-    unique_ptr<expression> result = parser.parse_expression(0, (unsigned int)args.size());
+    unique_ptr<expression> result =
+        parser.parse_expression(0, static_cast<unsigned int>(args.size()));
 
     // Handle errors.
     // For now we only show the first error.
@@ -556,9 +561,10 @@ unique_ptr<expression> test_parser::parse_args(const wcstring_list_t &args, wcst
         if (result->range.end < args.size()) {
             if (err.empty()) {
                 append_format(err, L"%ls: unexpected argument at index %lu: '%ls'\n", program_name,
-                              (unsigned long)result->range.end, args.at(result->range.end).c_str());
+                              static_cast<unsigned long>(result->range.end),
+                              args.at(result->range.end).c_str());
             }
-            result.reset(NULL);
+            result.reset(nullptr);
         }
     }
 
@@ -622,7 +628,7 @@ bool combining_expression::evaluate(wcstring_list_t &errors) {
     }
 
     errors.push_back(format_string(L"Unknown token type in %s", __func__));
-    return STATUS_INVALID_ARGS;
+    return false;
 }
 
 bool parenthetical_expression::evaluate(wcstring_list_t &errors) {
@@ -634,8 +640,8 @@ static bool parse_double(const wchar_t *arg, double *out_res) {
     // Consume leading spaces.
     while (arg && *arg != L'\0' && iswspace(*arg)) arg++;
     errno = 0;
-    wchar_t *end = NULL;
-    *out_res = wcstod_l(arg, &end, fish_c_locale());
+    wchar_t *end = nullptr;
+    *out_res = fish_wcstod(arg, &end);
     // Consume trailing spaces.
     while (end && *end != L'\0' && iswspace(*end)) end++;
     return errno == 0 && end > arg && *end == L'\0';
@@ -649,7 +655,6 @@ static bool parse_number(const wcstring &arg, number_t *number, wcstring_list_t 
     const wchar_t *argcs = arg.c_str();
     double floating = 0;
     bool got_float = parse_double(argcs, &floating);
-
     errno = 0;
     long long integral = fish_wcstoll(argcs);
     bool got_int = (errno == 0);
@@ -657,18 +662,34 @@ static bool parse_number(const wcstring &arg, number_t *number, wcstring_list_t 
         // Here the value is just an integer; ignore the floating point parse because it may be
         // invalid (e.g. not a representable integer).
         *number = number_t{integral, 0.0};
+
         return true;
-    } else if (got_float) {
+    } else if (got_float && errno != ERANGE && std::isfinite(floating)) {
         // Here we parsed an (in range) floating point value that could not be parsed as an integer.
         // Break the floating point value into base and delta. Ensure that base is <= the floating
         // point value.
+        //
+        // Note that a non-finite number like infinity or NaN doesn't work for us, so we checked
+        // above.
         double intpart = std::floor(floating);
         double delta = floating - intpart;
         *number = number_t{static_cast<long long>(intpart), delta};
+
         return true;
     } else {
         // We could not parse a float or an int.
-        errors.push_back(format_string(_(L"invalid number '%ls'"), arg.c_str()));
+        // Check for special fish_wcsto* value or show standard EINVAL/ERANGE error.
+        if (errno == -1) {
+            errors.push_back(
+                format_string(_(L"Integer %lld in '%ls' followed by non-digit"), integral, argcs));
+        } else if (std::isnan(floating)) {
+            // NaN is an error as far as we're concerned.
+            errors.push_back(_(L"Not a number"));
+        } else if (std::isinf(floating)) {
+            errors.push_back(_(L"Number is infinite"));
+        } else {
+            errors.push_back(format_string(L"%s: '%ls'", std::strerror(errno), argcs));
+        }
         return false;
     }
 }
@@ -809,7 +830,7 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
     // Whether we are invoked with bracket '[' or not.
     wchar_t *program_name = argv[0];
-    const bool is_bracket = !wcscmp(program_name, L"[");
+    const bool is_bracket = !std::wcscmp(program_name, L"[");
 
     size_t argc = 0;
     while (argv[argc + 1]) argc++;
@@ -817,11 +838,12 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     // If we're bracket, the last argument ought to be ]; we ignore it. Note that argc is the number
     // of arguments after the command name; thus argv[argc] is the last argument.
     if (is_bracket) {
-        if (!wcscmp(argv[argc], L"]")) {
+        if (!std::wcscmp(argv[argc], L"]")) {
             // Ignore the closing bracket from now on.
             argc--;
         } else {
             streams.err.append(L"[: the last argument must be ']'\n");
+            builtin_print_error_trailer(parser, streams.err, program_name);
             return STATUS_INVALID_ARGS;
         }
     }
@@ -830,7 +852,7 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     const wcstring_list_t args(argv + 1, argv + 1 + argc);
 
     if (argc == 0) {
-        return STATUS_CMD_ERROR;  // Per 1003.1, exit false.
+        return STATUS_INVALID_ARGS;  // Per 1003.1, exit false.
     } else if (argc == 1) {
         // Per 1003.1, exit true if the arg is non-empty.
         return args.at(0).empty() ? STATUS_CMD_ERROR : STATUS_CMD_OK;
@@ -840,24 +862,23 @@ int builtin_test(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     wcstring err;
     unique_ptr<expression> expr = test_parser::parse_args(args, err, program_name);
     if (!expr) {
-#if 0
-        streams.err.append(L"Oops! test was given args:\n");
-        for (size_t i=0; i < argc; i++) {
-            streams.err.append_format(L"\t%ls\n", args.at(i).c_str());
-        }
-        streams.err.append_format(L"and returned parse error: %ls\n", err.c_str());
-#endif
         streams.err.append(err);
+        builtin_print_error_trailer(parser, streams.err, program_name);
         return STATUS_CMD_ERROR;
     }
 
     wcstring_list_t eval_errors;
     bool result = expr->evaluate(eval_errors);
-    if (!eval_errors.empty() && !should_suppress_stderr_for_tests()) {
-        streams.err.append(L"test returned eval errors:\n");
-        for (size_t i = 0; i < eval_errors.size(); i++) {
-            streams.err.append_format(L"\t%ls\n", eval_errors.at(i).c_str());
+    if (!eval_errors.empty()) {
+        if (!should_suppress_stderr_for_tests()) {
+            for (const auto &eval_error : eval_errors) {
+                streams.err.append_format(L"%ls\n", eval_error.c_str());
+            }
+            // Add a backtrace but not the "see help" message
+            // because this isn't about passing the wrong options.
+            streams.err.append(parser.current_line());
         }
+        return STATUS_INVALID_ARGS;
     }
     return result ? STATUS_CMD_OK : STATUS_CMD_ERROR;
 }

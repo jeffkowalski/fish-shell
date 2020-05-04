@@ -1,9 +1,8 @@
 __fish_make_completion_signals
 for i in $__kill_signals
-	set number (echo $i | cut -d " " -f 1)
-	set name (echo $i | cut -d " " -f 2)
-	complete -c fuser -o $number -d $name
-	complete -c fuser -o $name -d $name
+    string split -f 1,2 " " -- $i | read --line number name
+    complete -c fuser -o $number -d $name
+    complete -c fuser -o $name -d $name
 end
 
 complete -c fuser -s a -l all -d 'Show all files specified on the command line'

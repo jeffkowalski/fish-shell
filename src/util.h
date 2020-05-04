@@ -2,18 +2,6 @@
 #ifndef FISH_UTIL_H
 #define FISH_UTIL_H
 
-/// Returns the larger of two ints.
-template <typename T>
-inline T maxi(T a, T b) {
-    return a > b ? a : b;
-}
-
-/// Returns the smaller of two ints.
-template <typename T>
-inline T mini(T a, T b) {
-    return a < b ? a : b;
-}
-
 /// Compares two wide character strings with an (arguably) intuitive ordering. This function tries
 /// to order strings in a way which is intuitive to humans with regards to sorting strings
 /// containing numbers.
@@ -42,6 +30,9 @@ inline T mini(T a, T b) {
 /// not arbitrary, but the names 'file1', 'File2' and 'file3' will still be sorted in the order
 /// given above.
 int wcsfilecmp(const wchar_t *a, const wchar_t *b);
+
+/// wcsfilecmp, but frozen in time for glob usage.
+int wcsfilecmp_glob(const wchar_t *a, const wchar_t *b);
 
 /// Get the current time in microseconds since Jan 1, 1970.
 long long get_time();

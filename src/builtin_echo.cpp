@@ -1,11 +1,12 @@
 // Implementation of the echo builtin.
 #include "config.h"  // IWYU pragma: keep
 
-#include <limits.h>
-#include <stddef.h>
+#include "builtin_echo.h"
+
+#include <climits>
+#include <cstddef>
 
 #include "builtin.h"
-#include "builtin_echo.h"
 #include "common.h"
 #include "fallback.h"  // IWYU pragma: keep
 #include "io.h"
@@ -17,8 +18,8 @@ struct echo_cmd_opts_t {
     bool print_spaces = true;
     bool interpret_special_chars = false;
 };
-static const wchar_t *short_options = L"+:Eens";
-static const struct woption *long_options = NULL;
+static const wchar_t *const short_options = L"+:Eens";
+static const struct woption *const long_options = nullptr;
 
 static int parse_cmd_opts(echo_cmd_opts_t &opts, int *optind, int argc, wchar_t **argv,
                           parser_t &parser, io_streams_t &streams) {
@@ -27,7 +28,7 @@ static int parse_cmd_opts(echo_cmd_opts_t &opts, int *optind, int argc, wchar_t 
     wchar_t *cmd = argv[0];
     int opt;
     wgetopter_t w;
-    while ((opt = w.wgetopt_long(argc, argv, short_options, long_options, NULL)) != -1) {
+    while ((opt = w.wgetopt_long(argc, argv, short_options, long_options, nullptr)) != -1) {
         switch (opt) {
             case 'n': {
                 opts.print_newline = false;
@@ -55,7 +56,6 @@ static int parse_cmd_opts(echo_cmd_opts_t &opts, int *optind, int argc, wchar_t 
             }
             default: {
                 DIE("unexpected retval from wgetopt_long");
-                break;
             }
         }
     }
@@ -89,7 +89,9 @@ static unsigned int builtin_echo_digit(wchar_t wc, unsigned int base) {
             return 6;
         case L'7':
             return 7;
-        default: { break; }
+        default: {
+            break;
+        }
     }
 
     if (base != 16) return UINT_MAX;
@@ -117,7 +119,9 @@ static unsigned int builtin_echo_digit(wchar_t wc, unsigned int base) {
         case L'f':
         case L'F':
             return 15;
-        default: { break; }
+        default: {
+            break;
+        }
     }
 
     return UINT_MAX;
@@ -189,7 +193,7 @@ int builtin_echo(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     bool continue_output = true;
 
     const wchar_t *const *args_to_echo = argv + optind;
-    for (size_t idx = 0; continue_output && args_to_echo[idx] != NULL; idx++) {
+    for (size_t idx = 0; continue_output && args_to_echo[idx] != nullptr; idx++) {
         if (opts.print_spaces && idx > 0) {
             streams.out.push_back(' ');
         }

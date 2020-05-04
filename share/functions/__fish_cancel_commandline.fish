@@ -1,5 +1,8 @@
 # This is meant to be bound to something like \cC.
 function __fish_cancel_commandline
+    # Close the pager if it's open (#4298)
+    commandline -f cancel
+
     set -l cmd (commandline)
     if test -n "$cmd"
         commandline -C 1000000
@@ -16,6 +19,9 @@ function __fish_cancel_commandline
             echo ""
         end
         commandline ""
-        commandline -f repaint
+        emit fish_cancel
     end
+    # Repaint even if we haven't cancelled anything,
+    # so the prompt refreshes and the terminal scrolls to it.
+    commandline -f repaint
 end

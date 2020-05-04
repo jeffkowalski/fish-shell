@@ -1,7 +1,7 @@
 complete -c feh -l action -s A -x -d "Specify a shell command as action to perform on the image"
 
 for i in (seq 1 9)
-	complete -c feh -l action$i -x -d "Extra action triggered with number key "$i
+    complete -c feh -l action$i -x -d "Extra action triggered with number key "$i
 end
 
 complete -c feh -l auto-zoom -s Z -d "Zoom pictures to screen size"
@@ -45,7 +45,7 @@ complete -c feh -l output-dir -s j -r -d "Save files to given directory"
 complete -c feh -l preload -s p -d "Preload images"
 complete -c feh -l quiet -s q -d "Don't report non-fatal errors"
 complete -c feh -l randomize -s z -d "Randomize file list before displaying"
-complete -c feh -l recursive -s r -d "Recursivly expand any directory"
+complete -c feh -l recursive -s r -d "Recursively expand any directory"
 complete -c feh -l no-recursive -d "Don't recursively expand any directory (default)"
 complete -c feh -l reload -s R -x -d "Reload filelist after given time in second"
 complete -c feh -l reverse -s n -d "Reverse sort order"
@@ -66,7 +66,7 @@ complete -c feh -l zoom -x -a "max fill" -d "Zoom images by given percent when i
 
 # Montage Mode Options
 complete -c feh -l alpha -s a -x -d "Set thumbnails' transparency to given level (0-255)"
-complete -c feh -l bg -s b -r -a "trans" -d "Use given file as background for your montage"
+complete -c feh -l bg -s b -r -a trans -d "Use given file as background for your montage"
 complete -c feh -l ignore-aspect -s X -d "Don't retain thumbnails' aspect ratios"
 complete -c feh -l limit-height -s W -x -d "Limit montage's height"
 complete -c feh -l limit-width -s W -x -d "Limit montage's width"

@@ -1,7 +1,7 @@
 # Use --installed to limit to installed packages only
 function __fish_print_packages
-    argparse --name=__fish_print_packages 'i/installed' -- $argv
-    or return;
+    argparse --name=__fish_print_packages i/installed -- $argv
+    or return
 
     set -l only_installed 1
     if not set -q _flag_installed
@@ -15,9 +15,6 @@ function __fish_print_packages
         case '-**'
             return
     end
-
-    #Get the word 'Package' in the current language
-    set -l package (_ "Package")
 
     if type -q -f apt-cache
         if not set -q only_installed
@@ -49,7 +46,7 @@ function __fish_print_packages
     # Listing /var/db/pkg is a clean alternative.
     if type -q -f pkg_add
         set -l files /var/db/pkg/*
-        string replace '/var/db/pkg/' '' -- $files
+        string replace /var/db/pkg/ '' -- $files
         return
     end
 
@@ -63,26 +60,30 @@ function __fish_print_packages
 
     # Caches for 5 minutes
     if type -q -f pacman
-        set cache_file $XDG_CACHE_HOME/.pac-cache.$USER
-        if test -f $cache_file
-            cat $cache_file
-            set age (math (date +%s) - (stat -c '%Y' $cache_file))
-            set max_age 250
-            if test $age -lt $max_age
-                return
+        if not set -q only_installed
+            set cache_file $XDG_CACHE_HOME/.pac-cache.$USER
+            if test -f $cache_file
+                cat $cache_file
+                set age (math (date +%s) - (stat -c '%Y' $cache_file))
+                set max_age 250
+                if test $age -lt $max_age
+                    return
+                end
             end
+            # prints: <package name>	Package
+            pacman -Ssq | sed -e 's/$/\t'Package'/' >$cache_file &
+            return
+        else
+            pacman -Q | string replace ' ' \t
+            return
         end
-
-        # prints: <package name>	Package
-        pacman -Ssq | sed -e 's/$/\t'$package'/' >$cache_file &
-        return
     end
 
     # Zypper needs caching as it is slow
     if type -q -f zypper
         # Use libzypp cache file if available
         if test -f /var/cache/zypp/solv/@System/solv.idx
-            awk '!/application:|srcpackage:|product:|pattern:|patch:/ {print $1'\t$package'}' /var/cache/zypp/solv/*/solv.idx
+            awk '!/application:|srcpackage:|product:|pattern:|patch:/ {print $1'\tPackage'}' /var/cache/zypp/solv/*/solv.idx
             return
         end
 
@@ -99,7 +100,7 @@ function __fish_print_packages
         end
 
         # Remove package version information from output and pipe into cache file
-        zypper --quiet --non-interactive search --type=package | tail -n +4 | sed -r 's/^. \| ((\w|[-_.])+).*/\1\t'$package'/g' >$cache_file &
+        zypper --quiet --non-interactive search --type=package | tail -n +4 | sed -r 's/^. \| ((\w|[-_.])+).*/\1\t'Package'/g' >$cache_file &
         return
     end
 
@@ -119,7 +120,7 @@ function __fish_print_packages
         end
 
         # Remove package version information from output and pipe into cache file
-        /usr/share/yum-cli/completion-helper.py list all -d 0 -C | sed "s/\..*/\t$package/" >$cache_file &
+        /usr/share/yum-cli/completion-helper.py list all -d 0 -C | sed "s/\..*/\tPackage/" >$cache_file &
         return
     end
 
@@ -141,7 +142,7 @@ function __fish_print_packages
         end
 
         # Remove package version information from output and pipe into cache file
-        rpm -qa | sed -e 's/-[^-]*-[^-]*$/\t'$package'/' >$cache_file &
+        rpm -qa | sed -e 's/-[^-]*-[^-]*$/\t'Package'/' >$cache_file &
         return
     end
 
@@ -221,7 +222,7 @@ function __fish_print_packages
     end
 
     if type -q -f opkg
-        if not set -q only_installed
+        if set -q only_installed
             opkg list-installed 2>/dev/null | sed -r 's/^([a-zA-Z0-9\-]+) - ([a-zA-Z0-9\-]+)/\1\t\2/g'
             return
         else
