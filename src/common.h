@@ -38,6 +38,8 @@
 typedef std::wstring wcstring;
 typedef std::vector<wcstring> wcstring_list_t;
 
+struct termsize_t;
+
 // Maximum number of bytes used by a single utf-8 character.
 #define MAX_UTF8_BYTES 6
 
@@ -288,8 +290,6 @@ wcstring str2wcstring(const std::string &in, size_t len);
 ///
 /// This function decodes illegal character sequences in a reversible way using the private use
 /// area.
-char *wcs2str(const wchar_t *in);
-char *wcs2str(const wcstring &in);
 std::string wcs2string(const wcstring &input);
 
 enum fuzzy_match_type_t {
@@ -646,24 +646,8 @@ bool unescape_string(const wchar_t *input, wcstring *output, unescape_flags_t es
 bool unescape_string(const wcstring &input, wcstring *output, unescape_flags_t escape_special,
                      escape_string_style_t style = STRING_STYLE_SCRIPT);
 
-/// Returns the width of the terminal window, so that not all functions that use these values
-/// continually have to keep track of it separately.
-///
-/// Only works if common_handle_winch is registered to handle winch signals.
-int common_get_width();
-
-/// Returns the height of the terminal window, so that not all functions that use these values
-/// continually have to keep track of it separatly.
-///
-/// Only works if common_handle_winch is registered to handle winch signals.
-int common_get_height();
-
-/// Handle a window change event by looking up the new window size and saving it in an internal
-/// variable used by common_get_wisth and common_get_height().
-void common_handle_winch(int signal);
-
-/// Write the given paragraph of output, redoing linebreaks to fit the current screen.
-wcstring reformat_for_screen(const wcstring &msg);
+/// Write the given paragraph of output, redoing linebreaks to fit \p termsize.
+wcstring reformat_for_screen(const wcstring &msg, const termsize_t &termsize);
 
 /// Print a short message about how to file a bug report to stderr.
 void bugreport();
@@ -684,8 +668,8 @@ void configure_thread_assertions_for_testing();
 void setup_fork_guards(void);
 
 /// Save the value of tcgetpgrp so we can restore it on exit.
-void save_term_foreground_process_group(void);
-void restore_term_foreground_process_group(void);
+void save_term_foreground_process_group();
+void restore_term_foreground_process_group_for_exit();
 
 /// Return whether we are the child of a fork.
 bool is_forked_child(void);
@@ -773,16 +757,6 @@ static const wchar_t *enum_to_str(T enum_val, const enum_map<T> map[]) {
 void redirect_tty_output();
 
 std::string get_path_to_tmp_dir();
-
-// Minimum allowed terminal size and default size if the detected size is not reasonable.
-#define MIN_TERM_COL 20
-#define MIN_TERM_ROW 2
-#define DFLT_TERM_COL 80
-#define DFLT_TERM_ROW 24
-#define DFLT_TERM_COL_STR L"80"
-#define DFLT_TERM_ROW_STR L"24"
-void invalidate_termsize(bool invalidate_vars = false);
-struct winsize get_current_winsize();
 
 bool valid_var_name_char(wchar_t chr);
 bool valid_var_name(const wcstring &str);

@@ -40,6 +40,7 @@
 #include <utility>
 #include <vector>
 
+#include "ast.h"
 #include "autoload.h"
 #include "builtin.h"
 #include "color.h"
@@ -73,8 +74,8 @@
 #include "redirection.h"
 #include "screen.h"
 #include "signal.h"
+#include "termsize.h"
 #include "timer.h"
-#include "tnode.h"
 #include "tokenizer.h"
 #include "topic_monitor.h"
 #include "utf8.h"
@@ -85,6 +86,11 @@
 
 static const char *const *s_arguments;
 static int s_test_run_count = 0;
+
+#define system_assert(command)                                     \
+    if (system(command)) {                                         \
+        err(L"Non-zero result on line %d: %s", __LINE__, command); \
+    }
 
 // Indicate if we should test the given function. Either we test everything (all arguments) or we
 // run only tests that have a prefix in s_arguments.
@@ -348,13 +354,13 @@ static void test_unescape_sane() {
         {L"'\\143'", L"\\143"},       {L"\\n", L"\n"}  // \n normally becomes newline
     };
     wcstring output;
-    for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
-        bool ret = unescape_string(tests[i].input, &output, UNESCAPE_DEFAULT);
+    for (const auto &test : tests) {
+        bool ret = unescape_string(test.input, &output, UNESCAPE_DEFAULT);
         if (!ret) {
-            err(L"Failed to unescape '%ls'\n", tests[i].input);
-        } else if (output != tests[i].expected) {
-            err(L"In unescaping '%ls', expected '%ls' but got '%ls'\n", tests[i].input,
-                tests[i].expected, output.c_str());
+            err(L"Failed to unescape '%ls'\n", test.input);
+        } else if (output != test.expected) {
+            err(L"In unescaping '%ls', expected '%ls' but got '%ls'\n", test.input, test.expected,
+                output.c_str());
         }
     }
 
@@ -450,11 +456,10 @@ static void test_format() {
         const char *expected;
     } tests[] = {{0, "empty"},  {1, "1B"},       {2, "2B"},
                  {1024, "1kB"}, {1870, "1.8kB"}, {4322911, "4.1MB"}};
-    size_t i;
-    for (i = 0; i < sizeof tests / sizeof *tests; i++) {
+    for (const auto &test : tests) {
         char buff[128];
-        format_size_safe(buff, tests[i].val);
-        do_test(!std::strcmp(buff, tests[i].expected));
+        format_size_safe(buff, test.val);
+        do_test(!std::strcmp(buff, test.expected));
     }
 
     for (int j = -129; j <= 129; j++) {
@@ -491,42 +496,25 @@ static char *str2hex(const char *input) {
 /// Test wide/narrow conversion by creating random strings and verifying that the original string
 /// comes back through double conversion.
 static void test_convert() {
-    int i;
-    std::vector<char> sb{};
-
     say(L"Testing wide/narrow string conversion");
-
-    for (i = 0; i < ESCAPE_TEST_COUNT; i++) {
-        const char *o, *n;
-        char c;
-
-        sb.clear();
+    for (int i = 0; i < ESCAPE_TEST_COUNT; i++) {
+        std::string orig{};
         while (random() % ESCAPE_TEST_LENGTH) {
-            c = random();
-            sb.push_back(c);
-        }
-        c = 0;
-        sb.push_back(c);
-
-        o = &sb.at(0);
-        const wcstring w = str2wcstring(o);
-        n = wcs2str(w);
-
-        if (!o || !n) {
-            err(L"Line %d - Conversion cycle of string %s produced null pointer on %s", __LINE__, o,
-                L"wcs2str");
+            char c = random();
+            orig.push_back(c);
         }
 
-        if (std::strcmp(o, n)) {
-            char *o2 = str2hex(o);
-            char *n2 = str2hex(n);
+        const wcstring w = str2wcstring(orig);
+        std::string n = wcs2string(w);
+        if (orig != n) {
+            char *o2 = str2hex(orig.c_str());
+            char *n2 = str2hex(n.c_str());
             err(L"Line %d - %d: Conversion cycle of string:\n%4d chars: %s\n"
                 L"produced different string:\n%4d chars: %s",
-                __LINE__, i, std::strlen(o), o2, std::strlen(n), n2);
+                __LINE__, i, orig.size(), o2, n.size(), n2);
             free(o2);
             free(n2);
         }
-        free((void *)n);
     }
 }
 
@@ -978,132 +966,137 @@ static void test_debounce_timeout() {
 }
 
 static parser_test_error_bits_t detect_argument_errors(const wcstring &src) {
-    parse_node_tree_t tree;
-    if (!parse_tree_from_string(src, parse_flag_none, &tree, NULL, symbol_argument_list)) {
+    using namespace ast;
+    auto ast = ast_t::parse_argument_list(src, parse_flag_none);
+    if (ast.errored()) {
         return PARSER_TEST_ERROR;
     }
-
-    assert(!tree.empty());  //!OCLINT(multiple unary operator)
-    tnode_t<grammar::argument_list> arg_list{&tree, &tree.at(0)};
-    auto first_arg = arg_list.next_in_list<grammar::argument>();
-    return parse_util_detect_errors_in_argument(first_arg, first_arg.get_source(src));
+    const ast::argument_t *first_arg =
+        ast.top()->as<freestanding_argument_list_t>()->arguments.at(0);
+    if (!first_arg) {
+        err(L"Failed to parse an argument");
+        return 0;
+    }
+    return parse_util_detect_errors_in_argument(*first_arg, first_arg->source(src));
 }
 
 /// Test the parser.
 static void test_parser() {
     say(L"Testing parser");
 
-    auto parser = parser_t::principal_parser().shared();
+    auto detect_errors = [](const wcstring &s) {
+        return parse_util_detect_errors(s, nullptr, true /* accept incomplete */);
+    };
 
     say(L"Testing block nesting");
-    if (!parse_util_detect_errors(L"if; end")) {
+    if (!detect_errors(L"if; end")) {
         err(L"Incomplete if statement undetected");
     }
-    if (!parse_util_detect_errors(L"if test; echo")) {
+    if (!detect_errors(L"if test; echo")) {
         err(L"Missing end undetected");
     }
-    if (!parse_util_detect_errors(L"if test; end; end")) {
+    if (!detect_errors(L"if test; end; end")) {
         err(L"Unbalanced end undetected");
     }
 
     say(L"Testing detection of invalid use of builtin commands");
-    if (!parse_util_detect_errors(L"case foo")) {
+    if (!detect_errors(L"case foo")) {
         err(L"'case' command outside of block context undetected");
     }
-    if (!parse_util_detect_errors(L"switch ggg; if true; case foo;end;end")) {
+    if (!detect_errors(L"switch ggg; if true; case foo;end;end")) {
         err(L"'case' command outside of switch block context undetected");
     }
-    if (!parse_util_detect_errors(L"else")) {
+    if (!detect_errors(L"else")) {
         err(L"'else' command outside of conditional block context undetected");
     }
-    if (!parse_util_detect_errors(L"else if")) {
+    if (!detect_errors(L"else if")) {
         err(L"'else if' command outside of conditional block context undetected");
     }
-    if (!parse_util_detect_errors(L"if false; else if; end")) {
+    if (!detect_errors(L"if false; else if; end")) {
         err(L"'else if' missing command undetected");
     }
 
-    if (!parse_util_detect_errors(L"break")) {
+    if (!detect_errors(L"break")) {
         err(L"'break' command outside of loop block context undetected");
     }
 
-    if (parse_util_detect_errors(L"break --help")) {
+    if (detect_errors(L"break --help")) {
         err(L"'break --help' incorrectly marked as error");
     }
 
-    if (!parse_util_detect_errors(L"while false ; function foo ; break ; end ; end ")) {
+    if (!detect_errors(L"while false ; function foo ; break ; end ; end ")) {
         err(L"'break' command inside function allowed to break from loop outside it");
     }
 
-    if (!parse_util_detect_errors(L"exec ls|less") || !parse_util_detect_errors(L"echo|return")) {
+    if (!detect_errors(L"exec ls|less") || !detect_errors(L"echo|return")) {
         err(L"Invalid pipe command undetected");
     }
 
-    if (parse_util_detect_errors(L"for i in foo ; switch $i ; case blah ; break; end; end ")) {
+    if (detect_errors(L"for i in foo ; switch $i ; case blah ; break; end; end ")) {
         err(L"'break' command inside switch falsely reported as error");
     }
 
-    if (parse_util_detect_errors(L"or cat | cat") || parse_util_detect_errors(L"and cat | cat")) {
+    if (detect_errors(L"or cat | cat") || detect_errors(L"and cat | cat")) {
         err(L"boolean command at beginning of pipeline falsely reported as error");
     }
 
-    if (!parse_util_detect_errors(L"cat | and cat")) {
+    if (!detect_errors(L"cat | and cat")) {
         err(L"'and' command in pipeline not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"cat | or cat")) {
+    if (!detect_errors(L"cat | or cat")) {
         err(L"'or' command in pipeline not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"cat | exec") || !parse_util_detect_errors(L"exec | cat")) {
+    if (!detect_errors(L"cat | exec") || !detect_errors(L"exec | cat")) {
         err(L"'exec' command in pipeline not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"begin ; end arg")) {
+    if (!detect_errors(L"begin ; end arg")) {
         err(L"argument to 'end' not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"switch foo ; end arg")) {
+    if (!detect_errors(L"switch foo ; end arg")) {
         err(L"argument to 'end' not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"if true; else if false ; end arg")) {
+    if (!detect_errors(L"if true; else if false ; end arg")) {
         err(L"argument to 'end' not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"if true; else ; end arg")) {
+    if (!detect_errors(L"if true; else ; end arg")) {
         err(L"argument to 'end' not reported as error");
     }
 
-    if (parse_util_detect_errors(L"begin ; end 2> /dev/null")) {
+    if (detect_errors(L"begin ; end 2> /dev/null")) {
         err(L"redirection after 'end' wrongly reported as error");
     }
 
-    if (parse_util_detect_errors(L"true | ") != PARSER_TEST_INCOMPLETE) {
+    if (detect_errors(L"true | ") != PARSER_TEST_INCOMPLETE) {
         err(L"unterminated pipe not reported properly");
     }
 
-    if (parse_util_detect_errors(L"echo (\nfoo\n  bar") != PARSER_TEST_INCOMPLETE) {
-        err(L"unterminated multiline subhsell not reported properly");
+    if (detect_errors(L"echo (\nfoo\n  bar") != PARSER_TEST_INCOMPLETE) {
+        err(L"unterminated multiline subshell not reported properly");
     }
 
-    if (parse_util_detect_errors(L"begin ; true ; end | ") != PARSER_TEST_INCOMPLETE) {
+    if (detect_errors(L"begin ; true ; end | ") != PARSER_TEST_INCOMPLETE) {
         err(L"unterminated pipe not reported properly");
     }
 
-    if (parse_util_detect_errors(L" | true ") != PARSER_TEST_ERROR) {
+    if (detect_errors(L" | true ") != PARSER_TEST_ERROR) {
         err(L"leading pipe not reported properly");
     }
 
-    if (parse_util_detect_errors(L"true | # comment") != PARSER_TEST_INCOMPLETE) {
+    if (detect_errors(L"true | # comment") != PARSER_TEST_INCOMPLETE) {
         err(L"comment after pipe not reported as incomplete");
     }
 
-    if (parse_util_detect_errors(L"true | # comment \n false ")) {
+    if (detect_errors(L"true | # comment \n false ")) {
         err(L"comment and newline after pipe wrongly reported as error");
     }
 
-    if (parse_util_detect_errors(L"true | ; false ") != PARSER_TEST_ERROR) {
+    if (detect_errors(L"true | ; false ") != PARSER_TEST_ERROR) {
         err(L"semicolon after pipe not detected as error");
     }
 
@@ -1141,59 +1134,59 @@ static void test_parser() {
         err(L"Bad escape in nested command substitution not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"false & ; and cat")) {
+    if (!detect_errors(L"false & ; and cat")) {
         err(L"'and' command after background not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"true & ; or cat")) {
+    if (!detect_errors(L"true & ; or cat")) {
         err(L"'or' command after background not reported as error");
     }
 
-    if (parse_util_detect_errors(L"true & ; not cat")) {
+    if (detect_errors(L"true & ; not cat")) {
         err(L"'not' command after background falsely reported as error");
     }
 
-    if (!parse_util_detect_errors(L"if true & ; end")) {
+    if (!detect_errors(L"if true & ; end")) {
         err(L"backgrounded 'if' conditional not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"if false; else if true & ; end")) {
+    if (!detect_errors(L"if false; else if true & ; end")) {
         err(L"backgrounded 'else if' conditional not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"while true & ; end")) {
+    if (!detect_errors(L"while true & ; end")) {
         err(L"backgrounded 'while' conditional not reported as error");
     }
 
-    if (!parse_util_detect_errors(L"true | || false")) {
+    if (!detect_errors(L"true | || false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"|| false")) {
+    if (!detect_errors(L"|| false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"&& false")) {
+    if (!detect_errors(L"&& false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"true ; && false")) {
+    if (!detect_errors(L"true ; && false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"true ; || false")) {
+    if (!detect_errors(L"true ; || false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"true || && false")) {
+    if (!detect_errors(L"true || && false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"true && || false")) {
+    if (!detect_errors(L"true && || false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
-    if (!parse_util_detect_errors(L"true && && false")) {
+    if (!detect_errors(L"true && && false")) {
         err(L"bogus boolean statement error not detected on line %d", __LINE__);
     }
 
@@ -1201,6 +1194,7 @@ static void test_parser() {
 
     // Ensure that we don't crash on infinite self recursion and mutual recursion. These must use
     // the principal parser because we cannot yet execute jobs on other parsers.
+    auto parser = parser_t::principal_parser().shared();
     say(L"Testing recursion detection");
     parser->eval(L"function recursive ; recursive ; end ; recursive; ", io_chain_t());
 #if 0
@@ -1245,7 +1239,6 @@ static void test_cancellation() {
     say(L"Testing Ctrl-C cancellation. If this hangs, that's a bug!");
 
     // Enable fish's signal handling here.
-    parser_t &parser = parser_t::principal_parser();
     signal_set_handlers(true);
 
     // This tests that we can correctly ctrl-C out of certain loop constructs, and that nothing gets
@@ -1265,78 +1258,124 @@ static void test_cancellation() {
 
     // Ensure that we don't think we should cancel.
     reader_reset_interrupted();
-    parser.clear_cancel();
+    signal_clear_cancel();
 }
+
+namespace indent_tests {
+// A struct which is either text or a new indent.
+struct segment_t {
+    // The indent to set
+    int indent{0};
+    const char *text{nullptr};
+
+    /* implicit */ segment_t(int indent) : indent(indent) {}
+    /* implicit */ segment_t(const char *text) : text(text) {}
+};
+
+using test_t = std::vector<segment_t>;
+using test_list_t = std::vector<test_t>;
+
+// Add a new test to a test list based on a series of ints and texts.
+template <typename... Types>
+void add_test(test_list_t *v, const Types &... types) {
+    segment_t segments[] = {types...};
+    v->emplace_back(std::begin(segments), std::end(segments));
+}
+}  // namespace indent_tests
 
 static void test_indents() {
     say(L"Testing indents");
+    using namespace indent_tests;
 
-    // Here are the components of our source and the indents we expect those to be.
-    struct indent_component_t {
-        const wchar_t *txt;
-        int indent;
-    };
+    test_list_t tests;
+    add_test(&tests,              //
+             0, "if", 1, " foo",  //
+             0, "\nend");
 
-    const indent_component_t components1[] = {{L"if foo", 0}, {L"end", 0}, {NULL, -1}};
+    add_test(&tests,              //
+             0, "if", 1, " foo",  //
+             1, "\nfoo",          //
+             0, "\nend");
 
-    const indent_component_t components2[] = {{L"if foo", 0},
-                                              {L"", 1},  // trailing newline!
-                                              {NULL, -1}};
+    add_test(&tests,                //
+             0, "if", 1, " foo",    //
+             1, "\nif", 2, " bar",  //
+             1, "\nend",            //
+             0, "\nend");
 
-    const indent_component_t components3[] = {{L"if foo", 0},
-                                              {L"foo", 1},
-                                              {L"end", 0},  // trailing newline!
-                                              {NULL, -1}};
+    add_test(&tests,                //
+             0, "if", 1, " foo",    //
+             1, "\nif", 2, " bar",  //
+             1, "\n",  // FIXME: this should be 2 but parse_util_compute_indents has a bug
+             1, "\nend\n");
 
-    const indent_component_t components4[] = {{L"if foo", 0}, {L"if bar", 1}, {L"end", 1},
-                                              {L"end", 0},    {L"", 0},       {NULL, -1}};
+    add_test(&tests,                //
+             0, "if", 1, " foo",    //
+             1, "\nif", 2, " bar",  //
+             2, "\n");
 
-    const indent_component_t components5[] = {{L"if foo", 0}, {L"if bar", 1}, {L"", 2}, {NULL, -1}};
+    add_test(&tests,      //
+             0, "begin",  //
+             1, "\nfoo",  //
+             1, "\n");
 
-    const indent_component_t components6[] = {{L"begin", 0}, {L"foo", 1}, {L"", 1}, {NULL, -1}};
+    add_test(&tests,      //
+             0, "begin",  //
+             1, "\n;",    //
+             0, "end",    //
+             0, "\nfoo", 0, "\n");
 
-    const indent_component_t components7[] = {{L"begin", 0}, {L";", 1}, {L"end", 0},
-                                              {L"foo", 0},   {L"", 0},  {NULL, -1}};
+    add_test(&tests,      //
+             0, "begin",  //
+             1, "\n;",    //
+             0, "end",    //
+             0, "\nfoo", 0, "\n");
 
-    const indent_component_t components8[] = {{L"if foo", 0}, {L"if bar", 1}, {L"baz", 2},
-                                              {L"end", 1},    {L"", 1},       {NULL, -1}};
+    add_test(&tests,                //
+             0, "if", 1, " foo",    //
+             1, "\nif", 2, " bar",  //
+             2, "\nbaz",            //
+             1, "\nend", 1, "\n");
 
-    const indent_component_t components9[] = {{L"switch foo", 0}, {L"", 1}, {NULL, -1}};
+    add_test(&tests,           //
+             0, "switch foo",  //
+             1, "\n"           //
+    );
 
-    const indent_component_t components10[] = {
-        {L"switch foo", 0}, {L"case bar", 1}, {L"case baz", 1}, {L"quux", 2}, {L"", 2}, {NULL, -1}};
+    add_test(&tests,           //
+             0, "switch foo",  //
+             1, "\ncase bar",  //
+             1, "\ncase baz",  //
+             2, "\nquux",      //
+             2, "\nquux"       //
+    );
 
-    const indent_component_t components11[] = {{L"switch foo", 0},
-                                               {L"cas", 1},  // parse error indentation handling
-                                               {NULL, -1}};
+    add_test(&tests,           //
+             0, "switch foo",  //
+             1, "\ncas"        // parse error indentation handling
+    );
 
-    const indent_component_t components12[] = {{L"while false", 0},
-                                               {L"# comment", 1},   // comment indentation handling
-                                               {L"command", 1},     // comment indentation handling
-                                               {L"# comment2", 1},  // comment indentation handling
-                                               {NULL, -1}};
+    add_test(&tests,                   //
+             0, "while", 1, " false",  //
+             1, "\n# comment",         // comment indentation handling
+             1, "\ncommand",           //
+             1, "\n# comment 2"        //
+    );
 
-    const indent_component_t *tests[] = {components1, components2,  components3,  components4,
-                                         components5, components6,  components7,  components8,
-                                         components9, components10, components11, components12};
-    for (size_t which = 0; which < sizeof tests / sizeof *tests; which++) {
-        const indent_component_t *components = tests[which];
-        // Count how many we have.
-        size_t component_count = 0;
-        while (components[component_count].txt != NULL) {
-            component_count++;
-        }
-
-        // Generate the expected indents.
+    int test_idx = 0;
+    for (const test_t &test : tests) {
+        // Construct the input text and expected indents.
         wcstring text;
         std::vector<int> expected_indents;
-        for (size_t i = 0; i < component_count; i++) {
-            if (i > 0) {
-                text.push_back(L'\n');
-                expected_indents.push_back(components[i].indent);
+        int current_indent = 0;
+        for (const segment_t &segment : test) {
+            if (!segment.text) {
+                current_indent = segment.indent;
+            } else {
+                wcstring tmp = str2wcstring(segment.text);
+                text.append(tmp);
+                expected_indents.insert(expected_indents.end(), tmp.size(), current_indent);
             }
-            text.append(components[i].txt);
-            expected_indents.resize(text.size(), components[i].indent);
         }
         do_test(expected_indents.size() == text.size());
 
@@ -1350,11 +1389,13 @@ static void test_indents() {
         do_test(expected_indents.size() == indents.size());
         for (size_t i = 0; i < text.size(); i++) {
             if (expected_indents.at(i) != indents.at(i)) {
-                err(L"Wrong indent at index %lu in test #%lu (expected %d, actual %d):\n%ls\n", i,
-                    which + 1, expected_indents.at(i), indents.at(i), text.c_str());
-                break;  // don't keep showing errors for the rest of the line
+                err(L"Wrong indent at index %lu (char 0x%02x) in test #%lu (expected %d, actual "
+                    L"%d):\n%ls\n",
+                    i, text.at(i), test_idx, expected_indents.at(i), indents.at(i), text.c_str());
+                break;  // don't keep showing errors for the rest of the test
             }
         }
+        test_idx++;
     }
 }
 
@@ -1686,28 +1727,30 @@ static void test_feature_flags() {
 
 static void test_escape_sequences() {
     say(L"Testing escape_sequences");
-    if (escape_code_length(L"") != 0) err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"abcd") != 0)
+    layout_cache_t lc;
+    if (lc.escape_code_length(L"") != 0)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B[2J") != 4)
+    if (lc.escape_code_length(L"abcd") != 0)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B[38;5;123mABC") != std::strlen("\x1B[38;5;123m"))
+    if (lc.escape_code_length(L"\x1B[2J") != 4)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B@") != 2)
+    if (lc.escape_code_length(L"\x1B[38;5;123mABC") != std::strlen("\x1B[38;5;123m"))
+        err(L"test_escape_sequences failed on line %d\n", __LINE__);
+    if (lc.escape_code_length(L"\x1B@") != 2)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
 
     // iTerm2 escape sequences.
-    if (escape_code_length(L"\x1B]50;CurrentDir=test/foo\x07NOT_PART_OF_SEQUENCE") != 25)
+    if (lc.escape_code_length(L"\x1B]50;CurrentDir=test/foo\x07NOT_PART_OF_SEQUENCE") != 25)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B]50;SetMark\x07NOT_PART_OF_SEQUENCE") != 13)
+    if (lc.escape_code_length(L"\x1B]50;SetMark\x07NOT_PART_OF_SEQUENCE") != 13)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B]6;1;bg;red;brightness;255\x07NOT_PART_OF_SEQUENCE") != 28)
+    if (lc.escape_code_length(L"\x1B]6;1;bg;red;brightness;255\x07NOT_PART_OF_SEQUENCE") != 28)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B]Pg4040ff\x1B\\NOT_PART_OF_SEQUENCE") != 12)
+    if (lc.escape_code_length(L"\x1B]Pg4040ff\x1B\\NOT_PART_OF_SEQUENCE") != 12)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B]blahblahblah\x1B\\") != 16)
+    if (lc.escape_code_length(L"\x1B]blahblahblah\x1B\\") != 16)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
-    if (escape_code_length(L"\x1B]blahblahblah\x07") != 15)
+    if (lc.escape_code_length(L"\x1B]blahblahblah\x07") != 15)
         err(L"test_escape_sequences failed on line %d\n", __LINE__);
 }
 
@@ -1724,7 +1767,7 @@ class test_lru_t : public lru_cache_t<test_lru_t, int> {
 
     std::vector<value_type> values() const {
         std::vector<value_type> result;
-        for (const auto &p : *this) {
+        for (auto p : *this) {
             result.push_back(p);
         }
         return result;
@@ -1732,7 +1775,7 @@ class test_lru_t : public lru_cache_t<test_lru_t, int> {
 
     std::vector<int> ints() const {
         std::vector<int> result;
-        for (const auto &p : *this) {
+        for (auto p : *this) {
             result.push_back(p.second);
         }
         return result;
@@ -1873,12 +1916,11 @@ static bool expand_test(const wchar_t *in, expand_flags_t flags, ...) {
             }
             msg += L"], found [";
             first = true;
-            for (completion_list_t::const_iterator it = output.begin(), end = output.end();
-                 it != end; ++it) {
+            for (const auto &completion : output) {
                 if (!first) msg += L", ";
                 first = false;
                 msg += '"';
-                msg += it->completion;
+                msg += completion.completion;
                 msg += '"';
             }
             msg += L"]";
@@ -2198,7 +2240,7 @@ static void test_pager_navigation() {
 
     pager_t pager;
     pager.set_completions(completions);
-    pager.set_term_size(80, 24);
+    pager.set_term_size(termsize_t::defaults());
     page_rendering_t render = pager.render();
 
     if (render.term_width != 80) err(L"Wrong term width");
@@ -2272,14 +2314,14 @@ static void test_pager_navigation() {
 }
 
 struct pager_layout_testcase_t {
-    size_t width;
+    int width;
     const wchar_t *expected;
 
     // Run ourselves as a test case.
     // Set our data on the pager, and then check the rendering.
     // We should have one line, and it should have our expected text.
     void run(pager_t &pager) const {
-        pager.set_term_size(this->width, 24);
+        pager.set_term_size(termsize_t{this->width, 24});
         page_rendering_t rendering = pager.render();
         const screen_data_t &sd = rendering.screen_data;
         do_test(sd.line_count() == 1);
@@ -2292,7 +2334,10 @@ struct pager_layout_testcase_t {
                 std::replace(expected.begin(), expected.end(), L'\x2026', ellipsis_char);
             }
 
-            wcstring text = sd.line(0).to_string();
+            wcstring text;
+            for (const auto &p : sd.line(0).text) {
+                text.push_back(p.character);
+            }
             if (text != expected) {
                 std::fwprintf(stderr, L"width %zu got %zu<%ls>, expected %zu<%ls>\n", this->width,
                               text.length(), text.c_str(), expected.length(), expected.c_str());
@@ -2366,8 +2411,7 @@ static void test_1_word_motion(word_motion_t motion, move_word_style_t style,
     std::set<size_t> stops;
 
     // Carets represent stops and should be cut out of the command.
-    for (size_t i = 0; i < test.size(); i++) {
-        wchar_t wc = test.at(i);
+    for (wchar_t wc : test) {
         if (wc == L'^') {
             stops.insert(command.size());
         } else {
@@ -2489,7 +2533,8 @@ static bool run_one_test_test(int expected, wcstring_list_t &lst, bool bracket) 
         i++;
     }
     argv[i + 1] = NULL;
-    io_streams_t streams(0);
+    null_output_stream_t null{};
+    io_streams_t streams(null, null);
     int result = builtin_test(parser, streams, argv);
 
     if (expected != result) err(L"expected builtin_test() to return %d, got %d", expected, result);
@@ -2521,7 +2566,8 @@ static bool run_test_test(int expected, const wcstring &str) {
 static void test_test_brackets() {
     // Ensure [ knows it needs a ].
     parser_t &parser = parser_t::principal_parser();
-    io_streams_t streams(0);
+    null_output_stream_t null{};
+    io_streams_t streams(null, null);
 
     null_terminated_array_t<wchar_t> args;
 
@@ -3319,13 +3365,13 @@ static void test_input() {
 
     {
         auto input_mapping = input_mappings();
-        input_mapping->add(prefix_binding.c_str(), L"up-line");
-        input_mapping->add(desired_binding.c_str(), L"down-line");
+        input_mapping->add(prefix_binding, L"up-line");
+        input_mapping->add(desired_binding, L"down-line");
     }
 
     // Push the desired binding to the queue.
-    for (size_t idx = 0; idx < desired_binding.size(); idx++) {
-        input.queue_ch(desired_binding.at(idx));
+    for (wchar_t c : desired_binding) {
+        input.queue_ch(c);
     }
 
     // Now test.
@@ -3486,7 +3532,7 @@ static void test_universal() {
             }
         }
     }
-    (void)system("rm -Rf test/fish_uvars_test/");
+    system_assert("rm -Rf test/fish_uvars_test/");
 }
 
 static void test_universal_output() {
@@ -3607,7 +3653,7 @@ static void test_universal_callbacks() {
     do_test(callbacks.at(1).val == wcstring{L"1"});
     do_test(callbacks.at(2).key == L"delta");
     do_test(callbacks.at(2).val == none());
-    (void)system("rm -Rf test/fish_uvars_test/");
+    system_assert("rm -Rf test/fish_uvars_test/");
 }
 
 static void test_universal_formats() {
@@ -3656,7 +3702,7 @@ static void test_universal_ok_to_save() {
     // Ensure file is same.
     file_id_t after_id = file_id_for_path(UVARS_TEST_PATH);
     do_test(before_id == after_id && "UVARS_TEST_PATH should not have changed");
-    (void)system("rm -Rf test/fish_uvars_test/");
+    system_assert("rm -Rf test/fish_uvars_test/");
 }
 
 bool poll_notifier(const std::unique_ptr<universal_notifier_t> &note) {
@@ -3776,7 +3822,7 @@ class history_tests_t {
 };
 
 static wcstring random_string() {
-    wcstring result = L"";
+    wcstring result;
     size_t max = 1 + random() % 32;
     while (max--) {
         wchar_t c = 1 + random() % ESCAPE_TEST_CHAR;
@@ -3957,9 +4003,9 @@ void history_tests_t::test_history_races() {
     }
 
     // Wait for all children.
-    for (size_t i = 0; i < RACE_COUNT; i++) {
+    for (pid_t child : children) {
         int stat;
-        waitpid(children[i], &stat, WUNTRACED);
+        waitpid(child, &stat, WUNTRACED);
     }
 
     // Compute the expected lines.
@@ -4038,8 +4084,8 @@ void history_tests_t::test_history_merge() {
     const wcstring alt_texts[count] = {L"History Alt 1", L"History Alt 2", L"History Alt 3"};
 
     // Make sure history is clear.
-    for (size_t i = 0; i < count; i++) {
-        hists[i]->clear();
+    for (auto &hist : hists) {
+        hist->clear();
     }
 
     // Make sure we don't add an item in the same second as we created the history.
@@ -4051,8 +4097,8 @@ void history_tests_t::test_history_merge() {
     }
 
     // Save them.
-    for (size_t i = 0; i < count; i++) {
-        hists[i]->save();
+    for (auto &hist : hists) {
+        hist->save();
     }
 
     // Make sure each history contains what it ought to, but they have not leaked into each other.
@@ -4068,21 +4114,21 @@ void history_tests_t::test_history_merge() {
     // is newer, since we only pick up items whose timestamp is before the birth stamp.
     time_barrier();
     std::unique_ptr<history_t> everything = make_unique<history_t>(name);
-    for (size_t i = 0; i < count; i++) {
-        do_test(history_contains(everything, texts[i]));
+    for (const auto &text : texts) {
+        do_test(history_contains(everything, text));
     }
 
     // Tell all histories to merge. Now everybody should have everything.
-    for (size_t i = 0; i < count; i++) {
-        hists[i]->incorporate_external_changes();
+    for (auto &hist : hists) {
+        hist->incorporate_external_changes();
     }
 
     // Everyone should also have items in the same order (#2312)
     wcstring_list_t hist_vals1;
     hists[0]->get_history(hist_vals1);
-    for (size_t i = 0; i < count; i++) {
+    for (const auto &hist : hists) {
         wcstring_list_t hist_vals2;
-        hists[i]->get_history(hist_vals2);
+        hist->get_history(hist_vals2);
         do_test(hist_vals1 == hist_vals2);
     }
 
@@ -4295,18 +4341,16 @@ static void test_new_parser_correctness() {
         {L"true || false; and true", true},
         {L"true || ||", false},
         {L"|| true", false},
-        {L"true || \n\n false", true},
+        {L"true || \n\n false", false},
     };
 
-    for (size_t i = 0; i < sizeof parser_tests / sizeof *parser_tests; i++) {
-        const parser_test_t *test = &parser_tests[i];
-
-        parse_node_tree_t parse_tree;
-        bool success = parse_tree_from_string(test->src, parse_flag_none, &parse_tree, NULL);
-        if (success && !test->ok) {
-            err(L"\"%ls\" should NOT have parsed, but did", test->src);
-        } else if (!success && test->ok) {
-            err(L"\"%ls\" should have parsed, but failed", test->src);
+    for (const auto &test : parser_tests) {
+        auto ast = ast::ast_t::parse(test.src);
+        bool success = !ast.errored();
+        if (success && !test.ok) {
+            err(L"\"%ls\" should NOT have parsed, but did", test.src);
+        } else if (!success && test.ok) {
+            err(L"\"%ls\" should have parsed, but failed", test.src);
         }
     }
     say(L"Parse tests complete");
@@ -4331,7 +4375,7 @@ static inline bool string_for_permutation(const wcstring *fuzzes, size_t fuzz_co
 }
 
 static void test_new_parser_fuzzing() {
-    say(L"Fuzzing parser (node size: %lu)", sizeof(parse_node_t));
+    say(L"Fuzzing parser");
     const wcstring fuzzes[] = {
         L"if",      L"else", L"for", L"in",  L"while", L"begin", L"function",
         L"switch",  L"case", L"end", L"and", L"or",    L"not",   L"command",
@@ -4342,7 +4386,6 @@ static void test_new_parser_fuzzing() {
     wcstring src;
     src.reserve(128);
 
-    parse_node_tree_t node_tree;
     parse_error_list_t errors;
 
     double start = timef();
@@ -4356,7 +4399,7 @@ static void test_new_parser_fuzzing() {
         unsigned long permutation = 0;
         while (string_for_permutation(fuzzes, sizeof fuzzes / sizeof *fuzzes, len, permutation++,
                                       &src)) {
-            parse_tree_from_string(src, parse_flag_continue_after_error, &node_tree, &errors);
+            ast::ast_t::parse(src);
         }
         if (log_it) std::fwprintf(stderr, L"done (%lu)\n", permutation);
     }
@@ -4367,34 +4410,37 @@ static void test_new_parser_fuzzing() {
 // Parse a statement, returning the command, args (joined by spaces), and the decoration. Returns
 // true if successful.
 static bool test_1_parse_ll2(const wcstring &src, wcstring *out_cmd, wcstring *out_joined_args,
-                             enum parse_statement_decoration_t *out_deco) {
+                             enum statement_decoration_t *out_deco) {
+    using namespace ast;
     out_cmd->clear();
     out_joined_args->clear();
-    *out_deco = parse_statement_decoration_none;
+    *out_deco = statement_decoration_t::none;
 
-    parse_node_tree_t tree;
-    if (!parse_tree_from_string(src, parse_flag_none, &tree, NULL)) {
-        return false;
-    }
+    auto ast = ast_t::parse(src);
+    if (ast.errored()) return false;
 
     // Get the statement. Should only have one.
-    tnode_t<grammar::job_list> job_list{&tree, &tree.at(0)};
-    auto stmts = job_list.descendants<grammar::plain_statement>();
-    if (stmts.size() != 1) {
-        say(L"Unexpected number of statements (%lu) found in '%ls'", stmts.size(), src.c_str());
-        return false;
+    const decorated_statement_t *statement = nullptr;
+    for (const auto &n : ast) {
+        if (const auto *tmp = n.try_as<decorated_statement_t>()) {
+            if (statement) {
+                say(L"More than one decorated statement found in '%ls'", src.c_str());
+                return false;
+            }
+            statement = tmp;
+        }
     }
-    tnode_t<grammar::plain_statement> stmt = stmts.at(0);
 
     // Return its decoration and command.
-    *out_deco = get_decoration(stmt);
-    *out_cmd = *command_for_plain_statement(stmt, src);
+    *out_deco = statement->decoration();
+    *out_cmd = statement->command.source(src);
 
     // Return arguments separated by spaces.
     bool first = true;
-    for (auto arg_node : stmt.descendants<grammar::argument>()) {
+    for (const ast::argument_or_redirection_t &arg : statement->args_or_redirs) {
+        if (!arg.is_argument()) continue;
         if (!first) out_joined_args->push_back(L' ');
-        out_joined_args->append(arg_node.get_source(src));
+        out_joined_args->append(arg.source(src));
         first = false;
     }
 
@@ -4403,19 +4449,22 @@ static bool test_1_parse_ll2(const wcstring &src, wcstring *out_cmd, wcstring *o
 
 // Verify that 'function -h' and 'function --help' are plain statements but 'function --foo' is
 // not (issue #1240).
-template <typename Type>
+template <ast::type_t Type>
 static void check_function_help(const wchar_t *src) {
-    parse_node_tree_t tree;
-    if (!parse_tree_from_string(src, parse_flag_none, &tree, NULL)) {
+    using namespace ast;
+    auto ast = ast_t::parse(src);
+    if (ast.errored()) {
         err(L"Failed to parse '%ls'", src);
     }
 
-    tnode_t<grammar::job_list> node{&tree, &tree.at(0)};
-    auto node_list = node.descendants<Type>();
-    if (node_list.size() == 0) {
-        err(L"Failed to find node of type '%ls'", token_type_description(Type::token));
-    } else if (node_list.size() > 1) {
-        err(L"Found too many nodes of type '%ls'", token_type_description(Type::token));
+    int count = 0;
+    for (const node_t &node : ast) {
+        count += (node.type == Type);
+    }
+    if (count == 0) {
+        err(L"Failed to find node of type '%ls'", ast_type_to_string(Type));
+    } else if (count > 1) {
+        err(L"Found too many nodes of type '%ls'", ast_type_to_string(Type));
     }
 }
 
@@ -4430,64 +4479,78 @@ static void test_new_parser_ll2() {
         wcstring src;
         wcstring cmd;
         wcstring args;
-        enum parse_statement_decoration_t deco;
-    } tests[] = {
-        {L"echo hello", L"echo", L"hello", parse_statement_decoration_none},
-        {L"command echo hello", L"echo", L"hello", parse_statement_decoration_command},
-        {L"exec echo hello", L"echo", L"hello", parse_statement_decoration_exec},
-        {L"command command hello", L"command", L"hello", parse_statement_decoration_command},
-        {L"builtin command hello", L"command", L"hello", parse_statement_decoration_builtin},
-        {L"command --help", L"command", L"--help", parse_statement_decoration_none},
-        {L"command -h", L"command", L"-h", parse_statement_decoration_none},
-        {L"command", L"command", L"", parse_statement_decoration_none},
-        {L"command -", L"command", L"-", parse_statement_decoration_none},
-        {L"command --", L"command", L"--", parse_statement_decoration_none},
-        {L"builtin --names", L"builtin", L"--names", parse_statement_decoration_none},
-        {L"function", L"function", L"", parse_statement_decoration_none},
-        {L"function --help", L"function", L"--help", parse_statement_decoration_none}};
+        enum statement_decoration_t deco;
+    } tests[] = {{L"echo hello", L"echo", L"hello", statement_decoration_t::none},
+                 {L"command echo hello", L"echo", L"hello", statement_decoration_t::command},
+                 {L"exec echo hello", L"echo", L"hello", statement_decoration_t::exec},
+                 {L"command command hello", L"command", L"hello", statement_decoration_t::command},
+                 {L"builtin command hello", L"command", L"hello", statement_decoration_t::builtin},
+                 {L"command --help", L"command", L"--help", statement_decoration_t::none},
+                 {L"command -h", L"command", L"-h", statement_decoration_t::none},
+                 {L"command", L"command", L"", statement_decoration_t::none},
+                 {L"command -", L"command", L"-", statement_decoration_t::none},
+                 {L"command --", L"command", L"--", statement_decoration_t::none},
+                 {L"builtin --names", L"builtin", L"--names", statement_decoration_t::none},
+                 {L"function", L"function", L"", statement_decoration_t::none},
+                 {L"function --help", L"function", L"--help", statement_decoration_t::none}};
 
-    for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
+    for (const auto &test : tests) {
         wcstring cmd, args;
-        enum parse_statement_decoration_t deco = parse_statement_decoration_none;
-        bool success = test_1_parse_ll2(tests[i].src, &cmd, &args, &deco);
-        if (!success)
-            err(L"Parse of '%ls' failed on line %ld", tests[i].cmd.c_str(), (long)__LINE__);
-        if (cmd != tests[i].cmd)
+        enum statement_decoration_t deco = statement_decoration_t::none;
+        bool success = test_1_parse_ll2(test.src, &cmd, &args, &deco);
+        if (!success) err(L"Parse of '%ls' failed on line %ld", test.cmd.c_str(), (long)__LINE__);
+        if (cmd != test.cmd)
             err(L"When parsing '%ls', expected command '%ls' but got '%ls' on line %ld",
-                tests[i].src.c_str(), tests[i].cmd.c_str(), cmd.c_str(), (long)__LINE__);
-        if (args != tests[i].args)
+                test.src.c_str(), test.cmd.c_str(), cmd.c_str(), (long)__LINE__);
+        if (args != test.args)
             err(L"When parsing '%ls', expected args '%ls' but got '%ls' on line %ld",
-                tests[i].src.c_str(), tests[i].args.c_str(), args.c_str(), (long)__LINE__);
-        if (deco != tests[i].deco)
+                test.src.c_str(), test.args.c_str(), args.c_str(), (long)__LINE__);
+        if (deco != test.deco)
             err(L"When parsing '%ls', expected decoration %d but got %d on line %ld",
-                tests[i].src.c_str(), (int)tests[i].deco, (int)deco, (long)__LINE__);
+                test.src.c_str(), (int)test.deco, (int)deco, (long)__LINE__);
     }
 
-    check_function_help<grammar::plain_statement>(L"function -h");
-    check_function_help<grammar::plain_statement>(L"function --help");
-    check_function_help<grammar::function_header>(L"function --foo; end");
-    check_function_help<grammar::function_header>(L"function foo; end");
+    check_function_help<ast::type_t::decorated_statement>(L"function -h");
+    check_function_help<ast::type_t::decorated_statement>(L"function --help");
+    check_function_help<ast::type_t::function_header>(L"function --foo; end");
+    check_function_help<ast::type_t::function_header>(L"function foo; end");
 }
 
 static void test_new_parser_ad_hoc() {
+    using namespace ast;
     // Very ad-hoc tests for issues encountered.
     say(L"Testing new parser ad hoc tests");
 
     // Ensure that 'case' terminates a job list.
     const wcstring src = L"switch foo ; case bar; case baz; end";
-    parse_node_tree_t parse_tree;
-    bool success = parse_tree_from_string(src, parse_flag_none, &parse_tree, NULL);
-    if (!success) {
+    auto ast = ast_t::parse(src);
+    if (ast.errored()) {
         err(L"Parsing failed");
     }
 
-    // Expect three case_item_lists: one for each case, and a terminal one. The bug was that we'd
+    // Expect two case_item_lists. The bug was that we'd
     // try to run a command 'case'.
-    tnode_t<grammar::job_list> root{&parse_tree, &parse_tree.at(0)};
-    auto node_list = root.descendants<grammar::case_item_list>();
-    if (node_list.size() != 3) {
-        err(L"Expected 3 case item nodes, found %lu", node_list.size());
+    int count = 0;
+    for (const auto &n : ast) {
+        count += (n.type == type_t::case_item);
     }
+    if (count != 2) {
+        err(L"Expected 2 case item nodes, found %d", count);
+    }
+
+    // Ensure that naked variable assignments don't hang.
+    // The bug was that "a=" would produce an error but not be consumed,
+    // leading to an infinite loop.
+
+    // By itself it should produce an error.
+    ast = ast_t::parse(L"a=");
+    do_test(ast.errored());
+
+    // If we are leaving things unterminated, this should not produce an error.
+    // i.e. when typing "a=" at the command line, it should be treated as valid
+    // because we don't want to color it as an error.
+    ast = ast_t::parse(L"a=", parse_flag_leave_unterminated);
+    do_test(!ast.errored());
 }
 
 static void test_new_parser_errors() {
@@ -4507,29 +4570,35 @@ static void test_new_parser_errors() {
         {L"if true ; end ; else", parse_error_unbalancing_else},
 
         {L"case", parse_error_unbalancing_case},
-        {L"if true ; case ; end", parse_error_unbalancing_case},
+        {L"if true ; case ; end", parse_error_generic},
+
+        {L"true | and", parse_error_andor_in_pipeline},
+
+        {L"a=", parse_error_bare_variable_assignment},
     };
 
-    for (size_t i = 0; i < sizeof tests / sizeof *tests; i++) {
-        const wcstring src = tests[i].src;
-        parse_error_code_t expected_code = tests[i].code;
+    for (const auto &test : tests) {
+        const wcstring src = test.src;
+        parse_error_code_t expected_code = test.code;
 
         parse_error_list_t errors;
-        parse_node_tree_t parse_tree;
-        bool success = parse_tree_from_string(src, parse_flag_none, &parse_tree, &errors);
-        if (success) {
+        auto ast = ast::ast_t::parse(src, parse_flag_none, &errors);
+        if (!ast.errored()) {
             err(L"Source '%ls' was expected to fail to parse, but succeeded", src.c_str());
         }
 
         if (errors.size() != 1) {
             err(L"Source '%ls' was expected to produce 1 error, but instead produced %lu errors",
                 src.c_str(), errors.size());
+            for (const auto &err : errors) {
+                fprintf(stderr, "%ls\n", err.describe(src, false).c_str());
+            }
         } else if (errors.at(0).code != expected_code) {
             err(L"Source '%ls' was expected to produce error code %lu, but instead produced error "
                 L"code %lu",
                 src.c_str(), expected_code, (unsigned long)errors.at(0).code);
-            for (size_t i = 0; i < errors.size(); i++) {
-                err(L"\t\t%ls", errors.at(i).describe(src, true).c_str());
+            for (const auto &error : errors) {
+                err(L"\t\t%ls", error.describe(src, true).c_str());
             }
         }
     }
@@ -4591,8 +4660,7 @@ static bool string_matches_format(const wcstring &string, const wchar_t *format)
     bool result = true;
     wcstring_list_t components = separate_by_format_specifiers(format);
     size_t idx = 0;
-    for (size_t i = 0; i < components.size(); i++) {
-        const wcstring &component = components.at(i);
+    for (const auto &component : components) {
         size_t where = string.find(component, idx);
         if (where == wcstring::npos) {
             result = false;
@@ -4626,13 +4694,12 @@ static void test_error_messages() {
                        {L"echo \"foo$(foo)bar\"", ERROR_BAD_VAR_SUBCOMMAND1}};
 
     parse_error_list_t errors;
-    for (size_t i = 0; i < sizeof error_tests / sizeof *error_tests; i++) {
-        const struct error_test_t *test = &error_tests[i];
+    for (const auto &test : error_tests) {
         errors.clear();
-        parse_util_detect_errors(test->src, &errors, false /* allow_incomplete */);
+        parse_util_detect_errors(test.src, &errors);
         do_test(!errors.empty());
         if (!errors.empty()) {
-            do_test1(string_matches_format(errors.at(0).text, test->error_text_format), test->src);
+            do_test1(string_matches_format(errors.at(0).text, test.error_text_format), test.src);
         }
     }
 }
@@ -4864,6 +4931,16 @@ static void test_highlighting() {
         {L")", highlight_role_t::error},
     });
 
+    highlight_tests.push_back({
+        {L"echo", highlight_role_t::command},
+        {L"stuff", highlight_role_t::param},
+        {L"# comment", highlight_role_t::comment},
+    });
+
+    highlight_tests.push_back({
+        {L"a=", highlight_role_t::param},
+    });
+
     auto &vars = parser_t::principal_parser().vars();
     // Verify variables and wildcards in commands using /bin/cat.
     vars.set(L"VARIABLE_IN_COMMAND", ENV_LOCAL, {L"a"});
@@ -4900,7 +4977,7 @@ static void test_highlighting() {
         do_test(expected_colors.size() == text.size());
 
         std::vector<highlight_spec_t> colors(text.size());
-        highlight_shell(text, colors, 20, operation_context_t{vars});
+        highlight_shell(text, colors, 20, operation_context_t{vars}, true /* io_ok */);
 
         if (expected_colors.size() != colors.size()) {
             err(L"Color vector has wrong size! Expected %lu, actual %lu", expected_colors.size(),
@@ -4950,6 +5027,49 @@ static void test_wcstring_tok() {
     }
 }
 
+static void test_wwrite_to_fd() {
+    say(L"Testing wwrite_to_fd");
+    char t[] = "/tmp/fish_test_wwrite.XXXXXX";
+    if (!mktemp(t)) {
+        err(L"Unable to create temporary file");
+        return;
+    }
+    size_t sizes[] = {0, 1, 2, 3, 5, 13, 23, 64, 128, 255, 4096, 4096 * 2};
+    for (size_t size : sizes) {
+        autoclose_fd_t fd{open(t, O_RDWR | O_TRUNC | O_CREAT, 0666)};
+        if (!fd.valid()) {
+            wperror(L"open");
+            err(L"Unable to open temporary file");
+            return;
+        }
+        wcstring input{};
+        for (size_t i = 0; i < size; i++) {
+            input.push_back(wchar_t(random()));
+        }
+
+        ssize_t amt = wwrite_to_fd(input, fd.fd());
+        if (amt < 0) {
+            wperror(L"write");
+            err(L"Unable to write to temporary file");
+            return;
+        }
+        std::string narrow = wcs2string(input);
+        size_t expected_size = narrow.size();
+        do_test(static_cast<size_t>(amt) == expected_size);
+
+        if (lseek(fd.fd(), 0, SEEK_SET) < 0) {
+            wperror(L"seek");
+            err(L"Unable to seek temporary file");
+            return;
+        }
+
+        std::string contents(expected_size, '\0');
+        ssize_t read_amt = read(fd.fd(), &contents[0], expected_size);
+        do_test(read_amt >= 0 && static_cast<size_t>(read_amt) == expected_size);
+    }
+    (void)remove(t);
+}
+
 static void test_pcre2_escape() {
     say(L"Testing escaping strings as pcre2 literals");
     // plain text should not be needlessly escaped
@@ -4982,7 +5102,9 @@ int builtin_string(parser_t &parser, io_streams_t &streams, wchar_t **argv);
 static void run_one_string_test(const wchar_t *const *argv, int expected_rc,
                                 const wchar_t *expected_out) {
     parser_t &parser = parser_t::principal_parser();
-    io_streams_t streams(0);
+    buffered_output_stream_t outs{0};
+    null_output_stream_t errs{};
+    io_streams_t streams(outs, errs);
     streams.stdin_is_directly_redirected = false;  // read from argv instead of stdin
     int rc = builtin_string(parser, streams, const_cast<wchar_t **>(argv));
     wcstring args;
@@ -4993,10 +5115,10 @@ static void run_one_string_test(const wchar_t *const *argv, int expected_rc,
     if (rc != expected_rc) {
         err(L"Test failed on line %lu: [%ls]: expected return code %d but got %d", __LINE__,
             args.c_str(), expected_rc, rc);
-    } else if (streams.out.contents() != expected_out) {
+    } else if (outs.contents() != expected_out) {
         err(L"Test failed on line %lu: [%ls]: expected [%ls] but got [%ls]", __LINE__, args.c_str(),
             escape_string(expected_out, ESCAPE_ALL).c_str(),
-            escape_string(streams.out.contents(), ESCAPE_ALL).c_str());
+            escape_string(outs.contents(), ESCAPE_ALL).c_str());
     }
 }
 
@@ -5522,23 +5644,81 @@ void test_layout_cache() {
     do_test(seqs.esc_cache_size() == 0);
     do_test(seqs.find_escape_code(L"abcd") == 0);
 
+    auto huge = std::numeric_limits<size_t>::max();
+
     // Verify prompt layout cache.
     for (size_t i = 0; i < layout_cache_t::prompt_cache_max_size; i++) {
         wcstring input = std::to_wstring(i);
         do_test(!seqs.find_prompt_layout(input));
-        seqs.add_prompt_layout(input, {i, 0, 0});
-        do_test(seqs.find_prompt_layout(input)->line_count == i);
+        seqs.add_prompt_layout({input, huge, input, {i, 0, 0}});
+        do_test(seqs.find_prompt_layout(input)->layout.line_count == i);
     }
 
     size_t expected_evictee = 3;
     for (size_t i = 0; i < layout_cache_t::prompt_cache_max_size; i++) {
         if (i != expected_evictee)
-            do_test(seqs.find_prompt_layout(std::to_wstring(i))->line_count == i);
+            do_test(seqs.find_prompt_layout(std::to_wstring(i))->layout.line_count == i);
     }
 
-    seqs.add_prompt_layout(L"whatever", {100, 0, 0});
+    seqs.add_prompt_layout({L"whatever", huge, L"whatever", {100, 0, 0}});
     do_test(!seqs.find_prompt_layout(std::to_wstring(expected_evictee)));
-    do_test(seqs.find_prompt_layout(L"whatever")->line_count == 100);
+    do_test(seqs.find_prompt_layout(L"whatever", huge)->layout.line_count == 100);
+}
+
+void test_prompt_truncation() {
+    layout_cache_t cache;
+    wcstring trunc;
+    prompt_layout_t layout;
+
+    /// Helper to return 'layout' formatted as a string for easy comparison.
+    auto format_layout = [&] {
+        return format_string(L"%lu,%lu,%lu", (unsigned long)layout.line_count,
+                             (unsigned long)layout.max_line_width,
+                             (unsigned long)layout.last_line_width);
+    };
+
+    /// Join some strings with newline.
+    auto join = [](std::initializer_list<wcstring> vals) { return join_strings(vals, L'\n'); };
+
+    wcstring ellipsis = {get_ellipsis_char()};
+
+    // No truncation.
+    layout = cache.calc_prompt_layout(L"abcd", &trunc);
+    do_test(format_layout() == L"1,4,4");
+    do_test(trunc == L"abcd");
+
+    // Basic truncation.
+    layout = cache.calc_prompt_layout(L"0123456789ABCDEF", &trunc, 8);
+    do_test(format_layout() == L"1,8,8");
+    do_test(trunc == ellipsis + L"9ABCDEF");
+
+    // Multiline truncation.
+    layout = cache.calc_prompt_layout(join({
+                                          L"0123456789ABCDEF",  //
+                                          L"012345",            //
+                                          L"0123456789abcdef",  //
+                                          L"xyz"                //
+                                      }),
+                                      &trunc, 8);
+    do_test(format_layout() == L"4,8,3");
+    do_test(trunc == join({ellipsis + L"9ABCDEF", L"012345", ellipsis + L"9abcdef", L"xyz"}));
+
+    // Escape sequences are not truncated.
+    layout =
+        cache.calc_prompt_layout(L"\x1B]50;CurrentDir=test/foo\x07NOT_PART_OF_SEQUENCE", &trunc, 4);
+    do_test(format_layout() == L"1,4,4");
+    do_test(trunc == ellipsis + L"\x1B]50;CurrentDir=test/foo\x07NCE");
+
+    // Newlines in escape sequences are skipped.
+    layout = cache.calc_prompt_layout(L"\x1B]50;CurrentDir=\ntest/foo\x07NOT_PART_OF_SEQUENCE",
+                                      &trunc, 4);
+    do_test(format_layout() == L"1,4,4");
+    do_test(trunc == ellipsis + L"\x1B]50;CurrentDir=\ntest/foo\x07NCE");
+
+    // We will truncate down to one character if we have to.
+    layout = cache.calc_prompt_layout(L"Yay", &trunc, 1);
+    do_test(format_layout() == L"1,1,1");
+    do_test(trunc == ellipsis);
 }
 
 void test_normalize_path() {
@@ -5680,6 +5860,72 @@ Executed in  500.00 micros    fish         external
     free(saved_locale);
 }
 
+struct termsize_tester_t {
+    static void test();
+};
+
+void termsize_tester_t::test() {
+    say(L"Testing termsize");
+
+    parser_t &parser = parser_t::principal_parser();
+    env_stack_t &vars = parser.vars();
+
+    // Use a static variable so we can pretend we're the kernel exposing a terminal size.
+    static maybe_t<termsize_t> stubby_termsize{};
+    termsize_container_t ts([] { return stubby_termsize; });
+
+    // Initially default value.
+    do_test(ts.last() == termsize_t::defaults());
+
+    // Haha we change the value, it doesn't even know.
+    stubby_termsize = termsize_t{42, 84};
+    do_test(ts.last() == termsize_t::defaults());
+
+    // Ok let's tell it. But it still doesn't update right away.
+    ts.handle_winch();
+    do_test(ts.last() == termsize_t::defaults());
+
+    // Ok now we tell it to update.
+    ts.updating(parser);
+    do_test(ts.last() == *stubby_termsize);
+    do_test(vars.get(L"COLUMNS")->as_string() == L"42");
+    do_test(vars.get(L"LINES")->as_string() == L"84");
+
+    // Wow someone set COLUMNS and LINES to a weird value.
+    // Now the tty's termsize doesn't matter.
+    vars.set(L"COLUMNS", ENV_GLOBAL, {L"75"});
+    vars.set(L"LINES", ENV_GLOBAL, {L"150"});
+    ts.handle_columns_lines_var_change(vars);
+    do_test(ts.last() == termsize_t(75, 150));
+    do_test(vars.get(L"COLUMNS")->as_string() == L"75");
+    do_test(vars.get(L"LINES")->as_string() == L"150");
+
+    vars.set(L"COLUMNS", ENV_GLOBAL, {L"33"});
+    ts.handle_columns_lines_var_change(vars);
+    do_test(ts.last() == termsize_t(33, 150));
+
+    // Oh it got SIGWINCH, now the tty matters again.
+    ts.handle_winch();
+    do_test(ts.last() == termsize_t(33, 150));
+    do_test(ts.updating(parser) == *stubby_termsize);
+    do_test(vars.get(L"COLUMNS")->as_string() == L"42");
+    do_test(vars.get(L"LINES")->as_string() == L"84");
+
+    // Test initialize().
+    vars.set(L"COLUMNS", ENV_GLOBAL, {L"83"});
+    vars.set(L"LINES", ENV_GLOBAL, {L"38"});
+    ts.initialize(vars);
+    do_test(ts.last() == termsize_t(83, 38));
+
+    // initialize() even beats the tty reader until a sigwinch.
+    termsize_container_t ts2([] { return stubby_termsize; });
+    ts.initialize(vars);
+    ts2.updating(parser);
+    do_test(ts.last() == termsize_t(83, 38));
+    ts2.handle_winch();
+    do_test(ts2.updating(parser) == *stubby_termsize);
+}
+
 /// Main test.
 int main(int argc, char **argv) {
     UNUSED(argc);
@@ -5729,6 +5975,7 @@ int main(int argc, char **argv) {
 
     if (should_test_function("utility_functions")) test_utility_functions();
     if (should_test_function("wcstring_tok")) test_wcstring_tok();
+    if (should_test_function("wwrite_to_fd")) test_wwrite_to_fd();
     if (should_test_function("env_vars")) test_env_vars();
     if (should_test_function("env")) test_env_snapshot();
     if (should_test_function("str_to_num")) test_str_to_num();
@@ -5806,11 +6053,14 @@ int main(int argc, char **argv) {
     if (should_test_function("illegal_command_exit_code")) test_illegal_command_exit_code();
     if (should_test_function("maybe")) test_maybe();
     if (should_test_function("layout_cache")) test_layout_cache();
+    if (should_test_function("prompt")) test_prompt_truncation();
     if (should_test_function("normalize")) test_normalize_path();
     if (should_test_function("topics")) test_topic_monitor();
     if (should_test_function("topics")) test_topic_monitor_torture();
     if (should_test_function("timer_format")) test_timer_format();
     // history_tests_t::test_history_speed();
+
+    if (should_test_function("termsize")) termsize_tester_t::test();
 
     say(L"Encountered %d errors in low-level tests", err_count);
     if (s_test_run_count == 0) say(L"*** No Tests Were Actually Run! ***");

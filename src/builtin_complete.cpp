@@ -287,8 +287,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     if (condition && std::wcslen(condition)) {
         const wcstring condition_string = condition;
         parse_error_list_t errors;
-        if (parse_util_detect_errors(condition_string, &errors,
-                                     false /* do not accept incomplete */)) {
+        if (parse_util_detect_errors(condition_string, &errors)) {
             streams.err.append_format(L"%ls: Condition '%ls' contained a syntax error", cmd,
                                       condition);
             for (const auto &error : errors) {
@@ -391,7 +390,7 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
         if (!streams.out_is_redirected && isatty(STDOUT_FILENO)) {
             std::vector<highlight_spec_t> colors;
             size_t len = repr.size();
-            highlight_shell_no_io(repr, colors, len, operation_context_t::globals());
+            highlight_shell(repr, colors, len, operation_context_t::globals());
             streams.out.append(str2wcstring(colorize(repr, colors)));
         } else {
             streams.out.append(repr);

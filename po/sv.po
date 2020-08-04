@@ -3537,7 +3537,7 @@ msgid ""
 msgstr ""
 
 #: /tmp/fish/explicit/share/functions/history.fish:5
-msgid "Command history cleared!"
+msgid "Command history cleared!\\n"
 msgstr ""
 
 #: /tmp/fish/explicit/share/functions/history.fish:6
@@ -58808,10 +58808,6 @@ msgstr "Hjälp om jokertecken *.*"
 #: share/completions/help.fish:31
 msgid "Help on command substitution (SUBCOMMAND)"
 msgstr "Hjälp om kommandosubstitution (UNDERKOMMANDO)"
-
-#: share/completions/help.fish:32
-msgid "Help on process expansion %JOB"
-msgstr "Hjälp om processexpansion %JOB"
 
 #: share/completions/history.fish:1
 msgid "Match history items that start with the given prefix"

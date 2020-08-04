@@ -441,7 +441,16 @@ std::string env_universal_t::serialize_with_vars(const var_table_t &vars) {
     contents.append(SAVE_MSG);
     contents.append("# VERSION: " UVARS_VERSION_3_0 "\n");
 
-    for (const auto &kv : vars) {
+    // Preserve legacy behavior by sorting the values first
+    typedef std::pair<std::reference_wrapper<const wcstring>,
+                      std::reference_wrapper<const env_var_t>>
+        env_pair_t;
+    std::vector<env_pair_t> cloned(vars.begin(), vars.end());
+    std::sort(cloned.begin(), cloned.end(), [](const env_pair_t &p1, const env_pair_t &p2) {
+        return p1.first.get() < p2.first.get();
+    });
+
+    for (const auto &kv : cloned) {
         // Append the entry. Note that append_file_entry may fail, but that only affects one
         // variable; soldier on.
         const wcstring &key = kv.first;
@@ -528,14 +537,13 @@ autoclose_fd_t env_universal_t::open_temporary_file(const wcstring &directory, w
     int saved_errno;
     const wcstring tmp_name_template = directory + L"/fishd.tmp.XXXXXX";
     autoclose_fd_t result;
-    char *narrow_str = nullptr;
+    std::string narrow_str;
     for (size_t attempt = 0; attempt < 10 && !result.valid(); attempt++) {
-        narrow_str = wcs2str(tmp_name_template);
-        result.reset(fish_mkstemp_cloexec(narrow_str));
+        narrow_str = wcs2string(tmp_name_template);
+        result.reset(fish_mkstemp_cloexec(&narrow_str[0]));
         saved_errno = errno;
     }
     *out_path = str2wcstring(narrow_str);
-    free(narrow_str);
 
     if (!result.valid()) {
         const char *error = std::strerror(saved_errno);

@@ -9,9 +9,10 @@
 set -x FISH_UNIT_TESTS_RUNNING 1
 
 # Change to directory containing this script
-cd (dirname (status -f))
+cd (status dirname)
 
 # Test files specified on commandline, or all checks.
+set -l files_to_test
 if set -q argv[1]
     set files_to_test checks/$argv.fish
 else
@@ -22,7 +23,17 @@ end
 # behavior of the tests. So either remove them or set them to a known value.
 # See also tests/interactive.fish.
 set TERM xterm
+set -e COLORTERM
+set -e INSIDE_EMACS
 set -e ITERM_PROFILE
+set -e KONSOLE_PROFILE_NAME
+set -e KONSOLE_VERSION
+set -e PANTHEON_TERMINAL_ID
+set -e TERM_PROGRAM
+set -e TERM_PROGRAM_VERSION
+set -e VTE_VERSION
+set -e WT_PROFILE_ID
+set -e XTERM_VERSION
 
 source test_util.fish (status -f) $argv
 or exit

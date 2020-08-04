@@ -20,7 +20,7 @@ static void become_foreground_then_print_stderr() {
     fprintf(stderr, "become_foreground_then_print_stderr done\n");
 }
 
-static void report_foreground() {
+static void report_foreground_loop() {
     int was_fg = -1;
     const auto grp = getpgrp();
     for (;;) {
@@ -33,6 +33,11 @@ static void report_foreground() {
         }
         usleep(1000000 / 2);
     }
+}
+
+static void report_foreground() {
+    bool is_fg = (tcgetpgrp(STDIN_FILENO) == getpgrp());
+    fputs(is_fg ? "foreground\n" : "background\n", stderr);
 }
 
 static void sigint_parent() {
@@ -77,9 +82,10 @@ static void print_blocked_signals() {
         exit(EXIT_FAILURE);
     }
     // There is no obviously portable way to get the maximum number of signals.
-    // Here we limit it to 64 because strsignal on Linux returns "Unknown signal" for anything
+    // Here we limit it to 32 because strsignal on OpenBSD returns "Unknown signal" for anything
     // above.
-    for (int sig = 1; sig < 65; sig++) {
+    // NetBSD taps out at 63, Linux at 64.
+    for (int sig = 1; sig < 33; sig++) {
         if (sigismember(&sigs, sig)) {
             if (const char *s = strsignal(sig)) {
                 fprintf(stderr, "%s", s);
@@ -109,7 +115,8 @@ struct fth_command_t {
 static fth_command_t s_commands[] = {
     {"become_foreground_then_print_stderr", become_foreground_then_print_stderr,
      "Claim the terminal (tcsetpgrp) and then print to stderr"},
-    {"report_foreground", report_foreground,
+    {"report_foreground", report_foreground, "Report to stderr whether we own the terminal"},
+    {"report_foreground_loop", report_foreground_loop,
      "Continually report to stderr whether we own the terminal"},
     {"sigint_parent", sigint_parent, "Wait .25 seconds, then SIGINT the parent process"},
     {"print_stdout_stderr", print_stdout_stderr, "Print 'stdout' to stdout and 'stderr' to stderr"},

@@ -84,26 +84,32 @@ Syntax Highlighting
 
 .. role:: red
 .. role:: gray
-.. role:: underline
+.. role:: prompt
+.. role:: command
+.. role:: param
+.. role:: param-valid-path
 
-You'll quickly notice that ``fish`` performs syntax highlighting as you type. Invalid commands are colored red by default
+You'll quickly notice that fish performs syntax highlighting as you type. Invalid commands are colored red by default:
 
+.. parsed-literal::
 
-> :red:`/bin/mkd`
+    :prompt:`>` :red:`/bin/mkd`
 
 A command may be invalid because it does not exist, or refers to a file that you cannot execute. When the command becomes valid, it is shown in a different color::
 
     > /bin/mkdir
 
 
-``fish`` will underline valid file paths as you type them
+Valid file paths are underlined as you type them:
 
-> cat :underline:`~/somefi`
+.. parsed-literal::
+
+    :prompt:`>` :command:`cat` :param-valid-path:`~/somefi`
 
 
 This tells you that there exists a file that starts with ``somefi``, which is useful feedback as you type.
 
-These colors, and many more, can be changed by running ``fish_config``, or by modifying variables directly.
+These colors, and many more, can be changed by running ``fish_config``, or by modifying :ref:`color variables <variables-color>` directly.
 
 
 Wildcards
@@ -160,19 +166,25 @@ To redirect stdout and stderr into one file, you need to first redirect stdout, 
 Autosuggestions
 ---------------
 
-``fish`` suggests commands as you type, and shows the suggestion to the right of the cursor, in gray. For example
+As you type fish will suggest commands to the right of the cursor, in gray. For example:
 
-> :red:`/bin/h`:gray:`ostname`
+.. parsed-literal::
 
-
-It knows about paths and options
-
-`> grep --i`:gray:`gnore-case`
+    :prompt:`>` :red:`/bin/h`:gray:`ostname`
 
 
-And history too. Type a command once, and you can re-summon it by just typing a few letters
+It knows about paths and options:
 
-> :red:`r`:gray:`sync -avze ssh . myname@somelonghost.com:/some/long/path/doo/dee/doo/dee/doo`
+.. parsed-literal::
+
+    :prompt:`>` :command:`grep` :param:`--i`:gray:`gnore-case`
+
+
+And history too. Type a command once, and you can re-summon it by just typing a few letters:
+
+.. parsed-literal::
+
+    :prompt:`>` :red:`r`:gray:`sync -avze ssh . myname@somelonghost.com:/some/long/path/doo/dee/doo/dee/doo`
 
 
 To accept the autosuggestion, hit :kbd:`→` (right arrow) or :kbd:`Control`\ +\ :kbd:`F`. To accept a single word of the autosuggestion, :kbd:`Alt`\ +\ :kbd:`→` (right arrow). If the autosuggestion is not what you want, just ignore it.
@@ -180,29 +192,35 @@ To accept the autosuggestion, hit :kbd:`→` (right arrow) or :kbd:`Control`\ +\
 Tab Completions
 ---------------
 
-``fish`` comes with a rich set of tab completions, that work "out of the box."
+A rich set of tab completions work "out of the box".
 
-Press :kbd:`Tab`, and ``fish`` will attempt to complete the command, argument, or path
+Press :kbd:`Tab` and fish will attempt to complete the command, argument, or path:
 
-> :red:`/pri` :kbd:`Tab` => /private/
+.. parsed-literal::
+
+    :prompt:`>` :red:`/pri`:kbd:`Tab` => :command:`/private/`
 
 
-If there's more than one possibility, it will list them
+If there's more than one possibility, it will list them:
 
-> :red:`~/stuff/s` :kbd:`Tab`
-~/stuff/script.sh  (Executable, 4.8kB)  ~/stuff/sources/  (Directory)
+.. parsed-literal::
+
+    :prompt:`>` :red:`~/stuff/s`:kbd:`Tab`
+    ~/stuff/script.sh  (Executable, 4.8kB)  ~/stuff/sources/  (Directory)
 
 
 Hit tab again to cycle through the possibilities.
 
-``fish`` can also complete many commands, like git branches::
+fish can also complete many commands, like git branches:
 
-    > git merge pr :kbd:`Tab` => git merge prompt_designer
-    > git checkout b :kbd:`Tab`
+.. parsed-literal::
+
+    :prompt:`>` :command:`git` :param:`merge pr`:kbd:`Tab` => :command:`git` :param:`merge prompt_designer`
+    :prompt:`>` :command:`git` :param:`checkout b`:kbd:`Tab`
     builtin_list_io_merge (Branch) builtin_set_color (Branch) busted_events (Tag)
 
 
-Try hitting tab and see what ``fish`` can do!
+Try hitting tab and see what fish can do!
 
 Variables
 ---------
@@ -265,7 +283,7 @@ To give a variable to an external command, it needs to be "exported". Unlike oth
 It can also be unexported with ``--unexport`` or ``-u``.
 
 
-.. _tut_lists:
+.. _tut-lists:
 
 Lists
 -----
@@ -380,6 +398,8 @@ Unlike other shells, fish does not split command substitutions on any whitespace
     -lglib-2.0
 
 
+.. _tut-semicolon:
+
 Separating Commands (Semicolon)
 -------------------------------
 
@@ -397,7 +417,7 @@ To write them on the same line, use the semicolon (";"). That means the followin
 Exit Status
 -----------
 
-When a command exits, it returns a status code as a natural number. This indicates how the command fared - 0 usually means success, while the others signify kinds of failure. For instance fish's ``set --query`` returns the number of variables it queried that weren't set - ``set --query PATH`` usually returns 0, ``set --query arglbargl boogagoogoo`` usually returns 2.
+When a command exits, it returns a status code as a non-negative integer.
 
 Unlike other shells, ``fish`` stores the exit status of the last command in ``$status`` instead of ``$?``.
 
@@ -415,6 +435,8 @@ There is also a ``$pipestatus`` list variable for the exit statuses [#]_ of proc
 
 .. [#] or "stati" if you prefer, or "statūs" if you've time-travelled from ancient Rome or work as a latin teacher
 
+.. _tut-combiners:
+
 Combiners (And, Or, Not)
 ------------------------
 
@@ -422,25 +444,26 @@ fish supports the familiar ``&&`` and ``||`` to combine commands, and ``!`` to n
 
     > ./configure && make && sudo make install
 
-Here, `make` is only executed if `./configure` succeeds (returns 0), and `sudo make install` is only executed if both `./configure` and `make` succeed.
+Here, ``make`` is only executed if ``./configure`` succeeds (returns 0), and ``sudo make install`` is only executed if both ``./configure`` and ``make`` succeed.
 
-fish also supports ``and``, ``or``, and ``not``. The first two are job modifiers and have lower precedence. Example usage::
+fish also supports :ref:`and <cmd-and>`, :ref:`or <cmd-or>`, and :ref:`not <cmd-not>`. The first two are job modifiers and have lower precedence. Example usage::
 
     > cp file1.txt file1_bak.txt && cp file2.txt file2_bak.txt ; and echo "Backup successful"; or echo "Backup failed"
     Backup failed
 
 
-As mentioned in `the section on the semicolon <#tut_semicolon>`__, this can also be written in multiple lines, like so::
+As mentioned in :ref:`the section on the semicolon <tut-semicolon>`, this can also be written in multiple lines, like so::
 
     cp file1.txt file1_bak.txt && cp file2.txt file2_bak.txt
     and echo "Backup successful"
     or echo "Backup failed"
 
+.. _tut-conditionals:
 
 Conditionals (If, Else, Switch)
 -------------------------------
 
-Use ``if``, ``else if``, and ``else`` to conditionally execute code, based on the exit status of a command.
+Use :ref:`if <cmd-if>` and :ref:`else <cmd-else>` to conditionally execute code, based on the exit status of a command.
 
 
 ::
@@ -479,7 +502,7 @@ To compare strings or numbers or check file properties (whether a file exists or
         echo We do not have a hosts file
     end
 
-`Combiners <#tut_combiners>`__ can also be used to make more complex conditions, like
+:ref:`Combiners <tut-combiners>` can also be used to make more complex conditions, like
 
 
 ::
@@ -489,9 +512,9 @@ To compare strings or numbers or check file properties (whether a file exists or
     end
 
 
-For even more complex conditions, use ``begin`` and ``end`` to group parts of them.
+For even more complex conditions, use :ref:`begin <cmd-begin>` and :ref:`end <cmd-end>` to group parts of them.
 
-There is also a ``switch`` command::
+There is also a :ref:`switch <cmd-switch>` command::
 
     switch (uname)
     case Linux
@@ -505,13 +528,13 @@ There is also a ``switch`` command::
     end
 
 
-Note that ``case`` does not fall through, and can accept multiple arguments or (quoted) wildcards.
+Note that :ref:`case <cmd-case>` does not fall through, and can accept multiple arguments or (quoted) wildcards.
 
 
 Functions
 ---------
 
-A ``fish`` function is a list of commands, which may optionally take arguments. Unlike other shells, arguments are not passed in "numbered variables" like ``$1``, but instead in a single list ``$argv``. To create a function, use the :ref:`function <cmd-function>` builtin::
+A fish function is a list of commands, which may optionally take arguments. Unlike other shells, arguments are not passed in "numbered variables" like ``$1``, but instead in a single list ``$argv``. To create a function, use the :ref:`function <cmd-function>` builtin::
 
     > function say_hello
          echo Hello $argv
@@ -522,12 +545,12 @@ A ``fish`` function is a list of commands, which may optionally take arguments. 
     Hello everybody!
 
 
-Unlike other shells, ``fish`` does not have aliases or special prompt syntax. Functions take their place.
+Unlike other shells, fish does not have aliases or special prompt syntax. Functions take their place.
 
-You can list the names of all functions with the ``functions`` keyword (note the plural!). ``fish`` starts out with a number of functions::
+You can list the names of all functions with the :ref:`functions <cmd-functions>` builtin (note the plural!). fish starts out with a number of functions::
 
     > functions
-    alias, cd, delete-or-exit, dirh, dirs, down-or-search, eval, export, fish_command_not_found_setup, fish_config, fish_default_key_bindings, fish_prompt, fish_right_prompt, fish_sigtrap_handler, fish_update_completions, funced, funcsave, grep, help, history, isatty, ls, man, math, nextd, nextd-or-forward-word, open, popd, prevd, prevd-or-backward-word, prompt_pwd, psub, pushd, seq, setenv, trap, type, umask, up-or-search, vared
+    N_, abbr, alias, bg, cd, cdh, contains_seq, delete-or-exit, dirh, dirs, disown, down-or-search, edit_command_buffer, export, fg, fish_add_path, fish_breakpoint_prompt, fish_clipboard_copy, fish_clipboard_paste, fish_config, fish_default_key_bindings, fish_default_mode_prompt, fish_git_prompt, fish_hg_prompt, fish_hybrid_key_bindings, fish_indent, fish_is_root_user, fish_job_summary, fish_key_reader, fish_md5, fish_mode_prompt, fish_npm_helper, fish_opt, fish_print_git_action, fish_print_hg_root, fish_prompt, fish_sigtrap_handler, fish_svn_prompt, fish_title, fish_update_completions, fish_vcs_prompt, fish_vi_cursor, fish_vi_key_bindings, funced, funcsave, grep, help, history, hostname, isatty, kill, la, ll, ls, man, nextd, nextd-or-forward-word, open, popd, prevd, prevd-or-backward-word, prompt_hostname, prompt_pwd, psub, pushd, realpath, seq, setenv, suspend, trap, type, umask, up-or-search, vared, wait
 
 
 You can see the source for any function by passing its name to ``functions``::
@@ -569,39 +592,44 @@ Iterating over a list of numbers can be done with ``seq``::
 Prompt
 ------
 
-Unlike other shells, there is no prompt variable like PS1. To display your prompt, ``fish`` executes a function with the name ``fish_prompt``, and its output is used as the prompt.
-
-You can define your own prompt::
-
-    > function fish_prompt
-        echo "New Prompt % "
-    end
-    New Prompt % 
-
-
 .. role:: purple
-.. role:: yellow
 
-Multiple lines are OK. Colors can be set via ``set_color``, passing it named ANSI colors, or hex RGB values::
+Unlike other shells, there is no prompt variable like ``PS1``. To display your prompt, fish executes the :ref:`fish_prompt <cmd-fish_prompt>` function and uses its output as the prompt. And if it exists, fish also executes the :ref:`fish_right_prompt <cmd-fish_right_prompt>` function and uses its output as the right prompt.
 
-    > function fish_prompt
-          set_color purple
-          date "+%m/%d/%y"
-          set_color FF0
-          echo (pwd) '>' (set_color normal)
-      end
+You can define your own prompt from the command line:
 
-will look like
+.. parsed-literal::
 
-| :purple:`02/06/13`
-| :yellow:`/home/tutorial >`
+    > function fish_prompt; echo "New Prompt % "; end
+    New Prompt % _
 
-You can choose among some sample prompts by running ``fish_config prompt``. ``fish`` also supports RPROMPT through ``fish_right_prompt``.
+
+Then, if you are happy with it, you can save it to disk by typing ``funcsave fish_prompt``. This saves the prompt in ``~/.config/fish/functions/fish_prompt.fish``. (Or, if you want, you can create that file manually from the start.)
+
+Multiple lines are OK. Colors can be set via :ref:`set_color <cmd-set_color>`, passing it named ANSI colors, or hex RGB values::
+
+    function fish_prompt
+        set_color purple
+        date "+%m/%d/%y"
+        set_color F00
+        echo (pwd) '>' (set_color normal)
+    end
+
+
+This prompt would look like:
+
+.. parsed-literal::
+
+     :purple:`02/06/13`
+     :red:`/home/tutorial >` _
+
+
+You can choose among some sample prompts by running ``fish_config prompt``.
 
 $PATH
 -----
 
-``$PATH`` is an environment variable containing the directories that ``fish`` searches for commands. Unlike other shells, $PATH is a :ref:`list <tut_lists>`, not a colon-delimited string.
+``$PATH`` is an environment variable containing the directories that ``fish`` searches for commands. Unlike other shells, $PATH is a :ref:`list <tut-lists>`, not a colon-delimited string.
 
 To prepend /usr/local/bin and /usr/sbin to ``$PATH``, you can write::
 
@@ -621,12 +649,16 @@ and it will be exported like that, and when fish starts it splits the $PATH it r
 
 You can do so directly in ``config.fish``, like you might do in other shells with ``.profile``. See :ref:`this example <path_example>`.
 
-A faster way is to modify the ``$fish_user_paths`` :ref:`universal variable <tut-universal>`, which is automatically prepended to ``$PATH``. For example, to permanently add ``/usr/local/bin`` to your ``$PATH``, you could write::
+A faster way is to use the :ref:`fish_add_path <cmd-fish_add_path>` function, which adds given directories to the path if they aren't already included. It does this by modifying the ``$fish_user_paths`` :ref:`universal variable <tut-universal>`, which is automatically prepended to ``$PATH``. For example, to permanently add ``/usr/local/bin`` to your ``$PATH``, you could write::
 
-    > set -U fish_user_paths /usr/local/bin $fish_user_paths
+    > fish_add_path /usr/local/bin
 
 
-The advantage is that you don't have to go mucking around in files: just run this once at the command line, and it will affect the current session and all future instances too. (Note: you should NOT add this line to ``config.fish``. If you do, the variable will get longer each time you run fish!)
+The advantage is that you don't have to go mucking around in files: just run this once at the command line, and it will affect the current session and all future instances too. You can also add this line to :ref:`config.fish <tut-config>`, as it only adds the component if necessary.
+
+Or you can modify $fish_user_paths yourself, but you should be careful *not* to append to it unconditionally in config.fish, or it will grow longer and longer.
+
+.. _tut-config:
 
 Startup (Where's .bashrc?)
 --------------------------
@@ -697,19 +729,14 @@ Switching to fish?
 ------------------
 
 If you wish to use fish (or any other shell) as your default shell,
-you need to enter your new shell's executable ``/usr/local/bin/fish`` in two places:
-- add ``/usr/local/bin/fish`` to ``/etc/shells``
-- change your default shell with ``chsh -s /usr/local/bin/fish``
+you need to enter your new shell's executable in two places.
 
-You can use the following commands for this:
-
-Add the fish shell ``/usr/local/bin/fish``
-to ``/etc/shells`` with::
+Add the shell to ``/etc/shells`` with::
 
     > echo /usr/local/bin/fish | sudo tee -a /etc/shells
 
 
-Change your default shell to fish with::
+Change your default shell with::
 
     > chsh -s /usr/local/bin/fish
 

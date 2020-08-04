@@ -36,6 +36,7 @@
 #include "function.h"
 #include "io.h"
 #include "iothread.h"
+#include "job_group.h"
 #include "null_terminated_array.h"
 #include "parse_tree.h"
 #include "parser.h"
@@ -47,42 +48,11 @@
 #include "signal.h"
 #include "timer.h"
 #include "trace.h"
+#include "wcstringutil.h"
 #include "wutil.h"  // IWYU pragma: keep
 
 /// Number of calls to fork() or posix_spawn().
 static relaxed_atomic_t<int> s_fork_count{0};
-
-pgroup_provenance_t get_pgroup_provenance(const shared_ptr<job_t> &j,
-                                          const job_lineage_t &lineage) {
-    bool first_proc_is_internal = j->processes.front()->is_internal();
-    bool has_internal = j->has_internal_proc();
-    bool has_external = j->has_external_proc();
-    assert(first_proc_is_internal ? has_internal : has_external);
-
-    if (lineage.parent_pgid.has_value() && j->is_foreground()) {
-        // Our lineage indicates a pgid. This means the job is "nested" as a function or block
-        // inside another job, which has a real pgroup. We're going to use that, unless it's
-        // backgrounded, in which case it should not inherit a pgroup.
-        return pgroup_provenance_t::lineage;
-    } else if (!j->wants_job_control()) {
-        // This job doesn't need job control, it can just live in the fish pgroup.
-        return pgroup_provenance_t::fish_itself;
-    } else if (has_external && !first_proc_is_internal) {
-        // The first process is external, it will own the pgroup.
-        return pgroup_provenance_t::first_external_proc;
-    } else if (has_external && first_proc_is_internal) {
-        // The terminal owner has to be the process which is permitted to read from stdin.
-        // This is the first process in the pipeline. When executing, a process in the job will
-        // claim the pgrp if it's not set; therefore set it according to the first process.
-        // Only do this if there's an external process - see #6011.
-        return pgroup_provenance_t::fish_itself;
-    } else {
-        assert(has_internal && !has_external && "Should be internal only");
-        // This job consists of only internal functions or builtins; we do not need to assign a
-        // pgroup (yet).
-        return pgroup_provenance_t::unassigned;
-    }
-}
 
 /// This function is executed by the child process created by a call to fork(). It should be called
 /// after \c child_setup_process. It calls execve to replace the fish process image with the command
@@ -141,12 +111,12 @@ pgroup_provenance_t get_pgroup_provenance(const shared_ptr<job_t> &j,
 
     auto export_vars = vars.export_arr();
     const char *const *envv = export_vars->get();
-    char *actual_cmd = wcs2str(p->actual_cmd);
+    std::string actual_cmd = wcs2string(p->actual_cmd);
 
     // Ensure the terminal modes are what they were before we changed them.
     restore_term_mode();
     // Bounce to launch_process. This never returns.
-    safe_launch_process(p, actual_cmd, argv_array.get(), envv);
+    safe_launch_process(p, actual_cmd.c_str(), argv_array.get(), envv);
 }
 
 // Returns whether we can use posix spawn for a given process in a given job.
@@ -168,7 +138,7 @@ static bool can_use_posix_spawn_for_job(const std::shared_ptr<job_t> &job,
     if (job->wants_job_control()) {  //!OCLINT(collapsible if statements)
         // We are going to use job control; therefore when we launch this job it will get its own
         // process group ID. But will it be foregrounded?
-        if (job->should_claim_terminal()) {
+        if (job->group->should_claim_terminal()) {
             // It will be foregrounded, so we will call tcsetpgrp(), therefore do not use
             // posix_spawn.
             return false;
@@ -187,7 +157,7 @@ static void internal_exec(env_stack_t &vars, job_t *j, const io_chain_t &block_i
 
     // child_setup_process makes sure signals are properly set up.
     dup2_list_t redirs = dup2_list_t::resolve_chain(all_ios);
-    if (child_setup_process(INVALID_PID, *j, false, redirs) == 0) {
+    if (child_setup_process(INVALID_PID, INVALID_PID, *j, false, redirs) == 0) {
         // Decrement SHLVL as we're removing ourselves from the shell "stack".
         auto shlvl_var = vars.get(L"SHLVL", ENV_GLOBAL | ENV_EXPORT);
         wcstring shlvl_str = L"0";
@@ -205,12 +175,13 @@ static void internal_exec(env_stack_t &vars, job_t *j, const io_chain_t &block_i
 }
 
 /// If our pgroup assignment mode wants us to use the first external proc, then apply it here.
-static void maybe_assign_pgid_from_child(const std::shared_ptr<job_t> &j, pid_t child_pid) {
-    // If our assignment mode is the first process, then assign it.
-    if (j->pgid == INVALID_PID &&
-        j->pgroup_provenance == pgroup_provenance_t::first_external_proc) {
-        j->pgid = child_pid;
+/// \returns the job's pgid, which should always be set to something valid after this call.
+static pid_t maybe_assign_pgid_from_child(const std::shared_ptr<job_t> &j, pid_t child_pid) {
+    auto &jt = j->group;
+    if (jt->needs_pgid_assignment()) {
+        jt->set_pgid(child_pid);
     }
+    return *jt->get_pgid();
 }
 
 /// Construct an internal process for the process p. In the background, write the data \p outdata to
@@ -340,15 +311,24 @@ bool blocked_signals_for_job(const job_t &job, sigset_t *sigmask) {
 static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t *p,
                                    const dup2_list_t &dup2s, const char *fork_type,
                                    const std::function<void()> &child_action) {
+    assert(!job->group->is_internal() && "Internal groups should never need to fork");
+    // Decide if we want to job to control the tty.
+    // If so we need to get our pgroup; if not we don't need the pgroup.
+    bool claim_tty = job->group->should_claim_terminal();
+    pid_t fish_pgrp = claim_tty ? getpgrp() : INVALID_PID;
+
     pid_t pid = execute_fork();
     if (pid == 0) {
         // This is the child process. Setup redirections, print correct output to
         // stdout and stderr, and then exit.
-        maybe_t<pid_t> new_termowner{};
         p->pid = getpid();
-        child_set_group(job.get(), p);
-        child_setup_process(job->should_claim_terminal() ? job->pgid : INVALID_PID, *job, true,
-                            dup2s);
+        pid_t pgid = maybe_assign_pgid_from_child(job, p->pid);
+
+        // The child attempts to join the pgroup.
+        if (int err = execute_setpgid(p->pid, pgid, false /* not parent */)) {
+            report_setpgid_error(err, pgid, job.get(), p);
+        }
+        child_setup_process(claim_tty ? pgid : INVALID_PID, fish_pgrp, *job, true, dup2s);
         child_action();
         DIE("Child process returned control to fork_child lambda!");
     }
@@ -366,9 +346,14 @@ static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t 
           p->argv0());
 
     p->pid = pid;
-    maybe_assign_pgid_from_child(job, p->pid);
-    set_child_group(job.get(), p->pid);
-    terminal_maybe_give_to_job(job.get(), false);
+    pid_t pgid = maybe_assign_pgid_from_child(job, p->pid);
+
+    // The parent attempts to send the child to its pgroup.
+    // EACCESS is an expected benign error as the child may have called exec().
+    if (int err = execute_setpgid(p->pid, pgid, true /* is parent */)) {
+        if (err != EACCES) report_setpgid_error(err, pgid, job.get(), p);
+    }
+    terminal_maybe_give_to_job_group(job->group.get(), false);
     return true;
 }
 
@@ -434,17 +419,47 @@ static bool exec_internal_builtin_proc(parser_t &parser, process_t *p, const io_
     return true;  // "success"
 }
 
+/// \return an newly allocated output stream for the given fd, which is typically stdout or stderr.
+/// This inspects the io_chain and decides what sort of output stream to return.
+static std::unique_ptr<output_stream_t> create_output_stream_for_builtin(const parser_t &parser,
+                                                                         const io_chain_t &io_chain,
+                                                                         int fd) {
+    const shared_ptr<const io_data_t> io = io_chain.io_for_fd(fd);
+    if (io == nullptr) {
+        // Common case of no redirections.
+        // Just write to the fd directly.
+        return make_unique<fd_output_stream_t>(fd);
+    }
+    switch (io->io_mode) {
+        case io_mode_t::bufferfill:
+            // Write to a buffer.
+            return make_unique<buffered_output_stream_t>(parser.libdata().read_limit);
+
+        case io_mode_t::close:
+            return make_unique<null_output_stream_t>();
+
+        // TODO: reconsider these.
+        case io_mode_t::file:
+        case io_mode_t::pipe:
+        case io_mode_t::fd:
+            return make_unique<buffered_output_stream_t>(parser.libdata().read_limit);
+    }
+    DIE("Unreachable");
+}
+
 /// Handle output from a builtin, by printing the contents of builtin_io_streams to the redirections
 /// given in io_chain.
 static bool handle_builtin_output(parser_t &parser, const std::shared_ptr<job_t> &j, process_t *p,
                                   io_chain_t *io_chain, const io_streams_t &builtin_io_streams) {
     assert(p->type == process_type_t::builtin && "Process is not a builtin");
 
-    const output_stream_t &stdout_stream = builtin_io_streams.out;
-    const output_stream_t &stderr_stream = builtin_io_streams.err;
+    const separated_buffer_t<wcstring> *output_buffer =
+        builtin_io_streams.out.get_separated_buffer();
+    const separated_buffer_t<wcstring> *errput_buffer =
+        builtin_io_streams.err.get_separated_buffer();
 
     // Mark if we discarded output.
-    if (stdout_stream.buffer().discarded()) {
+    if (output_buffer && output_buffer->discarded()) {
         p->status = proc_status_t::from_exit_code(STATUS_READ_TOO_MUCH);
     }
 
@@ -454,22 +469,29 @@ static bool handle_builtin_output(parser_t &parser, const std::shared_ptr<job_t>
     // If we are directing output to a buffer, then we can just transfer it directly without needing
     // to write to the bufferfill pipe. Note this is how we handle explicitly separated stdout
     // output (i.e. string split0) which can't really be sent through a pipe.
-    // TODO: we're sloppy about handling explicitly separated output.
-    // Theoretically we could have explicitly separated output on stdout and also stderr output; in
-    // that case we ought to thread the exp-sep output through to the io buffer. We're getting away
-    // with this because the only thing that can output exp-sep output is `string split0` which
-    // doesn't also produce stderr. Also note that we never send stderr to a buffer, so there's no
-    // need for a similar check for stderr.
     bool stdout_done = false;
-    if (stdout_io && stdout_io->io_mode == io_mode_t::bufferfill) {
+    if (output_buffer && stdout_io && stdout_io->io_mode == io_mode_t::bufferfill) {
         auto stdout_buffer = dynamic_cast<const io_bufferfill_t *>(stdout_io.get())->buffer();
-        stdout_buffer->append_from_stream(stdout_stream);
+        stdout_buffer->append_from_wide_buffer(*output_buffer);
         stdout_done = true;
     }
 
+    bool stderr_done = false;
+    if (errput_buffer && stderr_io && stderr_io->io_mode == io_mode_t::bufferfill) {
+        auto stderr_buffer = dynamic_cast<const io_bufferfill_t *>(stderr_io.get())->buffer();
+        stderr_buffer->append_from_wide_buffer(*errput_buffer);
+        stderr_done = true;
+    }
+
     // Figure out any data remaining to write. We may have none in which case we can short-circuit.
-    std::string outbuff = stdout_done ? std::string{} : wcs2string(stdout_stream.contents());
-    std::string errbuff = wcs2string(stderr_stream.contents());
+    std::string outbuff;
+    if (output_buffer && !stdout_done) {
+        outbuff = wcs2string(output_buffer->newline_serialized());
+    }
+    std::string errbuff;
+    if (errput_buffer && !stderr_done) {
+        errbuff = wcs2string(errput_buffer->newline_serialized());
+    }
 
     // If we have no redirections for stdout/stderr, just write them directly.
     if (!stdout_io && !stderr_io) {
@@ -540,51 +562,34 @@ static bool exec_external_command(parser_t &parser, const std::shared_ptr<job_t>
     bool use_posix_spawn = g_use_posix_spawn && can_use_posix_spawn_for_job(j, dup2s);
     if (use_posix_spawn) {
         s_fork_count++;  // spawn counts as a fork+exec
-        // Create posix spawn attributes and actions.
-        pid_t pid = 0;
-        posix_spawnattr_t attr = posix_spawnattr_t();
-        posix_spawn_file_actions_t actions = posix_spawn_file_actions_t();
-        bool made_it = fork_actions_make_spawn_properties(&attr, &actions, j.get(), dup2s);
-        if (made_it) {
-            // We successfully made the attributes and actions; actually call
-            // posix_spawn.
-            int spawn_ret =
-                posix_spawn(&pid, actual_cmd, &actions, &attr, const_cast<char *const *>(argv),
-                            const_cast<char *const *>(envv));
 
-            // This usleep can be used to test for various race conditions
-            // (https://github.com/fish-shell/fish-shell/issues/360).
-            // usleep(10000);
-
-            if (spawn_ret != 0) {
-                safe_report_exec_error(spawn_ret, actual_cmd, argv, envv);
-                // Make sure our pid isn't set.
-                pid = 0;
-            }
-
-            // Clean up our actions.
-            posix_spawn_file_actions_destroy(&actions);
-            posix_spawnattr_destroy(&attr);
-        }
-
-        // A 0 pid means we failed to posix_spawn. Since we have no pid, we'll never get
-        // told when it's exited, so we have to mark the process as failed.
-        FLOGF(exec_fork, L"Fork #%d, pid %d: spawn external command '%s' from '%ls'",
-              int(s_fork_count), pid, actual_cmd, file ? file : L"<no file>");
-        if (pid == 0) {
+        posix_spawner_t spawner(j.get(), dup2s);
+        maybe_t<pid_t> pid = spawner.spawn(actual_cmd, const_cast<char *const *>(argv),
+                                           const_cast<char *const *>(envv));
+        if (int err = spawner.get_error()) {
+            safe_report_exec_error(err, actual_cmd, argv, envv);
             job_mark_process_as_failed(j, p);
             return false;
         }
+        assert(pid.has_value() && *pid > 0 && "Should have either a valid pid, or an error");
+
+        // This usleep can be used to test for various race conditions
+        // (https://github.com/fish-shell/fish-shell/issues/360).
+        // usleep(10000);
+
+        FLOGF(exec_fork, L"Fork #%d, pid %d: spawn external command '%s' from '%ls'",
+              int(s_fork_count), *pid, actual_cmd, file ? file : L"<no file>");
 
         // these are all things do_fork() takes care of normally (for forked processes):
-        p->pid = pid;
-        maybe_assign_pgid_from_child(j, p->pid);
+        p->pid = *pid;
+        pid_t pgid = maybe_assign_pgid_from_child(j, p->pid);
 
+        // posix_spawn should in principle set the pgid before returning.
         // In glibc, posix_spawn uses fork() and the pgid group is set on the child side;
         // therefore the parent may not have seen it be set yet.
         // Ensure it gets set. See #4715, also https://github.com/Microsoft/WSL/issues/2997.
-        set_child_group(j.get(), p->pid);
-        terminal_maybe_give_to_job(j.get(), false);
+        execute_setpgid(p->pid, pgid, true /* is parent */);
+        terminal_maybe_give_to_job_group(j->group.get(), false);
     } else
 #endif
     {
@@ -657,18 +662,16 @@ static proc_performer_t get_performer_for_process(process_t *p, job_t *job,
                                                   const io_chain_t &io_chain) {
     assert((p->type == process_type_t::function || p->type == process_type_t::block_node) &&
            "Unexpected process type");
-    // Make a lineage for our children.
-    job_lineage_t lineage;
-    lineage.parent_pgid = (job->pgid == INVALID_PID ? none() : maybe_t<pid_t>(job->pgid));
-    lineage.block_io = io_chain;
-    lineage.root_constructed = job->root_constructed;
-    lineage.root_has_job_control = job->wants_job_control();
+    // We want to capture the job group.
+    job_group_ref_t job_group = job->group;
 
     if (p->type == process_type_t::block_node) {
         const parsed_source_ref_t &source = p->block_node_source;
-        tnode_t<grammar::statement> node = p->internal_block_node;
+        const ast::statement_t *node = p->internal_block_node;
         assert(source && node && "Process is missing node info");
-        return [=](parser_t &parser) { return parser.eval_node(source, node, lineage).status; };
+        return [=](parser_t &parser) {
+            return parser.eval_node(source, *node, io_chain, job_group).status;
+        };
     } else {
         assert(p->type == process_type_t::function);
         auto props = function_get_properties(p->argv0());
@@ -679,9 +682,9 @@ static proc_performer_t get_performer_for_process(process_t *p, job_t *job,
         auto argv = move_to_sharedptr(p->get_argv_array().to_list());
         return [=](parser_t &parser) {
             // Pull out the job list from the function.
-            tnode_t<grammar::job_list> body = props->func_node.child<1>();
+            const ast::job_list_t &body = props->func_node->jobs;
             const block_t *fb = function_prepare_environment(parser, *argv, *props);
-            auto res = parser.eval_node(props->parsed_source, body, lineage);
+            auto res = parser.eval_node(props->parsed_source, body, io_chain, job_group);
             function_restore_environment(parser, fb);
 
             // If the function did not execute anything, treat it as success.
@@ -713,14 +716,6 @@ static bool exec_block_or_func_process(parser_t &parser, const std::shared_ptr<j
         io_chain.push_back(block_output_bufferfill);
     }
 
-    // If this function is the only process in the current job
-    // and that job is in the foreground then mark this job as internal
-    // so it doesn't increment the job id for any jobs created within this
-    // function.
-    if (p->is_first_in_job && p->is_last_in_job && j->flags().foreground) {
-        j->mark_internal();
-    }
-
     // Get the process performer, and just execute it directly.
     // Do it in this scoped way so that the performer function can be eagerly deallocating releasing
     // its captured io chain.
@@ -745,15 +740,15 @@ static bool exec_block_or_func_process(parser_t &parser, const std::shared_ptr<j
     return true;
 }
 
-/// Executes a process \p in job \j, using the pipes \p pipes (which may have invalid fds if this is
-/// the first or last process).
+/// Executes a process \p \p in \p job, using the pipes \p pipes (which may have invalid fds if this
+/// is the first or last process).
 /// \p deferred_pipes represents the pipes from our deferred process; if set ensure they get closed
 /// in any child. If \p is_deferred_run is true, then this is a deferred run; this affects how
 /// certain buffering works. \returns true on success, false on exec error.
 static bool exec_process_in_job(parser_t &parser, process_t *p, const std::shared_ptr<job_t> &j,
                                 const io_chain_t &block_io, autoclose_pipes_t pipes,
                                 const fd_set_t &conflicts, const autoclose_pipes_t &deferred_pipes,
-                                size_t stdout_read_limit, bool is_deferred_run = false) {
+                                bool is_deferred_run = false) {
     // The write pipe (destined for stdout) needs to occur before redirections. For example,
     // with a redirection like this:
     //
@@ -800,8 +795,18 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
     // This may fail.
     if (!process_net_io_chain.append_from_specs(p->redirection_specs(),
                                                 parser.vars().get_pwd_slash())) {
-        // Error.
-        return false;
+        // If the redirection to a file failed, append_from_specs closes the corresponding handle
+        // allowing us to recover from failure mid-way through execution of a piped job to e.g.
+        // recover from loss of terminal control, etc.
+
+        // It is unsafe to abort execution in the middle of a multi-command job as we might end up
+        // trying to resume execution without control of the terminal.
+        if (p->is_first_in_job) {
+            // It's OK to abort here
+            return false;
+        }
+        // Otherwise, just rely on the closed fd to take care of things. It's also probably more
+        // semantically correct!
     }
 
     // Read pipe goes last.
@@ -851,8 +856,12 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
         }
 
         case process_type_t::builtin: {
-            io_streams_t builtin_io_streams{stdout_read_limit};
-            if (j->pgid != INVALID_PID) builtin_io_streams.parent_pgid = j->pgid;
+            std::unique_ptr<output_stream_t> output_stream =
+                create_output_stream_for_builtin(parser, process_net_io_chain, STDOUT_FILENO);
+            std::unique_ptr<output_stream_t> errput_stream =
+                create_output_stream_for_builtin(parser, process_net_io_chain, STDERR_FILENO);
+            io_streams_t builtin_io_streams{*output_stream, *errput_stream};
+            builtin_io_streams.job_group = j->group;
             if (!exec_internal_builtin_proc(parser, p, pipe_read.get(), process_net_io_chain,
                                             builtin_io_streams)) {
                 return false;
@@ -927,7 +936,7 @@ static bool allow_exec_with_background_jobs(parser_t &parser) {
     }
 }
 
-bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const job_lineage_t &lineage) {
+bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &block_io) {
     assert(j && "null job_t passed to exec_job!");
 
     // Set to true if something goes wrong while executing the job, in which case the cleanup
@@ -939,32 +948,8 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const job_lineage_t 
         return true;
     }
 
-    pid_t pgrp = getpgrp();
-    // Check to see if we should reclaim the foreground pgrp after the job finishes or stops.
-    const bool reclaim_foreground_pgrp = (tcgetpgrp(STDIN_FILENO) == pgrp);
-
-    // Perhaps we know our pgroup already.
-    assert(j->pgid == INVALID_PID && "Should not yet have a pid.");
-    switch (j->pgroup_provenance) {
-        case pgroup_provenance_t::lineage:
-            assert(*lineage.parent_pgid != INVALID_PID && "pgid should be none, not INVALID_PID");
-            j->pgid = *lineage.parent_pgid;
-            break;
-
-        case pgroup_provenance_t::fish_itself:
-            j->pgid = pgrp;
-            break;
-
-        // The remaining cases are all deferred until later.
-        case pgroup_provenance_t::unassigned:
-        case pgroup_provenance_t::first_external_proc:
-            break;
-    }
-
-    const size_t stdout_read_limit = parser.libdata().read_limit;
-
     // Get the list of all FDs so we can ensure our pipes do not conflict.
-    fd_set_t conflicts = lineage.block_io.fd_set();
+    fd_set_t conflicts = block_io.fd_set();
     for (const auto &p : j->processes) {
         for (const auto &spec : p->redirection_specs()) {
             conflicts.add(spec.fd);
@@ -978,7 +963,7 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const job_lineage_t 
             return false;
         }
 
-        internal_exec(parser.vars(), j.get(), lineage.block_io);
+        internal_exec(parser.vars(), j.get(), block_io);
         // internal_exec only returns if it failed to set up redirections.
         // In case of an successful exec, this code is not reached.
         int status = j->flags().negate ? 0 : 1;
@@ -1027,8 +1012,8 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const job_lineage_t 
         if (p.get() == deferred_process) {
             deferred_pipes = std::move(proc_pipes);
         } else {
-            if (!exec_process_in_job(parser, p.get(), j, lineage.block_io, std::move(proc_pipes),
-                                     conflicts, deferred_pipes, stdout_read_limit)) {
+            if (!exec_process_in_job(parser, p.get(), j, block_io, std::move(proc_pipes), conflicts,
+                                     deferred_pipes)) {
                 exec_error = true;
                 break;
             }
@@ -1039,26 +1024,27 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const job_lineage_t 
     // Now execute any deferred process.
     if (!exec_error && deferred_process) {
         assert(deferred_pipes.write.valid() && "Deferred process should always have a write pipe");
-        if (!exec_process_in_job(parser, deferred_process, j, lineage.block_io,
-                                 std::move(deferred_pipes), conflicts, {}, stdout_read_limit,
-                                 true)) {
+        if (!exec_process_in_job(parser, deferred_process, j, block_io, std::move(deferred_pipes),
+                                 conflicts, {}, true)) {
             exec_error = true;
         }
     }
 
     FLOGF(exec_job_exec, L"Executed job %d from command '%ls' with pgrp %d", j->job_id(),
-          j->command_wcstr(), j->pgid);
+          j->command_wcstr(), j->get_pgid() ? *j->get_pgid() : -2);
 
     j->mark_constructed();
     if (!j->is_foreground()) {
-        parser.vars().set_one(L"last_pid", ENV_GLOBAL, to_string(j->pgid));
+        auto pgid = j->get_pgid();
+        assert(pgid.has_value() && "Background jobs should always have a pgroup");
+        parser.vars().set_one(L"last_pid", ENV_GLOBAL, to_string(*pgid));
     }
 
     if (exec_error) {
         return false;
     }
 
-    j->continue_job(parser, reclaim_foreground_pgrp, false);
+    j->continue_job(parser, !j->is_initially_background());
     return true;
 }
 
@@ -1104,15 +1090,15 @@ static void populate_subshell_output(wcstring_list_t *lst, const io_buffer_t &bu
 
 /// Execute \p cmd in a subshell in \p parser. If \p lst is not null, populate it with the output.
 /// Return $status in \p out_status.
-/// If \p parent_pgid is set, any spawned commands should join that pgroup.
+/// If \p job_group is set, any spawned commands should join that job group.
 /// If \p apply_exit_status is false, then reset $status back to its original value.
 /// \p is_subcmd controls whether we apply a read limit.
 /// \p break_expand is used to propagate whether the result should be "expansion breaking" in the
 /// sense that subshells used during string expansion should halt that expansion. \return the value
 /// of $status.
-static int exec_subshell_internal(const wcstring &cmd, parser_t &parser, maybe_t<pid_t> parent_pgid,
-                                  wcstring_list_t *lst, bool *break_expand, bool apply_exit_status,
-                                  bool is_subcmd) {
+static int exec_subshell_internal(const wcstring &cmd, parser_t &parser,
+                                  const job_group_ref_t &job_group, wcstring_list_t *lst,
+                                  bool *break_expand, bool apply_exit_status, bool is_subcmd) {
     ASSERT_IS_MAIN_THREAD();
     auto &ld = parser.libdata();
 
@@ -1135,8 +1121,7 @@ static int exec_subshell_internal(const wcstring &cmd, parser_t &parser, maybe_t
         *break_expand = true;
         return STATUS_CMD_ERROR;
     }
-    eval_res_t eval_res =
-        parser.eval(cmd, io_chain_t{bufferfill}, parent_pgid, block_type_t::subst);
+    eval_res_t eval_res = parser.eval(cmd, io_chain_t{bufferfill}, job_group, block_type_t::subst);
     std::shared_ptr<io_buffer_t> buffer = io_bufferfill_t::finish(std::move(bufferfill));
     if (buffer->buffer().discarded()) {
         *break_expand = true;
@@ -1155,24 +1140,24 @@ static int exec_subshell_internal(const wcstring &cmd, parser_t &parser, maybe_t
     return eval_res.status.status_value();
 }
 
-int exec_subshell_for_expand(const wcstring &cmd, parser_t &parser, maybe_t<pid_t> parent_pgid,
-                             wcstring_list_t &outputs) {
+int exec_subshell_for_expand(const wcstring &cmd, parser_t &parser,
+                             const job_group_ref_t &job_group, wcstring_list_t &outputs) {
     ASSERT_IS_MAIN_THREAD();
     bool break_expand = false;
-    int ret = exec_subshell_internal(cmd, parser, parent_pgid, &outputs, &break_expand, true, true);
+    int ret = exec_subshell_internal(cmd, parser, job_group, &outputs, &break_expand, true, true);
     // Only return an error code if we should break expansion.
     return break_expand ? ret : STATUS_CMD_OK;
 }
 
 int exec_subshell(const wcstring &cmd, parser_t &parser, bool apply_exit_status) {
     bool break_expand = false;
-    return exec_subshell_internal(cmd, parser, none(), nullptr, &break_expand, apply_exit_status,
+    return exec_subshell_internal(cmd, parser, nullptr, nullptr, &break_expand, apply_exit_status,
                                   false);
 }
 
 int exec_subshell(const wcstring &cmd, parser_t &parser, wcstring_list_t &outputs,
                   bool apply_exit_status) {
     bool break_expand = false;
-    return exec_subshell_internal(cmd, parser, none(), &outputs, &break_expand, apply_exit_status,
+    return exec_subshell_internal(cmd, parser, nullptr, &outputs, &break_expand, apply_exit_status,
                                   false);
 }

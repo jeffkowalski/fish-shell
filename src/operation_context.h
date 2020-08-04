@@ -7,6 +7,7 @@
 
 class environment_t;
 class parser_t;
+class job_group_t;
 
 /// A common helper which always returns false.
 bool no_cancel();
@@ -29,10 +30,10 @@ class operation_context_t {
     // context itself.
     const environment_t &vars;
 
-    /// The pgid of the parental job.
+    /// The job group of the parental job.
     /// This is used only when expanding command substitutions. If this is set, any jobs created by
-    /// the command substitions should use this pgid.
-    maybe_t<pid_t> parent_pgid{};
+    /// the command substitions should use this tree.
+    std::shared_ptr<job_group_t> job_group{};
 
     // A function which may be used to poll for cancellation.
     cancel_checker_t cancel_checker;

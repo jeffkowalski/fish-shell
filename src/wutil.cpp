@@ -29,6 +29,7 @@
 #include "common.h"
 #include "fallback.h"  // IWYU pragma: keep
 #include "flog.h"
+#include "wcstringutil.h"
 #include "wutil.h"  // IWYU pragma: keep
 
 using cstring = std::string;
@@ -166,11 +167,10 @@ int open_cloexec(const std::string &path, int flags, mode_t mode) {
 }
 
 int open_cloexec(const char *path, int flags, mode_t mode) {
-    ASSERT_IS_NOT_FORKED_CHILD();
     int fd;
 
+// Prefer to use O_CLOEXEC.
 #ifdef O_CLOEXEC
-    // Prefer to use O_CLOEXEC. It has to both be defined and nonzero.
     fd = open(path, flags | O_CLOEXEC, mode);
 #else
     fd = open(path, flags, mode);
@@ -481,19 +481,15 @@ wcstring path_normalize_for_cd(const wcstring &wd, const wcstring &path) {
 }
 
 wcstring wdirname(const wcstring &path) {
-    char *tmp = wcs2str(path);
-    char *narrow_res = dirname(tmp);
-    wcstring result = format_string(L"%s", narrow_res);
-    free(tmp);
-    return result;
+    std::string tmp = wcs2string(path);
+    const char *narrow_res = dirname(&tmp[0]);
+    return str2wcstring(narrow_res);
 }
 
 wcstring wbasename(const wcstring &path) {
-    char *tmp = wcs2str(path);
-    char *narrow_res = basename(tmp);
-    wcstring result = format_string(L"%s", narrow_res);
-    free(tmp);
-    return result;
+    std::string tmp = wcs2string(path);
+    char *narrow_res = basename(&tmp[0]);
+    return str2wcstring(narrow_res);
 }
 
 // Really init wgettext.
@@ -538,6 +534,56 @@ int wrename(const wcstring &old, const wcstring &newv) {
     cstring old_narrow = wcs2string(old);
     cstring new_narrow = wcs2string(newv);
     return rename(old_narrow.c_str(), new_narrow.c_str());
+}
+
+ssize_t wwrite_to_fd(const wchar_t *input, size_t input_len, int fd) {
+    // Accumulate data in a local buffer.
+    char accum[512];
+    size_t accumlen{0};
+    constexpr size_t maxaccum = sizeof accum / sizeof *accum;
+
+    // Helper to perform a write to 'fd', looping as necessary.
+    // \return true on success, false on error.
+    ssize_t total_written = 0;
+    auto do_write = [fd, &total_written](const char *cursor, size_t remaining) {
+        while (remaining > 0) {
+            ssize_t samt = write(fd, cursor, remaining);
+            if (samt < 0) return false;
+            total_written += samt;
+            size_t amt = static_cast<size_t>(samt);
+            assert(amt <= remaining && "Wrote more than requested");
+            remaining -= amt;
+            cursor += amt;
+        }
+        return true;
+    };
+
+    // Helper to flush the accumulation buffer.
+    auto flush_accum = [&] {
+        if (!do_write(accum, accumlen)) return false;
+        accumlen = 0;
+        return true;
+    };
+
+    bool success = wcs2string_callback(input, input_len, [&](const char *buff, size_t len) {
+        if (len + accumlen > maxaccum) {
+            // We have to flush.
+            // Note this modifies 'accumlen'.
+            if (!flush_accum()) return false;
+        }
+        if (len + accumlen <= maxaccum) {
+            // Accumulate more.
+            memmove(accum + accumlen, buff, len);
+            accumlen += len;
+            return true;
+        } else {
+            // Too much data to even fit, just write it immediately.
+            return do_write(buff, len);
+        }
+    });
+    // Flush any remaining.
+    if (success) success = flush_accum();
+    return success ? total_written : -1;
 }
 
 /// Return one if the code point is in a Unicode private use area.

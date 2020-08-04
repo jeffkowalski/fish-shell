@@ -39,12 +39,12 @@
 #include <atomic>
 #include <csignal>
 #include <cwchar>
-#include <deque>
 #include <functional>
 #include <memory>
 #include <set>
 #include <stack>
 
+#include "ast.h"
 #include "color.h"
 #include "common.h"
 #include "complete.h"
@@ -74,7 +74,7 @@
 #include "sanity.h"
 #include "screen.h"
 #include "signal.h"
-#include "tnode.h"
+#include "termsize.h"
 #include "tokenizer.h"
 #include "wutil.h"  // IWYU pragma: keep
 
@@ -278,14 +278,6 @@ bool editable_line_t::redo() {
 
 namespace {
 
-/// Test if the given string contains error. Since this is the error detection for general purpose,
-/// there are no invalid strings, so this function always returns false.
-parser_test_error_bits_t default_test(parser_t &parser, const wcstring &b) {
-    UNUSED(parser);
-    UNUSED(b);
-    return 0;
-}
-
 /// Encapsulation of the reader's history search functionality.
 class reader_history_search_t {
    public:
@@ -304,7 +296,7 @@ class reader_history_search_t {
     history_search_t search_;
 
     /// The ordered list of matches. This may grow long.
-    std::deque<wcstring> matches_;
+    std::vector<wcstring> matches_;
 
     /// A set of new items to skip, corresponding to matches_ and anything added in skip().
     std::set<wcstring> skips_;
@@ -395,8 +387,8 @@ class reader_history_search_t {
 
     /// Go to the beginning (earliest) of the search.
     void go_to_beginning() {
-        while (move_forwards())
-            ;
+        if (matches_.empty()) return;
+        match_index_ = matches_.size() - 1;
     }
 
     /// Go to the end (most recent) of the search.
@@ -460,6 +452,8 @@ struct readline_loop_state_t;
 /// reader_readline() calls are nested. This happens when the 'read' builtin is used.
 class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
    public:
+    /// Configuration for the reader.
+    const reader_config_t conf;
     /// The parser being used.
     std::shared_ptr<parser_t> parser_ref;
     /// String containing the whole current commandline.
@@ -474,14 +468,8 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     pager_t pager;
     /// Current page rendering.
     page_rendering_t current_page_rendering;
-    /// Whether autosuggesting is allowed at all.
-    bool allow_autosuggestion{false};
     /// When backspacing, we temporarily suppress autosuggestions.
     bool suppress_autosuggestion{false};
-    /// Whether abbreviations are expanded.
-    bool expand_abbreviations{false};
-    /// Silent mode used for password input on the read command
-    bool silent{false};
     /// The representation of the current screen contents.
     screen_t screen;
     /// The source of input events.
@@ -498,9 +486,6 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     size_t sel_start_pos{0};
     /// The stop position of the current selection, if one.
     size_t sel_stop_pos{0};
-    /// The prompt commands.
-    wcstring left_prompt;
-    wcstring right_prompt;
     /// The output of the last evaluation of the prompt command.
     wcstring left_prompt_buff;
     wcstring mode_prompt_buff;
@@ -514,12 +499,6 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     std::vector<highlight_spec_t> colors;
     /// An array defining the block level at each character.
     std::vector<int> indents;
-    /// Whether tab completion is allowed.
-    bool complete_ok{false};
-    /// Function for syntax highlighting.
-    highlight_function_t highlight_func{highlight_universal};
-    /// Function for testing if the string can be returned.
-    test_function_t test_func{default_test};
     /// If this is true, exit reader even if there are running jobs. This happens if we press e.g.
     /// ^D twice.
     bool prev_end_loop{false};
@@ -530,8 +509,6 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     bool repaint_needed{false};
     /// Whether a screen reset is needed after a repaint.
     bool screen_reset_needed{false};
-    /// Whether the reader should exit on ^C.
-    bool exit_on_interrupt{false};
     /// The target character of the last jump command.
     wchar_t last_jump_target{0};
     jump_direction_t last_jump_direction{jump_direction_t::forward};
@@ -571,8 +548,11 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     /// Access the parser.
     parser_t &parser() { return *parser_ref; }
 
-    reader_data_t(std::shared_ptr<parser_t> parser, history_t *hist)
-        : parser_ref(std::move(parser)), inputter(*parser_ref), history(hist) {}
+    reader_data_t(std::shared_ptr<parser_t> parser, history_t *hist, reader_config_t &&conf)
+        : conf(std::move(conf)),
+          parser_ref(std::move(parser)),
+          inputter(*parser_ref),
+          history(hist) {}
 
     void update_buff_pos(editable_line_t *el, maybe_t<size_t> new_pos = none_t());
     void repaint();
@@ -601,7 +581,8 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     bool can_autosuggest() const;
     void autosuggest_completed(autosuggestion_result_t result);
     void update_autosuggestion();
-    void accept_autosuggestion(bool full, move_word_style_t style = move_word_style_punctuation);
+    void accept_autosuggestion(bool full, bool single = false,
+                               move_word_style_t style = move_word_style_punctuation);
     void super_highlight_me_plenty(int highlight_pos_adjust = 0, bool no_io = false);
 
     void highlight_search();
@@ -621,6 +602,9 @@ class reader_data_t : public std::enable_shared_from_this<reader_data_t> {
     void update_command_line_from_history_search();
     void set_buffer_maintaining_pager(const wcstring &b, size_t pos, bool transient = false);
     void delete_char(bool backward = true);
+
+    /// Called to update the termsize, including $COLUMNS and $LINES, as necessary.
+    void update_termsize() { (void)termsize_container_t::shared().updating(parser()); }
 };
 
 /// This variable is set to a signal by the signal handler when ^C is pressed.
@@ -636,6 +620,39 @@ static struct termios terminal_mode_on_startup;
 /// Mode we use to execute programs.
 static struct termios tty_modes_for_external_cmds;
 
+/// Restore terminal settings we care about, to prevent a broken shell.
+static void term_fix_modes(struct termios *modes) {
+    modes->c_iflag &= ~ICRNL;   // disable mapping CR (\cM) to NL (\cJ)
+    modes->c_iflag &= ~INLCR;   // disable mapping NL (\cJ) to CR (\cM)
+    modes->c_lflag &= ~ICANON;  // turn off canonical mode
+    modes->c_lflag &= ~ECHO;    // turn off echo mode
+    modes->c_lflag &= ~IEXTEN;  // turn off handling of discard and lnext characters
+    modes->c_oflag |= OPOST;    // turn on "implementation-defined post processing" - this often
+                                // changes how line breaks work.
+
+    // Disable flow control in the shell. We don't want to be stopped.
+    modes->c_iflag &= ~IXON;
+    modes->c_iflag &= ~IXOFF;
+
+    modes->c_cc[VMIN] = 1;
+    modes->c_cc[VTIME] = 0;
+
+    unsigned char disabling_char = '\0';
+    // Prefer to use _POSIX_VDISABLE to disable control functions.
+    // This permits separately binding nul (typically control-space).
+    // POSIX calls out -1 as a special value which should be ignored.
+#ifdef _POSIX_VDISABLE
+    if (_POSIX_VDISABLE != -1) disabling_char = _POSIX_VDISABLE;
+#endif
+
+    // We ignore these anyway, so there is no need to sacrifice a character.
+    modes->c_cc[VSUSP] = disabling_char;
+
+    // (these two are already disabled because of IXON/IXOFF)
+    modes->c_cc[VSTOP] = disabling_char;
+    modes->c_cc[VSTART] = disabling_char;
+}
+
 /// Tracks a currently pending exit. This may be manipulated from a signal handler.
 
 /// Whether we should exit the current reader loop.
@@ -644,8 +661,37 @@ static relaxed_atomic_bool_t s_end_current_loop{false};
 /// Whether we should exit all reader loops. This is set in response to a HUP signal and it
 /// latches (once set it is never cleared). This should never be reset to false.
 static volatile sig_atomic_t s_exit_forced{false};
+static volatile sig_atomic_t s_pending_exit_forced{false};
 
-static bool should_exit() { return s_end_current_loop || s_exit_forced; }
+void reader_sighup() {
+    // Beware, we are in a signal handler
+    s_pending_exit_forced = true;
+}
+
+static bool should_exit(parser_t *parser = nullptr) {
+    static bool s_tty_redirected = false;
+    // To make fish_exit safe to use in the event of SIGHUP, first redirect the tty
+    // to avoid a user script triggering SIGTTIN or SIGTTOU.
+    if (!s_tty_redirected && s_pending_exit_forced) {
+        redirect_tty_output();
+        s_tty_redirected = true;
+    }
+
+    // s_exit_forced cannot be unset and prevents all future execution. Since we might
+    // still have to run the fish_exit handlers, we first set s_pending_exit_force and
+    // then translate that into s_exit_forced here, after running whatever we need to
+    // guarantee runs.
+    if (parser && s_pending_exit_forced) {
+        s_pending_exit_forced = false;
+        // If we don't call fish_exit here, it'll be called later but won't be able to
+        // execute anything as our loop will be blocked from running.
+        event_fire_generic(*parser, L"fish_exit");
+        // Only now can the flag be set
+        s_exit_forced = true;
+    }
+
+    return s_exit_forced || s_end_current_loop;
+}
 
 /// Give up control of terminal.
 static void term_donate(outputter_t &outp) {
@@ -666,6 +712,20 @@ static void term_donate(outputter_t &outp) {
 
 /// Grab control of terminal.
 static void term_steal() {
+    // Copy the (potentially changed) terminal modes and use them from now on.
+    struct termios modes;
+    tcgetattr(STDIN_FILENO, &modes);
+    std::memcpy(&tty_modes_for_external_cmds, &modes, sizeof tty_modes_for_external_cmds);
+    // Turning off OPOST breaks output (staircase effect), we don't allow it.
+    // See #7133.
+    tty_modes_for_external_cmds.c_oflag |= OPOST;
+    // These cause other ridiculous behaviors like input not being shown.
+    tty_modes_for_external_cmds.c_lflag |= ICANON;
+    tty_modes_for_external_cmds.c_lflag |= IEXTEN;
+    tty_modes_for_external_cmds.c_lflag |= ECHO;
+    tty_modes_for_external_cmds.c_iflag |= ICRNL;
+    tty_modes_for_external_cmds.c_iflag |= INLCR;
+
     while (true) {
         if (tcsetattr(STDIN_FILENO, TCSANOW, &shell_modes) == -1) {
             if (errno == EIO) redirect_tty_output();
@@ -678,7 +738,7 @@ static void term_steal() {
             break;
     }
 
-    invalidate_termsize();
+    termsize_container_t::shared().invalidate_tty();
 }
 
 bool reader_exit_forced() { return s_exit_forced; }
@@ -747,7 +807,7 @@ void reader_data_t::repaint() {
     indents = parse_util_compute_indents(cmd_line->text());
 
     wcstring full_line;
-    if (silent) {
+    if (conf.in_silent_mode) {
         full_line = wcstring(cmd_line->text().length(), get_obfuscation_read_char());
     } else {
         // Combine the command and autosuggestion into one string.
@@ -770,20 +830,12 @@ void reader_data_t::repaint() {
     std::vector<int> indents = this->indents;
     indents.resize(len);
 
-    // Re-render our completions page if necessary. Limit the term size of the pager to the true
-    // term size, minus the number of lines consumed by our string. (Note this doesn't yet consider
-    // wrapping).
-    int full_line_count = 1 + std::count(full_line.cbegin(), full_line.cend(), L'\n');
-    pager.set_term_size(std::max(1, common_get_width()),
-                        std::max(1, common_get_height() - full_line_count));
-    pager.update_rendering(&current_page_rendering);
-
     bool focused_on_pager = active_edit_line() == &pager.search_field_line;
     size_t cursor_position = focused_on_pager ? pager.cursor_position() : cmd_line->position();
 
     // Prepend the mode prompt to the left prompt.
     s_write(&screen, mode_prompt_buff + left_prompt_buff, right_prompt_buff, full_line,
-            cmd_line->size(), colors, indents, cursor_position, current_page_rendering,
+            cmd_line->size(), colors, indents, cursor_position, pager, current_page_rendering,
             focused_on_pager);
 
     repaint_needed = false;
@@ -814,10 +866,7 @@ void reader_data_t::kill(editable_line_t *el, size_t begin_idx, size_t length, i
 }
 
 // This is called from a signal handler!
-void reader_handle_sigint() {
-    parser_t::cancel_requested(SIGINT);
-    interrupted = SIGINT;
-}
+void reader_handle_sigint() { interrupted = SIGINT; }
 
 /// Make sure buffers are large enough to hold the current string length.
 void reader_data_t::command_line_changed(const editable_line_t *el) {
@@ -884,33 +933,29 @@ maybe_t<edit_t> reader_expand_abbreviation_in_command(const wcstring &cmdline, s
     const size_t subcmd_cursor_pos = cursor_pos - subcmd_offset;
 
     // Parse this subcmd.
-    parse_node_tree_t parse_tree;
-    parse_tree_from_string(subcmd,
-                           parse_flag_continue_after_error | parse_flag_accept_incomplete_tokens,
-                           &parse_tree, nullptr);
+    using namespace ast;
+    auto ast =
+        ast_t::parse(subcmd, parse_flag_continue_after_error | parse_flag_accept_incomplete_tokens |
+                                 parse_flag_leave_unterminated);
 
     // Look for plain statements where the cursor is at the end of the command.
-    using namespace grammar;
-    tnode_t<tok_string> matching_cmd_node;
-    for (const parse_node_t &node : parse_tree) {
-        // Only interested in plain statements with source.
-        if (node.type != symbol_plain_statement || !node.has_source()) continue;
+    const ast::string_t *matching_cmd_node = nullptr;
+    for (const node_t &n : ast) {
+        const decorated_statement_t *stmt = n.try_as<decorated_statement_t>();
+        if (!stmt) continue;
 
-        // Get the command node. Skip it if we can't or it has no source.
-        tnode_t<plain_statement> statement(&parse_tree, &node);
-        tnode_t<tok_string> cmd_node = statement.child<0>();
+        // Skip if we have a decoration.
+        if (stmt->opt_decoration) continue;
 
-        // Skip decorated statements.
-        if (get_decoration(statement) != parse_statement_decoration_none) continue;
-
-        auto msource = cmd_node.source_range();
+        // See if the command's source range range contains our cursor, including at the end.
+        auto msource = stmt->command.try_source_range();
         if (!msource) continue;
 
         // Now see if its source range contains our cursor, including at the end.
         if (subcmd_cursor_pos >= msource->start &&
             subcmd_cursor_pos <= msource->start + msource->length) {
             // Success!
-            matching_cmd_node = cmd_node;
+            matching_cmd_node = &stmt->command;
             break;
         }
     }
@@ -918,11 +963,12 @@ maybe_t<edit_t> reader_expand_abbreviation_in_command(const wcstring &cmdline, s
     // Now if we found a command node, expand it.
     maybe_t<edit_t> result{};
     if (matching_cmd_node) {
-        const wcstring token = matching_cmd_node.get_source(subcmd);
+        assert(!matching_cmd_node->unsourced && "Should not be unsourced");
+        const wcstring token = matching_cmd_node->source(subcmd);
         if (auto abbreviation = expand_abbreviation(token, vars)) {
             // There was an abbreviation! Replace the token in the full command. Maintain the
             // relative position of the cursor.
-            source_range_t r = *matching_cmd_node.source_range();
+            source_range_t r = matching_cmd_node->source_range();
             result = edit_t(subcmd_offset + r.start, r.length, std::move(*abbreviation));
         }
     }
@@ -936,7 +982,7 @@ bool reader_data_t::expand_abbreviation_as_necessary(size_t cursor_backtrack) {
     bool result = false;
     editable_line_t *el = active_edit_line();
 
-    if (expand_abbreviations && el == &command_line) {
+    if (conf.expand_abbrev_ok && el == &command_line) {
         // Try expanding abbreviations.
         size_t cursor_pos = el->position() - std::min(el->position(), cursor_backtrack);
 
@@ -957,7 +1003,7 @@ void reader_data_t::repaint_if_needed() {
 
     if (needs_reset) {
         exec_prompt();
-        s_reset(&screen, screen_reset_mode_t::current_line_and_prompt);
+        s_reset_line(&screen, true /* repaint prompt */);
         screen_reset_needed = false;
     }
 
@@ -1031,35 +1077,35 @@ void reader_data_t::exec_prompt() {
     // Suppress fish_trace while in the prompt.
     scoped_push<bool> in_prompt(&parser().libdata().suppress_fish_trace, true);
 
-    // Do not allow the exit status of the prompts to leak through.
-    const bool apply_exit_status = false;
-
-    // HACK: Query winsize again because it might have changed.
+    // Update the termsize now.
     // This allows prompts to react to $COLUMNS.
-    (void)get_current_winsize();
+    update_termsize();
 
     // If we have any prompts, they must be run non-interactively.
-    if (!left_prompt.empty() || !right_prompt.empty()) {
+    if (!conf.left_prompt_cmd.empty() || !conf.right_prompt_cmd.empty()) {
         scoped_push<bool> noninteractive{&parser().libdata().is_interactive, false};
 
         exec_mode_prompt();
 
-        if (!left_prompt.empty()) {
+        if (!conf.left_prompt_cmd.empty()) {
+            // Status is ignored.
             wcstring_list_t prompt_list;
-            // Ignore return status.
-            exec_subshell(left_prompt, parser(), prompt_list, apply_exit_status);
-            for (size_t i = 0; i < prompt_list.size(); i++) {
-                if (i > 0) left_prompt_buff += L'\n';
-                left_prompt_buff += prompt_list.at(i);
-            }
+            // Historic compatibility hack.
+            // If the left prompt function is deleted, then use a default prompt instead of
+            // producing an error.
+            bool left_prompt_deleted = conf.left_prompt_cmd == LEFT_PROMPT_FUNCTION_NAME &&
+                                       !function_exists(conf.left_prompt_cmd, parser());
+            exec_subshell(left_prompt_deleted ? DEFAULT_PROMPT : conf.left_prompt_cmd, parser(),
+                          prompt_list, false);
+            left_prompt_buff = join_strings(prompt_list, L'\n');
         }
 
-        if (!right_prompt.empty()) {
-            wcstring_list_t prompt_list;
+        if (!conf.right_prompt_cmd.empty()) {
             // Status is ignored.
-            exec_subshell(right_prompt, parser(), prompt_list, apply_exit_status);
+            wcstring_list_t prompt_list;
+            exec_subshell(conf.right_prompt_cmd, parser(), prompt_list, false);
+            // Right prompt does not support multiple lines, so just concatenate all of them.
             for (const auto &i : prompt_list) {
-                // Right prompt does not support multiple lines, so just concatenate all of them.
                 right_prompt_buff += i;
             }
         }
@@ -1072,7 +1118,8 @@ void reader_data_t::exec_prompt() {
 }
 
 void reader_init() {
-    auto &vars = parser_t::principal_parser().vars();
+    parser_t &parser = parser_t::principal_parser();
+    auto &vars = parser.vars();
 
     // Ensure this var is present even before an interactive command is run so that if it is used
     // in a function like `fish_prompt` or `fish_right_prompt` it is defined at the time the first
@@ -1085,27 +1132,19 @@ void reader_init() {
     // Set the mode used for program execution, initialized to the current mode.
     std::memcpy(&tty_modes_for_external_cmds, &terminal_mode_on_startup,
                 sizeof tty_modes_for_external_cmds);
-    tty_modes_for_external_cmds.c_iflag &= ~IXON;   // disable flow control
-    tty_modes_for_external_cmds.c_iflag &= ~IXOFF;  // disable flow control
+    // Disable flow control for external commands by default.
+    tty_modes_for_external_cmds.c_iflag &= ~IXON;
+    tty_modes_for_external_cmds.c_iflag &= ~IXOFF;
+    tty_modes_for_external_cmds.c_oflag |= OPOST;
 
     // Set the mode used for the terminal, initialized to the current mode.
     std::memcpy(&shell_modes, &terminal_mode_on_startup, sizeof shell_modes);
 
-    shell_modes.c_iflag &= ~ICRNL;  // disable mapping CR (\cM) to NL (\cJ)
-    shell_modes.c_iflag &= ~INLCR;  // disable mapping NL (\cJ) to CR (\cM)
-    shell_modes.c_iflag &= ~IXON;   // disable flow control
-    shell_modes.c_iflag &= ~IXOFF;  // disable flow control
-
-    shell_modes.c_lflag &= ~ICANON;  // turn off canonical mode
-    shell_modes.c_lflag &= ~ECHO;    // turn off echo mode
-    shell_modes.c_lflag &= ~IEXTEN;  // turn off handling of discard and lnext characters
-
-    shell_modes.c_cc[VMIN] = 1;
-    shell_modes.c_cc[VTIME] = 0;
+    term_fix_modes(&shell_modes);
 
     // We do this not because we actually need the window size but for its side-effect of correctly
     // setting the COLUMNS and LINES env vars.
-    get_current_winsize();
+    termsize_container_t::shared().updating(parser);
 }
 
 /// Restore the term mode if we own the terminal. It's important we do this before
@@ -1121,9 +1160,11 @@ void restore_term_mode() {
 /// Exit the current reader loop. This may be invoked from a signal handler.
 void reader_set_end_loop(bool flag) { s_end_current_loop = flag; }
 
+/// Called only when we're not able to read/write to our standard input/output,
+/// namely EOF and SIGHUP.
 void reader_force_exit() {
     // Beware, we may be in a signal handler.
-    s_exit_forced = true;
+    s_pending_exit_forced = true;
 }
 
 /// Indicates if the given command char ends paging.
@@ -1138,6 +1179,7 @@ static bool command_ends_paging(readline_cmd_t c, bool focused_on_search_field) 
         case rl::history_token_search_forward:
         case rl::accept_autosuggestion:
         case rl::delete_or_exit:
+        case rl::cancel_commandline:
         case rl::cancel: {
             // These commands always end paging.
             return true;
@@ -1146,6 +1188,7 @@ static bool command_ends_paging(readline_cmd_t c, bool focused_on_search_field) 
         case rl::complete_and_search:
         case rl::backward_char:
         case rl::forward_char:
+        case rl::forward_single_char:
         case rl::up_line:
         case rl::down_line:
         case rl::repaint:
@@ -1205,6 +1248,8 @@ static bool command_ends_history_search(readline_cmd_t c) {
         case readline_cmd_t::history_search_forward:
         case readline_cmd_t::history_token_search_backward:
         case readline_cmd_t::history_token_search_forward:
+        case readline_cmd_t::beginning_of_history:
+        case readline_cmd_t::end_of_history:
         case readline_cmd_t::repaint:
         case readline_cmd_t::force_repaint:
             return false;
@@ -1416,7 +1461,7 @@ static std::function<autosuggestion_result_t(void)> get_autosuggestion_performer
     // this should use shared_ptr
     return [=]() -> autosuggestion_result_t {
         ASSERT_IS_BACKGROUND_THREAD();
-        const autosuggestion_result_t nothing = {};
+        autosuggestion_result_t nothing = {};
         operation_context_t ctx = get_bg_context(vars, generation_count);
         if (ctx.check_cancel()) {
             return nothing;
@@ -1477,7 +1522,7 @@ bool reader_data_t::can_autosuggest() const {
     // and our command line contains a non-whitespace character.
     const editable_line_t *el = active_edit_line();
     const wchar_t *whitespace = L" \t\r\n\v";
-    return allow_autosuggestion && !suppress_autosuggestion && history_search.is_at_end() &&
+    return conf.autosuggest_ok && !suppress_autosuggestion && history_search.is_at_end() &&
            el == &command_line && el->text().find_first_not_of(whitespace) != wcstring::npos;
 }
 
@@ -1511,7 +1556,7 @@ void reader_data_t::update_autosuggestion() {
 
 // Accept any autosuggestion by replacing the command line with it. If full is true, take the whole
 // thing; if it's false, then respect the passed in style.
-void reader_data_t::accept_autosuggestion(bool full, move_word_style_t style) {
+void reader_data_t::accept_autosuggestion(bool full, bool single, move_word_style_t style) {
     if (!autosuggestion.empty()) {
         // Accepting an autosuggestion clears the pager.
         clear_pager();
@@ -1520,6 +1565,9 @@ void reader_data_t::accept_autosuggestion(bool full, move_word_style_t style) {
         if (full) {
             // Just take the whole thing.
             command_line.replace_substring(0, command_line.size(), std::move(autosuggestion));
+        } else if (single) {
+            command_line.replace_substring(command_line.size(), 0,
+                                           autosuggestion.substr(command_line.size(), 1));
         } else {
             // Accept characters according to the specified style.
             move_word_state_machine_t state(style);
@@ -1645,7 +1693,6 @@ bool reader_data_t::handle_completions(const completion_list_t &comp, size_t tok
         // No suitable completions found, flash screen and return.
         flash();
         done = true;
-        success = false;
     } else if (size == 1) {
         // Exactly one suitable completion found - insert it.
         const completion_t &c = comp.at(0);
@@ -1745,12 +1792,12 @@ bool reader_data_t::handle_completions(const completion_list_t &comp, size_t tok
             completion_insert(common_prefix.c_str(), token_end, flags);
             cycle_command_line = command_line.text();
             cycle_cursor_pos = command_line.position();
-            success = true;
         }
     }
 
     if (use_prefix) {
         for (completion_t &c : surviving_completions) {
+            c.flags &= ~COMPLETE_REPLACES_TOKEN;
             wcstring &comp = c.completion;
             comp.erase(comp.begin(), comp.begin() + common_prefix.size());
         }
@@ -1759,7 +1806,7 @@ bool reader_data_t::handle_completions(const completion_list_t &comp, size_t tok
     // Print the completion list.
     wcstring prefix;
     if (will_replace_token || match_type_requires_full_replacement(best_match_type)) {
-        prefix.clear();  // no prefix
+        if (use_prefix) prefix = std::move(common_prefix);
     } else if (tok.size() + common_prefix.size() <= PREFIX_MAX_LEN) {
         prefix = tok + common_prefix;
     } else {
@@ -1956,7 +2003,7 @@ static void reader_interactive_init(parser_t &parser) {
         }
     }
 
-    invalidate_termsize();
+    termsize_container_t::shared().invalidate_tty();
 
     // For compatibility with fish 2.0's $_, now replaced with `status current-command`
     parser.vars().set_one(L"_", ENV_GLOBAL, L"fish");
@@ -2023,10 +2070,9 @@ void reader_data_t::update_command_line_from_history_search() {
     }
     if (history_search.by_token()) {
         replace_current_token(std::move(new_text));
-    } else if (history_search.by_line() || history_search.by_prefix()) {
-        el->replace_substring(0, el->size(), std::move(new_text));
     } else {
-        return;
+        assert(history_search.by_line() || history_search.by_prefix());
+        el->replace_substring(0, el->size(), std::move(new_text));
     }
     command_line_has_transient_edit = true;
     assert(el == &command_line);
@@ -2155,7 +2201,7 @@ void reader_run_command(parser_t &parser, const wcstring &cmd) {
     }
 }
 
-parser_test_error_bits_t reader_shell_test(parser_t &parser, const wcstring &b) {
+static parser_test_error_bits_t reader_shell_test(parser_t &parser, const wcstring &b) {
     wcstring bstr = b;
 
     // Append a newline, to act as a statement terminator.
@@ -2212,16 +2258,17 @@ void reader_data_t::highlight_complete(highlight_result_t result) {
 
 // Given text, bracket matching position, and whether IO is allowed,
 // return a function that performs highlighting. The function may be invoked on a background thread.
-static std::function<highlight_result_t(void)> get_highlight_performer(
-    parser_t &parser, const wcstring &text, long match_highlight_pos,
-    highlight_function_t highlight_func) {
+static std::function<highlight_result_t(void)> get_highlight_performer(parser_t &parser,
+                                                                       const wcstring &text,
+                                                                       long match_highlight_pos,
+                                                                       bool io_ok) {
     auto vars = parser.vars().snapshot();
     unsigned generation_count = read_generation_count();
     return [=]() -> highlight_result_t {
         if (text.empty()) return {};
         operation_context_t ctx = get_bg_context(vars, generation_count);
         std::vector<highlight_spec_t> colors(text.size(), highlight_spec_t{});
-        highlight_func(text, colors, match_highlight_pos, ctx);
+        highlight_shell(text, colors, match_highlight_pos, ctx, io_ok);
         return {std::move(colors), text};
     };
 }
@@ -2235,6 +2282,8 @@ static std::function<highlight_result_t(void)> get_highlight_performer(
 /// \param no_io if true, do a highlight that does not perform I/O, synchronously. If false, perform
 ///        an asynchronous highlight in the background, which may perform disk I/O.
 void reader_data_t::super_highlight_me_plenty(int match_highlight_pos_adjust, bool no_io) {
+    if (!conf.highlight_ok) return;
+
     const editable_line_t *el = &command_line;
     assert(el != nullptr);
     long match_highlight_pos = static_cast<long>(el->position()) + match_highlight_pos_adjust;
@@ -2242,8 +2291,8 @@ void reader_data_t::super_highlight_me_plenty(int match_highlight_pos_adjust, bo
 
     sanity_check();
 
-    auto highlight_performer = get_highlight_performer(
-        parser(), el->text(), match_highlight_pos, no_io ? highlight_shell_no_io : highlight_func);
+    auto highlight_performer =
+        get_highlight_performer(parser(), el->text(), match_highlight_pos, !no_io);
     if (no_io) {
         // Highlighting without IO, we just do it.
         highlight_complete(highlight_performer());
@@ -2293,9 +2342,10 @@ void reader_change_history(const wcstring &name) {
     }
 }
 
-void reader_push(parser_t &parser, const wcstring &name) {
-    history_t *hist = &history_t::history_with_name(name);
-    reader_data_stack.push_back(std::make_shared<reader_data_t>(parser.shared(), hist));
+void reader_push(parser_t &parser, const wcstring &history_name, reader_config_t &&conf) {
+    history_t *hist = &history_t::history_with_name(history_name);
+    reader_data_stack.push_back(
+        std::make_shared<reader_data_t>(parser.shared(), hist, std::move(conf)));
     reader_data_t *data = current_data();
     data->command_line_changed(&data->command_line);
     if (reader_data_stack.size() == 1) {
@@ -2313,33 +2363,9 @@ void reader_pop() {
         reader_interactive_destroy();
     } else {
         s_end_current_loop = false;
-        s_reset(&new_reader->screen, screen_reset_mode_t::abandon_line);
+        s_reset_abandoning_line(&new_reader->screen, termsize_last().width);
     }
 }
-
-void reader_set_left_prompt(const wcstring &new_prompt) {
-    current_data()->left_prompt = new_prompt;
-}
-
-void reader_set_right_prompt(const wcstring &new_prompt) {
-    current_data()->right_prompt = new_prompt;
-}
-
-void reader_set_allow_autosuggesting(bool flag) { current_data()->allow_autosuggestion = flag; }
-
-void reader_set_expand_abbreviations(bool flag) { current_data()->expand_abbreviations = flag; }
-
-void reader_set_complete_ok(bool flag) { current_data()->complete_ok = flag; }
-
-void reader_set_highlight_function(highlight_function_t func) {
-    current_data()->highlight_func = func;
-}
-
-void reader_set_test_function(test_function_t f) { current_data()->test_func = f; }
-
-void reader_set_exit_on_interrupt(bool i) { current_data()->exit_on_interrupt = i; }
-
-void reader_set_silent_status(bool flag) { current_data()->silent = flag; }
 
 void reader_import_history_if_necessary() {
     // Import history from older location (config path) if our current history is empty.
@@ -2382,7 +2408,7 @@ void reader_bg_job_warning(const job_list_t &jobs) {
 
 /// This function is called when the main loop notices that end_loop has been set while in
 /// interactive mode. It checks if it is ok to exit.
-static void handle_end_loop(const parser_t &parser) {
+static void handle_end_loop(parser_t &parser) {
     if (!reader_exit_forced()) {
         for (const auto &b : parser.blocks()) {
             if (b.type() == block_type_t::breakpoint) {
@@ -2424,12 +2450,26 @@ uint64_t reader_run_count() { return run_count; }
 
 /// Read interactively. Read input from stdin while providing editing facilities.
 static int read_i(parser_t &parser) {
-    reader_push(parser, history_session_id(parser.vars()));
-    reader_set_complete_ok(true);
-    reader_set_highlight_function(&highlight_shell);
-    reader_set_test_function(&reader_shell_test);
-    reader_set_allow_autosuggesting(true);
-    reader_set_expand_abbreviations(true);
+    reader_config_t conf;
+    conf.complete_ok = true;
+    conf.highlight_ok = true;
+    conf.syntax_check_ok = true;
+    conf.autosuggest_ok = true;
+    conf.expand_abbrev_ok = true;
+
+    if (parser.libdata().is_breakpoint && function_exists(DEBUG_PROMPT_FUNCTION_NAME, parser)) {
+        conf.left_prompt_cmd = DEBUG_PROMPT_FUNCTION_NAME;
+    } else {
+        conf.left_prompt_cmd = LEFT_PROMPT_FUNCTION_NAME;
+    }
+
+    if (function_exists(RIGHT_PROMPT_FUNCTION_NAME, parser)) {
+        conf.right_prompt_cmd = RIGHT_PROMPT_FUNCTION_NAME;
+    } else {
+        conf.right_prompt_cmd = wcstring{};
+    }
+
+    reader_push(parser, history_session_id(parser.vars()), std::move(conf));
     reader_import_history_if_necessary();
 
     reader_data_t *data = current_data();
@@ -2438,27 +2478,13 @@ static int read_i(parser_t &parser) {
     while (!shell_is_exiting()) {
         run_count++;
 
-        if (parser.libdata().is_breakpoint && function_exists(DEBUG_PROMPT_FUNCTION_NAME, parser)) {
-            reader_set_left_prompt(DEBUG_PROMPT_FUNCTION_NAME);
-        } else if (function_exists(LEFT_PROMPT_FUNCTION_NAME, parser)) {
-            reader_set_left_prompt(LEFT_PROMPT_FUNCTION_NAME);
-        } else {
-            reader_set_left_prompt(DEFAULT_PROMPT);
-        }
-
-        if (function_exists(RIGHT_PROMPT_FUNCTION_NAME, parser)) {
-            reader_set_right_prompt(RIGHT_PROMPT_FUNCTION_NAME);
-        } else {
-            reader_set_right_prompt(L"");
-        }
-
         // Put buff in temporary string and clear buff, so that we can handle a call to
         // reader_set_buffer during evaluation.
         maybe_t<wcstring> tmp = reader_readline(0);
 
-        if (shell_is_exiting()) {
+        if (should_exit(&parser)) {
             handle_end_loop(parser);
-        } else if (tmp) {
+        } else if (tmp && !tmp->empty()) {
             const wcstring command = tmp.acquire();
             data->update_buff_pos(&data->command_line, 0);
             data->command_line.clear();
@@ -2466,13 +2492,13 @@ static int read_i(parser_t &parser) {
             wcstring_list_t argv(1, command);
             event_fire_generic(parser, L"fish_preexec", &argv);
             reader_run_command(parser, command);
-            parser.clear_cancel();
+            signal_clear_cancel();
             event_fire_generic(parser, L"fish_postexec", &argv);
             // Allow any pending history items to be returned in the history array.
             if (data->history) {
                 data->history->resolve_pending();
             }
-            if (shell_is_exiting()) {
+            if (should_exit(&parser)) {
                 handle_end_loop(parser);
             } else {
                 data->prev_end_loop = false;
@@ -2638,6 +2664,31 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             mark_repaint_needed();
             break;
         }
+        case rl::cancel_commandline: {
+            if (command_line.size()) {
+                outputter_t &outp = outputter_t::stdoutput();
+                // Move cursor to the end of the line.
+                update_buff_pos(&command_line, command_line.size());
+                autosuggestion.clear();
+                // Repaint also changes the actual cursor position
+                repaint();
+
+                auto fish_color_cancel = vars.get(L"fish_color_cancel");
+                if (fish_color_cancel) {
+                    outp.set_color(parse_color(*fish_color_cancel, false),
+                                   parse_color(*fish_color_cancel, true));
+                }
+                outp.writestr(L"^C");
+                outp.set_color(rgb_color_t::reset(), rgb_color_t::reset());
+
+                // We print a newline last so the prompt_sp hack doesn't get us.
+                outp.push_back('\n');
+
+                set_command_line_and_position(&command_line, L"", 0);
+                s_reset_abandoning_line(&screen, termsize_last().width - command_line.size());
+            }
+            break;
+        }
         case rl::cancel: {
             // The only thing we can cancel right now is paging, which we handled up above.
             break;
@@ -2652,7 +2703,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             // elsewhere, we detect if the mode output is empty.
             exec_mode_prompt();
             if (!mode_prompt_buff.empty()) {
-                s_reset(&screen, screen_reset_mode_t::current_line_and_prompt);
+                s_reset_line(&screen, true /* redraw prompt */);
                 screen_reset_needed = false;
                 repaint();
                 break;
@@ -2665,7 +2716,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             if (!rls.coalescing_repaints) {
                 rls.coalescing_repaints = true;
                 exec_prompt();
-                s_reset(&screen, screen_reset_mode_t::current_line_and_prompt);
+                s_reset_line(&screen, true /* redraw prompt */);
                 screen_reset_needed = false;
                 repaint();
             }
@@ -2673,7 +2724,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
         }
         case rl::complete:
         case rl::complete_and_search: {
-            if (!complete_ok) break;
+            if (!conf.complete_ok) break;
 
             // Use the command line only; it doesn't make sense to complete in any other line.
             editable_line_t *el = &command_line;
@@ -2912,7 +2963,10 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             }
 
             // See if this command is valid.
-            int command_test_result = test_func(parser(), el->text());
+            parser_test_error_bits_t command_test_result = 0;
+            if (conf.syntax_check_ok) {
+                command_test_result = reader_shell_test(parser(), el->text());
+            }
             if (command_test_result == 0 || command_test_result == PARSER_TEST_INCOMPLETE) {
                 // This command is valid, but an abbreviation may make it invalid. If so, we
                 // will have to test again.
@@ -2920,7 +2974,9 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                 if (abbreviation_expanded) {
                     // It's our reponsibility to rehighlight and repaint. But everything we do
                     // below triggers a repaint.
-                    command_test_result = test_func(parser(), el->text());
+                    if (conf.syntax_check_ok) {
+                        command_test_result = reader_shell_test(parser(), el->text());
+                    }
 
                     // If the command is OK, then we're going to execute it. We still want to do
                     // syntax highlighting, but a synchronous variant that performs no I/O, so
@@ -2932,9 +2988,9 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
 
             if (command_test_result == 0) {
                 // Finished command, execute it. Don't add items that start with a leading
-                // space.
+                // space, or if in silent mode (#7230).
                 const editable_line_t *el = &command_line;
-                if (history != nullptr && may_add_to_history(el->text())) {
+                if (history != nullptr && !conf.in_silent_mode && may_add_to_history(el->text())) {
                     history->add_pending_with_file_detection(el->text(), vars.get_pwd_slash());
                 }
                 rls.finished = true;
@@ -2948,7 +3004,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                 // already be printed, all we need to do is repaint.
                 wcstring_list_t argv(1, el->text());
                 event_fire_generic(parser(), L"fish_posterror", &argv);
-                s_reset(&screen, screen_reset_mode_t::abandon_line);
+                s_reset_abandoning_line(&screen, termsize_last().width);
                 mark_repaint_needed();
             }
 
@@ -3002,8 +3058,10 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                      c == rl::history_prefix_search_backward)
                         ? history_search_direction_t::backward
                         : history_search_direction_t::forward;
-                history_search.move_in_direction(dir);
-                update_command_line_from_history_search();
+                if (history_search.move_in_direction(dir) ||
+                    (dir == history_search_direction_t::forward && history_search.is_at_end())) {
+                    update_command_line_from_history_search();
+                }
             }
             break;
         }
@@ -3026,6 +3084,18 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                 mark_repaint_needed();
             } else {
                 accept_autosuggestion(true);
+            }
+            break;
+        }
+        case rl::forward_single_char: {
+            editable_line_t *el = active_edit_line();
+            if (is_navigating_pager_contents()) {
+                select_completion_in_direction(selection_motion_t::east);
+            } else if (el->position() < el->size()) {
+                update_buff_pos(el, el->position() + 1);
+                mark_repaint_needed();
+            } else {
+                accept_autosuggestion(false, true);
             }
             break;
         }
@@ -3070,7 +3140,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             if (el->position() < el->size()) {
                 move_word(el, MOVE_DIR_RIGHT, false /* do not erase */, move_style, false);
             } else {
-                accept_autosuggestion(false, move_style);
+                accept_autosuggestion(false, false, move_style);
             }
             break;
         }
@@ -3086,7 +3156,9 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
                 } else {
                     history_search.go_to_end();
                 }
-                update_command_line_from_history_search();
+                if (history_search.active()) {
+                    update_command_line_from_history_search();
+                }
             }
             break;
         }
@@ -3393,7 +3465,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             editable_line_t *el = active_edit_line();
             bool success = false;
             jump_direction_t original_dir, dir;
-            original_dir = dir = last_jump_direction;
+            original_dir = last_jump_direction;
 
             if (last_jump_direction == jump_direction_t::forward) {
                 dir = jump_direction_t::backward;
@@ -3442,6 +3514,7 @@ void reader_data_t::handle_readline_command(readline_cmd_t c, readline_loop_stat
             // Some commands should have been handled internally by inputter_t::readch().
         case rl::self_insert:
         case rl::self_insert_notfirst:
+        case rl::func_or:
         case rl::func_and: {
             DIE("should have been handled by inputter_t::readch");
         }
@@ -3469,7 +3542,7 @@ maybe_t<wcstring> reader_data_t::readline(int nchars_or_0) {
 
     history_search.reset();
 
-    s_reset(&screen, screen_reset_mode_t::abandon_line);
+    s_reset_abandoning_line(&screen, termsize_last().width);
     event_fire_generic(parser(), L"fish_prompt");
     exec_prompt();
 
@@ -3493,7 +3566,10 @@ maybe_t<wcstring> reader_data_t::readline(int nchars_or_0) {
         }
     }
 
-    while (!rls.finished && !shell_is_exiting()) {
+    while (!rls.finished && !should_exit(&parser())) {
+        // Perhaps update the termsize. This is cheap if it has not changed.
+        update_termsize();
+
         if (rls.nchars <= command_line.size()) {
             // We've already hit the specified character limit.
             rls.finished = true;
@@ -3555,7 +3631,7 @@ maybe_t<wcstring> reader_data_t::readline(int nchars_or_0) {
 
             // Readline commands may be bound to \cc which also sets the cancel flag.
             // See #6937.
-            parser().clear_cancel();
+            signal_clear_cancel();
 
             rls.last_cmd = readline_cmd;
         } else {
@@ -3671,9 +3747,8 @@ bool reader_has_pager_contents() {
 int reader_reading_interrupted() {
     int res = reader_test_and_clear_interrupted();
     reader_data_t *data = current_data_or_null();
-    if (res && data && data->exit_on_interrupt) {
+    if (res && data && data->conf.exit_on_interrupt) {
         reader_set_end_loop(true);
-        parser_t::cancel_requested(res);
         // We handled the interrupt ourselves, our caller doesn't need to handle it.
         return 0;
     }
@@ -3762,13 +3837,14 @@ static int read_ni(parser_t &parser, int fd, const io_chain_t &io) {
     std::string fd_contents;
     for (;;) {
         char buff[4096];
-        size_t amt = read(fd, buff, sizeof buff);
+        ssize_t amt = read(fd, buff, sizeof buff);
         if (amt > 0) {
             fd_contents.append(buff, amt);
         } else if (amt == 0) {
             // EOF.
             break;
         } else {
+            assert(amt == -1);
             int err = errno;
             if (err == EINTR) {
                 continue;
@@ -3795,10 +3871,18 @@ static int read_ni(parser_t &parser, int fd, const io_chain_t &io) {
         str.erase(0, 1);
     }
 
+    // Parse into an ast and detect errors.
     parse_error_list_t errors;
-    parsed_source_ref_t pstree;
-    if (!parse_util_detect_errors(str, &errors, false /* do not accept incomplete */, &pstree)) {
-        parser.eval(pstree, io);
+    auto ast = ast::ast_t::parse(str, parse_flag_none, &errors);
+    bool errored = ast.errored();
+    if (!errored) {
+        errored = parse_util_detect_errors(ast, str, &errors);
+    }
+    if (!errored) {
+        // Construct a parsed source ref.
+        // Be careful to transfer ownership, this could be a very large string.
+        parsed_source_ref_t ps = std::make_shared<parsed_source_t>(std::move(str), std::move(ast));
+        parser.eval(ps, io);
         return 0;
     } else {
         wcstring sb;

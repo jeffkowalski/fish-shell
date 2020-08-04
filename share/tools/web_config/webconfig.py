@@ -14,14 +14,13 @@ import multiprocessing.pool
 import operator
 import os
 import platform
-import random
 import re
 import select
 import socket
-import string
 import subprocess
 import sys
 import tempfile
+import threading
 from itertools import chain
 
 FISH_BIN_PATH = False  # will be set later
@@ -47,7 +46,8 @@ def is_wsl():
     """ Return whether we are running under the Windows Subsystem for Linux """
     if "linux" in platform.system().lower() and os.access("/proc/version", os.R_OK):
         with open("/proc/version", "r") as f:
-            if "Microsoft" in f.read():
+            # Find 'Microsoft' for wsl1 and 'microsoft' for wsl2
+            if "microsoft" in f.read().lower():
                 return True
     return False
 
@@ -522,7 +522,7 @@ def append_html_for_ansi_escape(full_val, result, span_open):
             result.append("</span>")
 
     # term256 foreground color
-    match = re.match("38;5;(\d+)", val)
+    match = re.match(r"38;5;(\d+)", val)
     if match is not None:
         close_span()
         html_color = html_color_for_ansi_color_index(int(match.group(1)))
@@ -1494,14 +1494,20 @@ print(
 )
 print("%sHit ENTER to stop.%s" % (esc["bold"], esc["exit_attribute_mode"]))
 
-if isMacOS10_12_5_OrLater():
-    subprocess.check_call(["open", fileurl])
-elif is_wsl():
-    subprocess.call(["cmd.exe", "/c", "start %s" % url])
-elif is_termux():
-    subprocess.call(["termux-open-url", url])
-else:
-    webbrowser.open(fileurl)
+def runThing():
+    if isMacOS10_12_5_OrLater():
+        subprocess.check_call(["open", fileurl])
+    elif is_wsl():
+        subprocess.call(["cmd.exe", "/c", "start %s" % url])
+    elif is_termux():
+        subprocess.call(["termux-open-url", url])
+    else:
+        webbrowser.open(fileurl)
+
+# Some browsers still block webbrowser.open if they haven't been opened before,
+# so we just spawn it in a thread.
+thread = threading.Thread(target=runThing)
+thread.start()
 
 # Select on stdin and httpd
 stdin_no = sys.stdin.fileno()
@@ -1520,3 +1526,4 @@ except KeyboardInterrupt:
 
 # Clean up temporary file
 f.close()
+thread.join()

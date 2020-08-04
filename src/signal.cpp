@@ -16,6 +16,7 @@
 #include "proc.h"
 #include "reader.h"
 #include "signal.h"
+#include "termsize.h"
 #include "topic_monitor.h"
 #include "wutil.h"  // IWYU pragma: keep
 
@@ -198,6 +199,14 @@ static bool reraise_if_forked_child(int sig) {
     return true;
 }
 
+/// The cancellation signal we have received.
+/// Of course this is modified from a signal handler.
+static volatile sig_atomic_t s_cancellation_signal = 0;
+
+void signal_clear_cancel() { s_cancellation_signal = 0; }
+
+int signal_check_cancel() { return s_cancellation_signal; }
+
 /// The single signal handler. By centralizing signal handling we ensure that we can never install
 /// the "wrong" signal handler (see #5969).
 static void fish_signal_handler(int sig, siginfo_t *info, void *context) {
@@ -219,8 +228,8 @@ static void fish_signal_handler(int sig, siginfo_t *info, void *context) {
     switch (sig) {
 #ifdef SIGWINCH
         case SIGWINCH:
-            /// Respond to a winch signal by checking the terminal size.
-            common_handle_winch(sig);
+            /// Respond to a winch signal by telling the termsize container.
+            termsize_container_t::handle_winch();
             break;
 #endif
 
@@ -228,14 +237,14 @@ static void fish_signal_handler(int sig, siginfo_t *info, void *context) {
             /// Respond to a hup signal by exiting, unless it is caught by a shellscript function,
             /// in which case we do nothing.
             if (!observed) {
-                reader_force_exit();
+                reader_sighup();
             }
             topic_monitor_t::principal().post(topic_t::sighupint);
             break;
 
         case SIGTERM:
             /// Handle sigterm. The only thing we do is restore the front process ID, then die.
-            restore_term_foreground_process_group();
+            restore_term_foreground_process_group_for_exit();
             signal(SIGTERM, SIG_DFL);
             raise(SIGTERM);
             break;
@@ -243,6 +252,7 @@ static void fish_signal_handler(int sig, siginfo_t *info, void *context) {
         case SIGINT:
             /// Interactive mode ^C handler. Respond to int signal by setting interrupted-flag and
             /// stopping all loops and conditionals.
+            s_cancellation_signal = SIGINT;
             reader_handle_sigint();
             topic_monitor_t::principal().post(topic_t::sighupint);
             break;
@@ -394,22 +404,23 @@ void signal_unblock_all() {
     sigprocmask(SIG_SETMASK, &iset, nullptr);
 }
 
-sigint_checker_t::sigint_checker_t() {
+sigchecker_t::sigchecker_t(topic_t signal) {
+    topic_ = signal;
     // Call check() to update our generation.
     check();
 }
 
-bool sigint_checker_t::check() {
+bool sigchecker_t::check() {
     auto &tm = topic_monitor_t::principal();
-    generation_t gen = tm.generation_for_topic(topic_t::sighupint);
+    generation_t gen = tm.generation_for_topic(topic_);
     bool changed = this->gen_ != gen;
     this->gen_ = gen;
     return changed;
 }
 
-void sigint_checker_t::wait() const {
+void sigchecker_t::wait() const {
     auto &tm = topic_monitor_t::principal();
     generation_list_t gens{};
-    gens[topic_t::sighupint] = this->gen_;
-    tm.check(&gens, {topic_t::sighupint}, true /* wait */);
+    gens[topic_] = this->gen_;
+    tm.check(&gens, {topic_}, true /* wait */);
 }

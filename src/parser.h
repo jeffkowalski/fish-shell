@@ -19,6 +19,7 @@
 #include "parse_execution.h"
 #include "parse_tree.h"
 #include "proc.h"
+#include "util.h"
 
 class io_chain_t;
 
@@ -113,18 +114,23 @@ class block_t {
 };
 
 struct profile_item_t {
-    /// Time spent executing the specified command, including parse time for nested blocks.
-    int exec;
-    /// Time spent parsing the specified command, including execution time for command
-    /// substitutions.
-    int parse;
-    /// The block level of the specified command. nested blocks and command substitutions both
+    using microseconds_t = long long;
+
+    /// Time spent executing the command, including nested blocks.
+    microseconds_t duration{};
+
+    /// The block level of the specified command. Nested blocks and command substitutions both
     /// increase the block level.
-    size_t level;
+    size_t level{};
+
     /// If the execution of this command was skipped.
-    bool skipped;
+    bool skipped{};
+
     /// The command string.
-    wcstring cmd;
+    wcstring cmd{};
+
+    /// \return the current time as a microsecond timestamp since the epoch.
+    static microseconds_t now() { return get_time(); }
 };
 
 class parse_execution_context_t;
@@ -186,7 +192,7 @@ struct library_data_t {
     const wchar_t *current_filename{};
 
     /// List of events that have been sent but have not yet been delivered because they are blocked.
-    std::vector<shared_ptr<event_t>> blocked_events{};
+    std::vector<shared_ptr<const event_t>> blocked_events{};
 
     /// A stack of fake values to be returned by builtin_commandline. This is used by the completion
     /// machinery when wrapping: e.g. if `tig` wraps `git` then git completions need to see git on
@@ -222,8 +228,6 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     friend class parse_execution_context_t;
 
    private:
-    /// If not zero, the signal triggering cancellation.
-    volatile sig_atomic_t cancellation_signal = 0;
     /// The current execution context.
     std::unique_ptr<parse_execution_context_t> execution_context;
     /// The jobs associated with this parser.
@@ -240,11 +244,11 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     /// Miscellaneous library data.
     library_data_t library_data{};
 
-    /// List of profile items
-    /// These are pointers because we return pointers to them to callers,
+    /// List of profile items.
+    /// This must be a deque because we return pointers to them to callers,
     /// who may hold them across blocks (which would cause reallocations internal
-    /// to profile_items)
-    std::vector<std::unique_ptr<profile_item_t>> profile_items;
+    /// to profile_items). deque does not move items on reallocation.
+    std::deque<profile_item_t> profile_items;
 
     // No copying allowed.
     parser_t(const parser_t &);
@@ -269,12 +273,6 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     /// Get the "principal" parser, whatever that is.
     static parser_t &principal_parser();
 
-    /// Indicates that we should stop execution due to the given signal.
-    static void cancel_requested(int sig);
-
-    /// Clear any cancel.
-    void clear_cancel() { cancellation_signal = 0; }
-
     /// Global event blocks.
     event_blockage_list_t global_event_blocks;
 
@@ -282,25 +280,28 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     ///
     /// \param cmd the string to evaluate
     /// \param io io redirections to perform on all started jobs
-    /// \param parent_pgid if set, the pgid to give to spawned jobs
+    /// \param job_group if set, the job group to give to spawned jobs.
     /// \param block_type The type of block to push on the block stack, which must be either 'top'
     /// or 'subst'.
     /// \param break_expand If not null, return by reference whether the error ought to be an expand
     /// error. This includes nested expand errors, and command-not-found.
     ///
     /// \return the result of evaluation.
-    eval_res_t eval(const wcstring &cmd, const io_chain_t &io, maybe_t<pid_t> parent_pgid = {},
+    eval_res_t eval(const wcstring &cmd, const io_chain_t &io,
+                    const job_group_ref_t &job_group = {},
                     block_type_t block_type = block_type_t::top);
 
     /// Evaluate the parsed source ps.
     /// Because the source has been parsed, a syntax error is impossible.
     eval_res_t eval(const parsed_source_ref_t &ps, const io_chain_t &io,
-                    maybe_t<pid_t> parent_pgid = {}, block_type_t block_type = block_type_t::top);
+                    const job_group_ref_t &job_group = {},
+                    block_type_t block_type = block_type_t::top);
 
     /// Evaluates a node.
-    /// The node type must be grammar::statement or grammar::job_list.
+    /// The node type must be ast_t::statement_t or ast::job_list_t.
     template <typename T>
-    eval_res_t eval_node(const parsed_source_ref_t &ps, tnode_t<T> node, job_lineage_t lineage,
+    eval_res_t eval_node(const parsed_source_ref_t &ps, const T &node, const io_chain_t &block_io,
+                         const job_group_ref_t &job_group,
                          block_type_t block_type = block_type_t::top);
 
     /// Evaluate line as a list of parameters, i.e. tokenize it and perform parameter expansion and
@@ -376,18 +377,16 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     /// Returns the job with the given pid.
     job_t *job_get_from_pid(pid_t pid) const;
 
-    /// Returns a new profile item if profiling is active. The caller should fill it in. The
-    /// parser_t will clean it up.
+    /// Returns a new profile item if profiling is active. The caller should fill it in.
+    /// The parser_t will deallocate it.
+    /// If profiling is not active, this returns nullptr.
     profile_item_t *create_profile_item();
-
-    void get_backtrace(const wcstring &src, const parse_error_list_t &errors,
-                       wcstring &output) const;
-
-    /// \return the signal triggering cancellation, or 0 if none.
-    int get_cancel_signal() const { return cancellation_signal; }
 
     /// Output profiling data to the given filename.
     void emit_profiling(const char *path) const;
+
+    void get_backtrace(const wcstring &src, const parse_error_list_t &errors,
+                       wcstring &output) const;
 
     /// Returns the file currently evaluated by the parser. This can be different than
     /// reader_current_filename, e.g. if we are evaluating a function defined in a different file

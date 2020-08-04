@@ -32,7 +32,7 @@ if status --is-interactive
         and not string match -q -- 'eterm*' $TERM
         and begin
             set -q KONSOLE_PROFILE_NAME # KDE's konsole
-            or test -n "$KONSOLE_VERSION" -a "$KONSOLE_VERSION" -ge "200400" # konsole, but new.
+            or test -n "$KONSOLE_VERSION" -a "$KONSOLE_VERSION" -ge 200400 # konsole, but new.
             or string match -q -- "*:*" $ITERM_SESSION_ID # Supporting versions of iTerm2 will include a colon here
             or string match -q -- "st-*" $TERM # suckless' st
             or test -n "$VTE_VERSION" -a "$VTE_VERSION" -ge 3600 # Should be all gtk3-vte-based terms after version 3.6.0.0
@@ -77,19 +77,25 @@ else
     set xdg_data_dirs $__fish_data_dir
 end
 
-set -l vendor_completionsdirs $xdg_data_dirs/vendor_completions.d
-set -l vendor_functionsdirs $xdg_data_dirs/vendor_functions.d
-set -l vendor_confdirs $xdg_data_dirs/vendor_conf.d
+set -l vendor_completionsdirs
+set -l vendor_functionsdirs
+set -l vendor_confdirs
+# Don't load vendor directories when running unit tests
+if not set -q FISH_UNIT_TESTS_RUNNING
+    set vendor_completionsdirs $xdg_data_dirs/vendor_completions.d
+    set vendor_functionsdirs $xdg_data_dirs/vendor_functions.d
+    set vendor_confdirs $xdg_data_dirs/vendor_conf.d
 
-# Ensure that extra directories are always included.
-if not contains -- $__extra_completionsdir $vendor_completionsdirs
-    set -a vendor_completionsdirs $__extra_completionsdir
-end
-if not contains -- $__extra_functionsdir $vendor_functionsdirs
-    set -a vendor_functionsdirs $__extra_functionsdir
-end
-if not contains -- $__extra_confdir $vendor_confdirs
-    set -a vendor_confdirs $__extra_confdir
+    # Ensure that extra directories are always included.
+    if not contains -- $__extra_completionsdir $vendor_completionsdirs
+        set -a vendor_completionsdirs $__extra_completionsdir
+    end
+    if not contains -- $__extra_functionsdir $vendor_functionsdirs
+        set -a vendor_functionsdirs $__extra_functionsdir
+    end
+    if not contains -- $__extra_confdir $vendor_confdirs
+        set -a vendor_confdirs $__extra_confdir
+    end
 end
 
 # Set up function and completion paths. Make sure that the fish
@@ -141,7 +147,7 @@ function fish_sigtrap_handler --on-signal TRAP --no-scope-shadowing --descriptio
 end
 
 #
-# Whenever a prompt is displayed, make sure that interactive
+# When a prompt is first displayed, make sure that interactive
 # mode-specific initializations have been performed.
 # This handler removes itself after it is first called.
 #

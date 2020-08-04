@@ -15,8 +15,10 @@ Since fish 3.1 you can set an environment variable for just one command using th
 
 How do I run a command every login? What's fish's equivalent to .bashrc or .profile?
 ------------------------------------------------------------------------------------
-Edit the file ``~/.config/fish/config.fish``, creating it if it does not exist (Note the leading period).
+Edit the file ``~/.config/fish/config.fish`` [#]_, creating it if it does not exist (Note the leading period).
 
+
+.. [#] The "~/.config" part of this can be set via $XDG_CONFIG_HOME, that's just the default.
 
 How do I set my prompt?
 -----------------------
@@ -172,7 +174,7 @@ add a statement to your :ref:`user initialization file <initialization>` (usuall
 
 How do I customize my syntax highlighting colors?
 -------------------------------------------------
-Use the web configuration tool, :ref:`fish_config <cmd-fish_config>`, or alter the `fish_color family of environment variables <index#variables-color>`__.
+Use the web configuration tool, :ref:`fish_config <cmd-fish_config>`, or alter the :ref:`fish_color family of environment variables <variables-color>`.
 
 I accidentally entered a directory path and fish changed directory. What happened?
 ----------------------------------------------------------------------------------
@@ -180,7 +182,7 @@ If fish is unable to locate a command with a given name, and it starts with ``.`
 
 The open command doesn't work.
 ------------------------------
-The ``open`` command uses the MIME type database and the ``.desktop`` files used by Gnome and KDE to identify filetypes and default actions. If at least one of these environments is installed, but the open command is not working, this probably means that the relevant files are installed in a non-standard location. Consider `asking for more help <index#more-help>`__.
+The ``open`` command uses the MIME type database and the ``.desktop`` files used by Gnome and KDE to identify filetypes and default actions. If at least one of these environments is installed, but the open command is not working, this probably means that the relevant files are installed in a non-standard location. Consider :ref:`asking for more help <more-help>`.
 
 How do I make fish my default shell?
 ------------------------------------
@@ -226,15 +228,17 @@ Change the value of the variable ``fish_greeting`` or create a ``fish_greeting``
 
 Why doesn't history substitution ("!$" etc.) work?
 --------------------------------------------------
-Because history substitution is an awkward interface that was invented before interactive line editing was even possible. Instead of adding this pseudo-syntax, fish opts for nice history searching and recall features.  Switching requires a small change of habits: if you want to modify an old line/word, first recall it, then edit.  E.g. don't type "sudo !!" - first press Up, then Home, then type "sudo ".
+Because history substitution is an awkward interface that was invented before interactive line editing was even possible. Instead of adding this pseudo-syntax, fish opts for nice history searching and recall features.  Switching requires a small change of habits: if you want to modify an old line/word, first recall it, then edit.
 
-Fish's history recall is very simple yet effective:
+As a special case, most of the time history substitution is used as ``sudo !!``. In that case just press :kbd:`Alt`\ +\ :kbd:`S`, and it will recall your last commandline with `sudo` prefixed (or toggle a `sudo` prefix on the current commandline if there is anything).
+
+In general, fish's history recall works like this:
 
 - Like other shells, the Up arrow, :kbd:`↑` recalls whole lines, starting from the last executed line.  A single press replaces "!!", later presses replace "!-3" and the like.
 
 - If the line you want is far back in the history, type any part of the line and then press Up one or more times.  This will filter the recalled lines to ones that include this text, and you will get to the line you want much faster.  This replaces "!vi", "!?bar.c" and the like.
 
-- :kbd:`Alt`\ +\ :kbd:`↑` recalls individual arguments, starting from the last argument in the last executed line.  A single press replaces "!$", later presses replace "!!:4" and such. An alternate key binding is :kbd:`Alt`\ +\ :kbd:`.`.
+- :kbd:`Alt`\ +\ :kbd:`↑` recalls individual arguments, starting from the last argument in the last executed line.  A single press replaces "!$", later presses replace "!!:4" and such. As an alternate key binding, :kbd:`Alt`\ +\ :kbd:`.` can be used.
 
 - If the argument you want is far back in history (e.g. 2 lines back - that's a lot of words!), type any part of it and then press :kbd:`Alt`\ +\ :kbd:`↑`.  This will show only arguments containing that part and you will get what you want much faster.  Try it out, this is very convenient!
 
@@ -247,6 +251,73 @@ How can I use ``-`` as a shortcut for ``cd -``?
 In fish versions prior to 2.5.0 it was possible to create a function named ``-`` that would do ``cd -``. Changes in the 2.5.0 release included several bug fixes that enforce the rule that a bare hyphen is not a valid function (or variable) name. However, you can achieve the same effect via an abbreviation::
 
     abbr -a -- - 'cd -'
+
+My command prints "No matches for wildcard" but works in bash
+-------------------------------------------------------------
+
+In short: :ref:`quote <quotes>` or :ref:`escape <escapes>` the wildcard::
+
+  scp user@ip:/dir/"string-*"
+
+When fish sees an unquoted ``*``, it performs :ref:`wildcard expansion <expand-wildcard>`. That means it tries to match filenames to the given string.
+
+If the wildcard doesn't match any files, fish prints an error instead of running the command::
+
+  > echo *this*does*not*exist
+  fish: No matches for wildcard '*this*does*not*exist'. See `help expand`.
+  echo *this*does*not*exist 2>| xsel --clipboard
+       ^
+
+Now, bash also tries to match files in this case, but when it doesn't find a match, it passes along the literal wildcard string instead.
+
+That means that commands like the above
+
+.. code-block:: sh
+
+  scp user@ip:/dir/string-*
+
+or
+
+.. code-block:: sh
+
+  apt install postgres-*
+
+appear to work, because most of the time the string doesn't match and so it passes along the `string-*`, which is then interpreted by the receiving program.
+
+But it also means that these commands can stop working at any moment once a matching file is encountered (because it has been created or the command is executed in a different working directory), and to deal with that bash needs workarounds like
+
+.. code-block:: sh
+
+  for f in ./*.mpg; do
+        # We need to test if the file really exists because the wildcard might have failed to match.
+        test -f "$f" || continue
+        mympgviewer "$f"
+  done
+
+(from http://mywiki.wooledge.org/BashFAQ/004)
+
+For these reasons, fish does not do this, and instead expects asterisks to be quoted or escaped if they aren't supposed to be expanded.
+
+This is similar to bash's "failglob" option.
+
+.. _faq-ssh-interactive:
+
+Why won't SSH/SCP/rsync connect properly when fish is my login shell?
+---------------------------------------------------------------------
+
+This problem may manifest as messages such as "``Received message too long``", "``open terminal
+failed: not a terminal``", "``Bad packet length``", or "``Connection refused``" with strange output
+in ``ssh_exchange_identification`` messages in the debug log.
+
+These problems are generally caused by the :ref:`user initialization file <initialization>` (usually
+``~/.config/fish/config.fish``) producing output when started in non-interactive mode.
+
+All statements in initialization files that output to the terminal should be guarded with something
+like the following::
+
+  if status is-interactive
+    ...
+  end
 
 .. _faq-unicode:
 

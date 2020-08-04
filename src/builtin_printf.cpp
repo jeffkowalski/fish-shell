@@ -714,8 +714,13 @@ int builtin_printf_state_t::print_formatted(const wchar_t *format, int argc, wch
                     return 0;
                 }
 
+                const wchar_t *argument = L"";
+                if (argc > 0) {
+                    argument = *argv++;
+                    argc--;
+                }
                 print_direc(direc_start, direc_length, *f, have_field_width, field_width,
-                            have_precision, precision, (argc <= 0 ? L"" : (argc--, *argv++)));
+                            have_precision, precision, argument);
                 break;
             }
             case L'\\': {
@@ -749,7 +754,6 @@ int builtin_printf(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     argc -= optind;
     argv += optind;
     if (argc < 1) {
-        streams.err.append_format(BUILTIN_ERR_MIN_ARG_COUNT1, cmd, 1, argc);
         return STATUS_INVALID_ARGS;
     }
 

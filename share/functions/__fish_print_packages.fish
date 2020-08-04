@@ -23,11 +23,11 @@ function __fish_print_packages
             # (It is safe to use `sed -r` here as we are guaranteed to be on a GNU platform
             # if apt-cache was found. Using unicode reserved range in `fish/tr` and the
             # little-endian bytecode equivalent in `sed`. Supports localization.)
-            apt-cache --no-generate show '.*'(commandline -ct)'.*' 2>/dev/null | sed -r '/^(Package|Description-[a-z]{2}):/!d;s/Package: (.*)/\1\t/g;s/Description-.*: (.*)/\1\xee\x80\x80\x0a/g' | tr -d \n | tr -s \uE000 \n | uniq
+            apt-cache --no-generate show '.*'(commandline -ct)'.*' 2>/dev/null | sed -r '/^(Package|Description-?[a-z]{0,2}):/!d;s/Package: (.*)/\1\t/g;s/Description-?[^:]*: (.*)/\1\xee\x80\x80\x0a/g' | tr -d \n | tr -s \uE000 \n | uniq
             return
         else
             set -l packages (dpkg --get-selections | string replace -fr '(\S+)\s+install' "\$1" | string match -e (commandline -ct))
-            apt-cache --no-generate show $packages 2>/dev/null | sed -r '/^(Package|Description-[a-z]{2}):/!d;s/Package: (.*)/\1\t/g;s/Description-.*: (.*)/\1\xee\x80\x80\x0a/g' | tr -d \n | tr -s \uE000 \n | uniq
+            apt-cache --no-generate show $packages 2>/dev/null | sed -r '/^(Package|Description-?[a-z]{0,2}):/!d;s/Package: (.*)/\1\t/g;s/Description-?[^:]*: (.*)/\1\xee\x80\x80\x0a/g' | tr -d \n | tr -s \uE000 \n | uniq
 
             return
         end
@@ -53,19 +53,20 @@ function __fish_print_packages
     ### BEGIN CACHED RESULTS ###
 
     # Set up cache directory
-    if test -z "$XDG_CACHE_HOME"
-        set XDG_CACHE_HOME $HOME/.cache
+    set -l xdg_cache_home $XDG_CACHE_HOME
+    if test -z "$xdg_cache_home"
+        set xdg_cache_home $HOME/.cache
     end
-    mkdir -m 700 -p $XDG_CACHE_HOME
+    mkdir -m 700 -p $xdg_cache_home
 
     # Caches for 5 minutes
     if type -q -f pacman
         if not set -q only_installed
-            set cache_file $XDG_CACHE_HOME/.pac-cache.$USER
+            set -l cache_file $xdg_cache_home/.pac-cache.$USER
             if test -f $cache_file
                 cat $cache_file
-                set age (math (date +%s) - (stat -c '%Y' $cache_file))
-                set max_age 250
+                set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
+                set -l max_age 250
                 if test $age -lt $max_age
                     return
                 end
@@ -89,7 +90,7 @@ function __fish_print_packages
 
         # If the cache is less than five minutes old, we do not recalculate it
 
-        set -l cache_file $XDG_CACHE_HOME/.zypper-cache.$USER
+        set -l cache_file $xdg_cache_home/.zypper-cache.$USER
         if test -f $cache_file
             cat $cache_file
             set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
@@ -109,11 +110,11 @@ function __fish_print_packages
 
         # If the cache is less than six hours old, we do not recalculate it
 
-        set cache_file $XDG_CACHE_HOME/.yum-cache.$USER
+        set -l cache_file $xdg_cache_home/.yum-cache.$USER
         if test -f $cache_file
             cat $cache_file
-            set age (math (date +%s) - (stat -c '%Y' $cache_file))
-            set max_age 21600
+            set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
+            set -l max_age 21600
             if test $age -lt $max_age
                 return
             end
@@ -131,11 +132,11 @@ function __fish_print_packages
 
         # If the cache is less than five minutes old, we do not recalculate it
 
-        set cache_file $XDG_CACHE_HOME/.rpm-cache.$USER
+        set -l cache_file $xdg_cache_home/.rpm-cache.$USER
         if test -f $cache_file
             cat $cache_file
-            set age (math (date +%s) - (stat -c '%Y' $cache_file))
-            set max_age 250
+            set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
+            set -l max_age 250
             if test $age -lt $max_age
                 return
             end
@@ -154,11 +155,11 @@ function __fish_print_packages
         # Determine whether to print installed/available packages
 
         if set -q only_installed
-            set cache_file $XDG_CACHE_HOME/.eopkg-installed-cache.$USER
+            set -l cache_file $xdg_cache_home/.eopkg-installed-cache.$USER
             if test -f $cache_file
                 cat $cache_file
-                set age (math (date +%s) - (stat -c '%Y' $cache_file))
-                set max_age 500
+                set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
+                set -l max_age 500
                 if test $age -lt $max_age
                     return
                 end
@@ -168,11 +169,11 @@ function __fish_print_packages
             eopkg list-installed -N | cut -d ' ' -f 1 >$cache_file &
             return
         else
-            set cache_file $XDG_CACHE_HOME/.eopkg-available-cache.$USER
+            set -l cache_file $xdg_cache_home/.eopkg-available-cache.$USER
             if test -f $cache_file
                 cat $cache_file
-                set age (math (date +%s) - (stat -c '%Y' $cache_file))
-                set max_age 500
+                set -l age (math (date +%s) - (stat -c '%Y' $cache_file))
+                set -l max_age 500
                 if test $age -lt $max_age
                     return
                 end
@@ -205,7 +206,7 @@ function __fish_print_packages
     # don't save unix time, but the actual date. Also BSD stat is vastly
     # different from linux stat and converting its time format is tedious
     if type -q -f port
-        set cache_file $XDG_CACHE_HOME/.port-cache.$USER
+        set -l cache_file $xdg_cache_home/.port-cache.$USER
         if test -e $cache_file
             # Delete if cache is older than 15 minutes
             find "$cache_file" -ctime +15m | awk '{$1=$1;print}' | xargs rm
@@ -227,6 +228,16 @@ function __fish_print_packages
             return
         else
             opkg list 2>/dev/null | sed -r 's/^([a-zA-Z0-9\-]+) - ([a-zA-Z0-9\-]+)/\1\t\2/g'
+            return
+        end
+    end
+
+    if type -q -f apk
+        if set -q only_installed
+            apk info -q
+            return
+        else
+            apk search -q
             return
         end
     end

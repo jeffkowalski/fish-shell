@@ -585,7 +585,7 @@ end
 set -x TESTVAR0
 set -x TESTVAR1 a
 set -x TESTVAR2 a b
-env | grep TESTVAR | cat -v
+env | grep TESTVAR | sort | cat -v
 #CHECK: TESTVAR0=
 #CHECK: TESTVAR1=a
 #CHECK: TESTVAR2=a b
@@ -623,5 +623,21 @@ set -xU __fish_test_universal_exported_var 1
 $FISH -c 'set __fish_test_universal_exported_var 2'
 env | string match -e __fish_test_universal_exported_var
 #CHECK: __fish_test_universal_exported_var=2
+
+# Test that computed variables are global.
+# If they can be set they can only be set in global scope,
+# so they should only be shown in global scope.
+set -S status
+#CHECK: $status: set in global scope, unexported, with 1 elements
+#CHECK: $status[1]: |0|
+
+set -ql history
+echo $status
+#CHECK: 1
+
+set --path newvariable foo
+set -S newvariable
+#CHECK: $newvariable: set in global scope, unexported, a path variable with 1 elements
+#CHECK: $newvariable[1]: |foo|
 
 true

@@ -1,18 +1,18 @@
 # Completions for the `apt` command
 
 set -l all_subcmds update upgrade full-upgrade search list install show remove edit-sources purge changelog autoremove depends rdepends
-set -l pkg_subcmds install upgrade full-upgrade show search purge changelog policy depends rdepends
+set -l pkg_subcmds install upgrade full-upgrade show search purge changelog policy depends rdepends autoremove
 set -l installed_pkg_subcmds remove
 set -l handle_file_pkg_subcmds install
 
 function __fish_apt_subcommand --no-scope-shadowing
-    set subcommand $argv[1]
+    set -l subcommand $argv[1]
     set -e argv[1]
     complete -f -c apt -n "not __fish_seen_subcommand_from $all_subcmds" -a $subcommand $argv
 end
 
 function __fish_apt_option
-    set subcommand $argv[1]
+    set -l subcommand $argv[1]
     set -e argv[1]
     complete -f -c apt -n "__fish_seen_subcommand_from $subcommand" $argv
 end

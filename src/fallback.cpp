@@ -1,8 +1,7 @@
 // This file only contains fallback implementations of functions which have been found to be missing
 // or broken by the configuration scripts.
 //
-// Many of these functions are more or less broken and incomplete. lrand28_r internally uses the
-// regular (bad) rand_r function, the gettext function doesn't actually do anything, etc.
+// Many of these functions are more or less broken and incomplete.
 #include "config.h"
 
 // IWYU likes to recommend adding term.h when we want ncurses.h.
@@ -63,13 +62,12 @@ int fish_mkstemp_cloexec(char *name_template) {
     if (&mkostemp != nullptr) {
         return mkostemp(name_template, O_CLOEXEC);
     }
-#else
+#endif
     int result_fd = mkstemp(name_template);
     if (result_fd != -1) {
         fcntl(result_fd, F_SETFD, FD_CLOEXEC);
     }
     return result_fd;
-#endif
 }
 
 /// Fallback implementations of wcsdup and wcscasecmp. On systems where these are not needed (e.g.
@@ -113,32 +111,6 @@ int fish_mkstemp_cloexec(char *name_template) {
     return wcsncasecmp_fallback(a + 1, b + 1, count - 1);
 }
 
-#ifdef __APPLE__
-#if __DARWIN_C_LEVEL >= 200809L
-// Note parens avoid the macro expansion.
-wchar_t *wcsdup_use_weak(const wchar_t *a) {
-    if (&wcsdup != NULL) return (wcsdup)(a);
-    return wcsdup_fallback(a);
-}
-
-int wcscasecmp_use_weak(const wchar_t *a, const wchar_t *b) {
-    if (&wcscasecmp != NULL) return (wcscasecmp)(a, b);
-    return wcscasecmp_fallback(a, b);
-}
-
-int wcsncasecmp_use_weak(const wchar_t *s1, const wchar_t *s2, size_t n) {
-    if (&wcsncasecmp != NULL) return (wcsncasecmp)(s1, s2, n);
-    return wcsncasecmp_fallback(s1, s2, n);
-}
-#else   // __DARWIN_C_LEVEL >= 200809L
-wchar_t *wcsdup(const wchar_t *in) { return wcsdup_fallback(in); }
-int wcscasecmp(const wchar_t *a, const wchar_t *b) { return wcscasecmp_fallback(a, b); }
-int wcsncasecmp(const wchar_t *a, const wchar_t *b, size_t n) {
-    return wcsncasecmp_fallback(a, b, n);
-}
-#endif  // __DARWIN_C_LEVEL >= 200809L
-#else   // __APPLE__
-
 #ifndef HAVE_WCSDUP
 #ifndef HAVE_STD__WCSDUP
 wchar_t *wcsdup(const wchar_t *in) { return wcsdup_fallback(in); }
@@ -158,8 +130,6 @@ int wcsncasecmp(const wchar_t *a, const wchar_t *b, size_t n) {
 }
 #endif
 #endif
-
-#endif  // __APPLE__
 
 #ifndef HAVE_WCSNDUP
 wchar_t *wcsndup(const wchar_t *in, size_t c) {

@@ -21,10 +21,7 @@ function __fish_config_interactive -d "Initializations that should be performed 
 
     if not set -q fish_greeting
         set -l line1 (_ 'Welcome to fish, the friendly interactive shell')
-        set -l line2 ''
-        if test $__fish_initialized -lt 2300
-            set line2 \n(_ 'Type `help` for instructions on how to use fish')
-        end
+        set -l line2 \n(printf (_ 'Type %shelp%s for instructions on how to use fish') (set_color green) (set_color normal))
         set -U fish_greeting "$line1$line2"
     end
 
@@ -95,7 +92,10 @@ function __fish_config_interactive -d "Initializations that should be performed 
     #
     # Don't do this if we're being invoked as part of running unit tests.
     if not set -q FISH_UNIT_TESTS_RUNNING
-        if not test -d $__fish_user_data_dir/generated_completions
+        # Check if our manpage completion script exists because some distros split it out.
+        # (#7183)
+        set -l script $__fish_data_dir/tools/create_manpage_completions.py
+        if not test -d $__fish_user_data_dir/generated_completions; and test -e "$script"
             # Generating completions from man pages needs python (see issue #3588).
 
             # We cannot simply do `fish_update_completions &` because it is a function.
@@ -117,13 +117,16 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # Print a greeting.
     # fish_greeting can be a function (preferred) or a variable.
     #
-    if functions -q fish_greeting
-        fish_greeting
-    else
-        # The greeting used to be skipped when fish_greeting was empty (not just undefined)
-        # Keep it that way to not print superfluous newlines on old configuration
-        test -n "$fish_greeting"
-        and echo $fish_greeting
+    # NOTE: This status check is necessary to not print the greeting when `read`ing in scripts. See #7080.
+    if status --is-interactive
+        if functions -q fish_greeting
+            fish_greeting
+        else
+            # The greeting used to be skipped when fish_greeting was empty (not just undefined)
+            # Keep it that way to not print superfluous newlines on old configuration
+            test -n "$fish_greeting"
+            and echo $fish_greeting
+        end
     end
 
     #
@@ -221,10 +224,12 @@ function __fish_config_interactive -d "Initializations that should be performed 
     # Load key bindings
     __fish_reload_key_bindings
 
+    # Enable bracketed paste exception when running unit tests so we don't have to add
+    # the sequences to bind.expect
     if not set -q FISH_UNIT_TESTS_RUNNING
         # Enable bracketed paste before every prompt (see __fish_shared_bindings for the bindings).
-        # Disable it for unit tests so we don't have to add the sequences to bind.expect
-        function __fish_enable_bracketed_paste --on-event fish_prompt
+        # Enable bracketed paste when the read builtin is used.
+        function __fish_enable_bracketed_paste --on-event fish_prompt --on-event fish_read
             printf "\e[?2004h"
         end
 
@@ -262,8 +267,9 @@ function __fish_config_interactive -d "Initializations that should be performed 
     end
 
     # Notify terminals when $PWD changes (issue #906).
-    # VTE based terminals, Terminal.app, and iTerm.app (TODO) support this.
-    if test 0"$VTE_VERSION" -ge 3405 -o "$TERM_PROGRAM" = Apple_Terminal -a (string match -r '\d+' 0"$TERM_PROGRAM_VERSION") -ge 309
+    # VTE based terminals, Terminal.app, iTerm.app (TODO), and foot support this.
+    if not set -q FISH_UNIT_TESTS_RUNNING
+        and test 0"$VTE_VERSION" -ge 3405 -o "$TERM_PROGRAM" = Apple_Terminal -a (string match -r '\d+' 0"$TERM_PROGRAM_VERSION") -ge 309 -o "$TERM" = foot
         function __update_cwd_osc --on-variable PWD --description 'Notify capable terminals when $PWD changes'
             if status --is-command-substitution || set -q INSIDE_EMACS
                 return

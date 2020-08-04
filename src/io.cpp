@@ -57,8 +57,7 @@ void io_bufferfill_t::print() const {
     std::fwprintf(stderr, L"bufferfill %d -> %d\n", write_fd_.fd(), fd);
 }
 
-void io_buffer_t::append_from_stream(const output_stream_t &stream) {
-    const separated_buffer_t<wcstring> &input = stream.buffer();
+void io_buffer_t::append_from_wide_buffer(const separated_buffer_t<wcstring> &input) {
     if (input.elements().empty() && !input.discarded()) return;
     scoped_lock locker(append_lock_);
     if (buffer_.discarded()) return;
@@ -227,6 +226,7 @@ void io_chain_t::append(const io_chain_t &chain) {
 }
 
 bool io_chain_t::append_from_specs(const redirection_spec_list_t &specs, const wcstring &pwd) {
+    bool have_error = false;
     for (const auto &spec : specs) {
         switch (spec.mode) {
             case redirection_mode_t::fd: {
@@ -253,14 +253,19 @@ bool io_chain_t::append_from_specs(const redirection_spec_list_t &specs, const w
                         FLOGF(warning, FILE_ERROR, spec.target.c_str());
                         if (should_flog(warning)) wperror(L"open");
                     }
-                    return false;
+                    // If opening a file fails, insert a closed FD instead of the file redirection
+                    // and return false. This lets execution potentially recover and at least gives
+                    // the shell a chance to gracefully regain control of the shell (see #7038).
+                    this->push_back(make_unique<io_close_t>(spec.fd));
+                    have_error = true;
+                    break;
                 }
                 this->push_back(std::make_shared<io_file_t>(spec.fd, std::move(file)));
                 break;
             }
         }
     }
-    return true;
+    return !have_error;
 }
 
 void io_chain_t::print() const {
@@ -343,6 +348,32 @@ shared_ptr<const io_data_t> io_chain_t::io_for_fd(int fd) const {
 
 void output_stream_t::append_narrow_buffer(const separated_buffer_t<std::string> &buffer) {
     for (const auto &rhs_elem : buffer.elements()) {
-        buffer_.append(str2wcstring(rhs_elem.contents), rhs_elem.separation);
+        append_with_separation(str2wcstring(rhs_elem.contents), rhs_elem.separation);
     }
+}
+
+void output_stream_t::append_with_separation(const wchar_t *s, size_t len, separation_type_t type) {
+    append(s, len);
+    if (type == separation_type_t::explicitly) {
+        append(L'\n');
+    }
+}
+
+void fd_output_stream_t::append(const wchar_t *s, size_t amt) {
+    if (errored_) return;
+    int res = wwrite_to_fd(s, amt, this->fd_);
+    if (res < 0) {
+        // TODO: this error is too aggressive, e.g. if we got SIGINT we should not complain.
+        wperror(L"write");
+        errored_ = true;
+    }
+}
+
+void null_output_stream_t::append(const wchar_t *, size_t) {}
+
+void buffered_output_stream_t::append(const wchar_t *s, size_t amt) { buffer_.append(s, s + amt); }
+
+void buffered_output_stream_t::append_with_separation(const wchar_t *s, size_t len,
+                                                      separation_type_t type) {
+    buffer_.append(s, s + len, type);
 }

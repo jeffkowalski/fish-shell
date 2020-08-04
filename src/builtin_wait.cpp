@@ -19,7 +19,7 @@
 /// doesn't work properly, so use this function in wait command.
 static job_id_t get_job_id_from_pid(pid_t pid, const parser_t &parser) {
     for (const auto &j : parser.jobs()) {
-        if (j->pgid == pid) {
+        if (j->get_pgid() == maybe_t<pid_t>{pid}) {
             return j->job_id();
         }
         // Check if the specified pid is a child process of the job.
@@ -64,7 +64,7 @@ static bool any_jobs_finished(size_t jobs_len, const parser_t &parser) {
 }
 
 static int wait_for_backgrounds(parser_t &parser, bool any_flag) {
-    sigint_checker_t sigint;
+    sigchecker_t sigint(topic_t::sighupint);
     size_t jobs_len = parser.jobs().size();
     while ((!any_flag && !all_jobs_finished(parser)) ||
            (any_flag && !any_jobs_finished(jobs_len, parser))) {
@@ -106,7 +106,7 @@ static bool any_specified_jobs_finished(const parser_t &parser, const std::vecto
 
 static int wait_for_backgrounds_specified(parser_t &parser, const std::vector<job_id_t> &ids,
                                           bool any_flag) {
-    sigint_checker_t sigint;
+    sigchecker_t sigint(topic_t::sighupint);
     while ((!any_flag && !all_specified_jobs_finished(parser, ids)) ||
            (any_flag && !any_specified_jobs_finished(parser, ids))) {
         if (sigint.check()) {

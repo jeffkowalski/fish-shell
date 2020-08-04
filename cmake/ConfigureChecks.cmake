@@ -4,13 +4,20 @@
 # `wcstod_l` is a GNU-extension, sometimes hidden behind GNU-related defines.
 # This is the case for at least Cygwin and Newlib.
 list(APPEND CMAKE_REQUIRED_DEFINITIONS -D_GNU_SOURCE=1)
+include(CheckCXXCompilerFlag)
 
 if(APPLE)
-    include(CheckCXXCompilerFlag)
     check_cxx_compiler_flag("-Werror=unguarded-availability" REQUIRES_UNGUARDED_AVAILABILITY)
     if(REQUIRES_UNGUARDED_AVAILABILITY)
         list(APPEND CMAKE_REQUIRED_FLAGS ${CMAKE_REQUIRED_FLAGS} "-Werror=unguarded-availability")
     endif()
+endif()
+
+# An unrecognized flag is usually a warning and not an error, which CMake apparently does
+# not pick up on. Combine it with -Werror to determine if it's actually supported.
+check_cxx_compiler_flag("-Wno-redundant-move -Werror" HAS_NO_REDUNDANT_MOVE)
+if (HAS_NO_REDUNDANT_MOVE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-redundant-move")
 endif()
 
 # Try using CMake's own logic to locate curses/ncurses
@@ -24,6 +31,16 @@ if(NOT ${CURSES_FOUND})
     pkg_search_module(CURSES REQUIRED ncurses curses)
     set(CURSES_CURSES_LIBRARY ${CURSES_LIBRARIES})
     set(CURSES_LIBRARY ${CURSES_LIBRARIES})
+endif()
+# Set up extra include directories for CheckIncludeFile
+list(APPEND CMAKE_REQUIRED_INCLUDES ${CURSES_INCLUDE_DIRS})
+
+# Fix undefined reference to tparm on RHEL 6 and potentially others
+# If curses is found via CMake, it also links against tinfo if it exists. But if we use our
+# fallback pkg-config logic above, we need to do this manually.
+find_library(CURSES_TINFO tinfo)
+if (CURSES_TINFO)
+    set(CURSES_LIBRARY ${CURSES_LIBRARY} ${CURSES_TINFO})
 endif()
 
 # Get threads.
@@ -65,7 +82,6 @@ check_cxx_symbol_exists(getpwent pwd.h HAVE_GETPWENT)
 check_cxx_symbol_exists(getrusage sys/resource.h HAVE_GETRUSAGE)
 check_cxx_symbol_exists(gettext libintl.h HAVE_GETTEXT)
 check_cxx_symbol_exists(killpg "sys/types.h;signal.h" HAVE_KILLPG)
-check_cxx_symbol_exists(lrand48_r stdlib.h HAVE_LRAND48_R)
 # mkostemp is in stdlib in glibc and FreeBSD, but unistd on macOS
 check_cxx_symbol_exists(mkostemp "stdlib.h;unistd.h" HAVE_MKOSTEMP)
 set(HAVE_CURSES_H ${CURSES_HAVE_CURSES_H})
@@ -186,7 +202,15 @@ int main () {
   HAVE_STD__MAKE_UNIQUE
 )
 
-find_program(SED sed)
+# Detect support for thread_local.
+check_cxx_source_compiles("
+int main () {
+  static thread_local int x = 3;
+  (void)x;
+}
+"
+  HAVE_CX11_THREAD_LOCAL
+)
 
 check_cxx_source_compiles("
 #include <atomic>

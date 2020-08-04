@@ -18,13 +18,15 @@ Synopsis
 Description
 -----------
 
-``bind`` adds a binding for the specified key sequence to the specified command.
+``bind`` manages bindings.
 
-SEQUENCE is the character sequence to bind to. These should be written as :ref:`fish escape sequences <escapes>`. For example, because pressing the Alt key and another character sends that character prefixed with an escape character, Alt-based key bindings can be written using the ``\e`` escape. For example, :kbd:`Alt`\ +\ :kbd:`W` can be written as ``\ew``. The control character can be written in much the same way using the ``\c`` escape, for example :kbd:`Control`\ +\ :kbd:`X` (^X) can be written as ``\cx``. Note that Alt-based key bindings are case sensitive and Control-based key bindings are not. This is a constraint of text-based terminals, not ``fish``.
+It can add bindings if given a SEQUENCE of characters to bind to. These should be written as :ref:`fish escape sequences <escapes>`. The most important of these are ``\c`` for the control key, and ``\e`` for escape, and because of historical reasons also the Alt key (sometimes also called "Meta").
 
-The default key binding can be set by specifying a ``SEQUENCE`` of the empty string (that is, ``''`` ). It will be used whenever no other binding matches. For most key bindings, it makes sense to use the ``self-insert`` function (i.e. ``bind '' self-insert``) as the default keybinding. This will insert any keystrokes not specifically bound to into the editor. Non- printable characters are ignored by the editor, so this will not result in control sequences being printable.
+For example, :kbd:`Alt`\ +\ :kbd:`W` can be written as ``\ew``, and :kbd:`Control`\ +\ :kbd:`X` (^X) can be written as ``\cx``. Note that Alt-based key bindings are case sensitive and Control-based key bindings are not. This is a constraint of text-based terminals, not ``fish``.
 
-If the ``-k`` switch is used, the name of the key (such as 'down', 'up' or 'backspace') is used instead of a sequence. The names used are the same as the corresponding curses variables, but without the 'key\_' prefix. (See ``terminfo(5)`` for more information, or use ``bind --key-names`` for a list of all available named keys.) If used in conjunction with the ``-s`` switch, ``bind`` will silently ignore bindings to named keys that are not found in termcap for the current ``$TERMINAL``, otherwise a warning is emitted.
+The generic key binding that matches if no other binding does can be set by specifying a ``SEQUENCE`` of the empty string (that is, ``''`` ). For most key bindings, it makes sense to bind this to the ``self-insert`` function (i.e. ``bind '' self-insert``). This will insert any keystrokes not specifically bound to into the editor. Non-printable characters are ignored by the editor, so this will not result in control sequences being inserted.
+
+If the ``-k`` switch is used, the name of a key (such as 'down', 'up' or 'backspace') is used instead of a sequence. The names used are the same as the corresponding curses variables, but without the 'key\_' prefix. (See ``terminfo(5)`` for more information, or use ``bind --key-names`` for a list of all available named keys). Normally this will print an error if the current ``$TERM`` entry doesn't have a given key, unless the ``-s`` switch is given.
 
 ``COMMAND`` can be any fish command, but it can also be one of a set of special input functions. These include functions for moving the cursor, operating on the kill-ring, performing tab completion, etc. Use ``bind --function-names`` for a complete list of these input functions.
 
@@ -32,15 +34,17 @@ When ``COMMAND`` is a shellscript command, it is a good practice to put the actu
 
 If a script produces output, it should finish by calling ``commandline -f repaint`` to tell fish that a repaint is in order.
 
-When multiple ``COMMAND``\s are provided, they are all run in the specified order when the key is pressed. Note that special input functions cannot be combined with ordinary shell script commands. The commands must be entirely a sequence of special input functions (from ``bind -f``) or all shell script commands (i.e., valid fish script).
+Note that special input functions cannot be combined with ordinary shell script commands. The commands must be entirely a sequence of special input functions (from ``bind -f``) or all shell script commands (i.e., valid fish script).
 
-If no ``SEQUENCE`` is provided, all bindings (or just the bindings in the specified ``MODE``) are printed. If ``SEQUENCE`` is provided without ``COMMAND``, just the binding matching that sequence is printed.
+If no ``SEQUENCE`` is provided, all bindings (or just the bindings in the given ``MODE``) are printed. If ``SEQUENCE`` is provided but no ``COMMAND``, just the binding matching that sequence is printed.
 
 To save custom keybindings, put the ``bind`` statements into :ref:`config.fish <initialization>`. Alternatively, fish also automatically executes a function called ``fish_user_key_bindings`` if it exists.
 
 Key bindings may use "modes", which mimics Vi's modal input behavior. The default mode is "default", and every bind applies to a single mode. The mode can be viewed/changed with the ``$fish_bind_mode`` variable.
 
-The following parameters are available:
+Options
+-------
+The following options are available:
 
 - ``-k`` or ``--key`` Specify a key name, such as 'left' or 'backspace' instead of a character sequence
 
@@ -58,7 +62,7 @@ The following parameters are available:
 
 - ``-a`` or ``--all`` See ``--erase`` and ``--key-names``
 
-- ``--preset`` and ``--user`` specify if bind should operate on user or preset bindings. User bindings take precedence over preset bindings when fish looks up mappings. By default, all ``bind`` invocations work on the "user" level except for listing, which will show both levels. All invocations except for inserting new bindings can operate on both levels at the same time. ``--preset`` should only be used in full binding sets (like when working on ``fish_vi_key_bindings``).
+- ``--preset`` and ``--user`` specify if bind should operate on user or preset bindings. User bindings take precedence over preset bindings when fish looks up mappings. By default, all ``bind`` invocations work on the "user" level except for listing, which will show both levels. All invocations except for inserting new bindings can operate on both levels at the same time (if both ``--preset`` and ``--user`` are given). ``--preset`` should only be used in full binding sets (like when working on ``fish_vi_key_bindings``).
 
 Special input functions
 -----------------------
@@ -94,6 +98,8 @@ The following special input functions are available:
 
 - ``cancel``, cancel the current commandline and replace it with a new empty one
 
+- ``cancel-commandline``, cancel the current commandline and replace it with a new empty one, leaving the old one in place with a marker to show that it was cancelled
+
 - ``capitalize-word``, make the current word begin with a capital letter
 
 - ``complete``, guess the remainder of the current token
@@ -116,15 +122,17 @@ The following special input functions are available:
 
 - ``end-selection``, end selecting text
 
-- ``expand-abbr`` expands any abbreviation currently under the cursor
+- ``expand-abbr``, expands any abbreviation currently under the cursor
 
-- ``execute`` run the current commandline
+- ``execute``, run the current commandline
 
-- ``force-repaint`` reexecute the prompt functions without coalescing
+- ``force-repaint``, reexecute the prompt functions without coalescing
 
 - ``forward-bigword``, move one whitespace-delimited word to the right
 
 - ``forward-char``, move one character to the right
+
+- ``forward-single-char``, move one character to the right; if an autosuggestion is available, only take a single char from it
 
 - ``forward-word``, move one word to the right
 
@@ -156,11 +164,13 @@ The following special input functions are available:
 
 - ``kill-word``, move the next word to the killring
 
+- ``or``, only execute the next function if the previous succeeded (note: only some functions report success)
+
 - ``pager-toggle-search``, toggles the search field if the completions pager is visible.
 
-- ``repaint`` reexecutes the prompt functions and redraws the prompt. Multiple successive repaints are coalesced.
+- ``repaint``, reexecutes the prompt functions and redraws the prompt. Multiple successive repaints are coalesced.
 
-- ``repaint-mode`` reexecutes the fish_mode_prompt function and redraws the prompt. This is useful for vi-mode. If no fish_mode_prompt exists, it acts like a normal repaint.
+- ``repaint-mode``, reexecutes the :ref:`fish_mode_prompt <cmd-fish_mode_prompt>` and redraws the prompt. This is useful for vi-mode. If no ``fish_mode_prompt`` exists, it acts like a normal repaint.
 
 - ``self-insert``, inserts the matching sequence into the command line
 
@@ -187,8 +197,6 @@ The following special input functions are available:
 Examples
 --------
 
-
-
 ::
 
     bind \cd 'exit'
@@ -212,9 +220,28 @@ Performs a history search when the :kbd:`Page Up` key is pressed.
 
 Turns on Vi key bindings and rebinds :kbd:`Control`\ +\ :kbd:`C` to clear the input line.
 
+::
+   bind \cg 'git diff; commandline -f repaint'
+
+Causes :kbd:`Control`\ +\ :kbd:`G` to launch ``git diff`` and repaint the commandline afterwards.
+
+.. _cmd-bind-termlimits:
+
+Terminal Limitations
+--------------------
+
+Unix terminals, like the ones fish operates in, are at heart 70s technology. They have some limitations that applications running inside them can't workaround.
+
+For instance, the control key modifies a character by setting the top three bits to 0. This means:
+
+- Many characters + control are indistinguishable from other keys. :kbd:`Control`\ +\ :kbd:`I` *is* tab, :kbd:`Control`\ +\ :kbd:`J` *is* newline (`\n`).
+- Control and shift don't work simultaneously
+
+Other keys don't have a direct encoding, and are sent as escape sequences. For example :kbd:`→` (Right) often sends `\e\[C`. These can differ from terminal to terminal, and the mapping is typically available in `terminfo(5)`. Sometimes however a terminal identifies as e.g. `xterm-256color` for compatibility, but then implements xterm's sequences incorrectly.
+
 .. _cmd-bind-escape:
 
-Special Case: The escape Character
+Special Case: The Escape Character
 ----------------------------------
 
 The escape key can be used standalone, for example, to switch from insertion mode to normal mode when using Vi keybindings. Escape can also be used as a "meta" key, to indicate the start of an escape sequence, like for function or arrow keys. Custom bindings can also be defined that begin with an escape character.

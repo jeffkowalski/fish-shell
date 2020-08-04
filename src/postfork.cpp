@@ -19,6 +19,7 @@
 #include "flog.h"
 #include "io.h"
 #include "iothread.h"
+#include "job_group.h"
 #include "postfork.h"
 #include "proc.h"
 #include "redirection.h"
@@ -41,7 +42,7 @@
 static char *get_interpreter(const char *command, char *buffer, size_t buff_size);
 
 /// Report the error code \p err for a failed setpgid call.
-static void report_setpgid_error(int err, const job_t *j, const process_t *p) {
+void report_setpgid_error(int err, pid_t desired_pgid, const job_t *j, const process_t *p) {
     char pid_buff[128];
     char job_id_buff[128];
     char getpgid_buff[128];
@@ -52,7 +53,7 @@ static void report_setpgid_error(int err, const job_t *j, const process_t *p) {
     format_long_safe(pid_buff, p->pid);
     format_long_safe(job_id_buff, j->job_id());
     format_long_safe(getpgid_buff, getpgid(p->pid));
-    format_long_safe(job_pgid_buff, j->pgid);
+    format_long_safe(job_pgid_buff, desired_pgid);
     narrow_string_safe(argv0, p->argv0());
     narrow_string_safe(command, j->command_wcstr());
 
@@ -69,20 +70,22 @@ static void report_setpgid_error(int err, const job_t *j, const process_t *p) {
     safe_perror("setpgid");
 }
 
-/// Called only by the child to set its own process group (possibly creating a new group in the
-/// process if it is the first in a JOB_CONTROL job.
-/// Returns true on success, false on failure.
-bool child_set_group(job_t *j, process_t *p) {
-    if (j->pgid == INVALID_PID) {
-        assert(j->pgroup_provenance == pgroup_provenance_t::first_external_proc &&
-               "pgroup should only be unset if we need to become the leader");
-        j->pgid = p->pid;
-    }
-    // Put a cap on how many times we retry so we are never stuck here.
-    for (int i = 0; i < 100; i++) {
-        if (setpgid(p->pid, j->pgid) == 0) {
-            return true;
-        } else if (errno == EPERM) {
+int execute_setpgid(pid_t pid, pid_t pgroup, bool is_parent) {
+    // Historically we have looped here to support WSL.
+    unsigned eperm_count = 0;
+    for (;;) {
+        if (setpgid(pid, pgroup) == 0) {
+            return 0;
+        }
+        int err = errno;
+        if (err == EACCES && is_parent) {
+            // We are the parent process and our child has called exec().
+            // This is an unavoidable benign race.
+            return 0;
+        } else if (err == EINTR) {
+            // Paranoia.
+            continue;
+        } else if (err == EPERM && eperm_count++ < 100) {
             // The setpgid(2) man page says that EPERM is returned only if attempts are made
             // to move processes into groups across session boundaries (which can never be
             // the case in fish, anywhere) or to change the process group ID of a session
@@ -90,52 +93,12 @@ bool child_set_group(job_t *j, process_t *p) {
             // we see the same with tcsetpgrp(2) in other places and it disappears on retry.
             debug_safe(2, "setpgid(2) returned EPERM. Retrying");
             continue;
-        } else if (errno == EINTR) {
-            // Retry on EINTR.
-            continue;
-        } else {
-            break;
         }
+        return err;
     }
-    report_setpgid_error(errno, j, p);
-    return false;
 }
 
-/// Called only by the parent only after a child forks and successfully calls child_set_group,
-/// guaranteeing the job control process group has been created and that the child belongs to the
-/// correct process group. Here we can update our job_t structure to reflect the correct process
-/// group in the case of JOB_CONTROL, and we can give the new process group control of the terminal
-/// if it's to run in the foreground.
-bool set_child_group(job_t *j, pid_t child_pid) {
-    if (j->wants_job_control()) {
-        assert(j->pgid != INVALID_PID &&
-               "set_child_group called with JOB_CONTROL before job pgid determined!");
-
-        // The parent sets the child's group. This incurs the well-known unavoidable race with the
-        // child exiting, so ignore ESRCH and EPERM (in case the pid was recycled).
-        // Additionally ignoring EACCES. See #4715 and #4884.
-        if (setpgid(child_pid, j->pgid) < 0) {
-            if (errno != ESRCH && errno != EPERM && errno != EACCES) {
-                safe_perror("setpgid");
-                return false;
-            } else {
-                // Just in case it's ever not right to ignore the setpgid call, (i.e. if this
-                // ever leads to a terminal hang due if both this setpgid call AND posix_spawn's
-                // internal setpgid calls failed), write to the debug log so a future developer
-                // doesn't go crazy trying to track this down.
-                FLOGF(proc_pgroup,
-                      "Error %d while calling setpgid for child %d (probably harmless)", errno,
-                      child_pid);
-            }
-        }
-    } else {
-        j->pgid = getpgrp();
-    }
-
-    return true;
-}
-
-int child_setup_process(pid_t new_termowner, const job_t &job, bool is_forked,
+int child_setup_process(pid_t new_termowner, pid_t fish_pgrp, const job_t &job, bool is_forked,
                         const dup2_list_t &dup2s) {
     // Note we are called in a forked child.
     for (const auto &act : dup2s.get_actions()) {
@@ -159,12 +122,16 @@ int child_setup_process(pid_t new_termowner, const job_t &job, bool is_forked,
             return err;
         }
     }
-    if (new_termowner != INVALID_PID) {
+    if (new_termowner != INVALID_PID && new_termowner != fish_pgrp) {
         // Assign the terminal within the child to avoid the well-known race between tcsetgrp() in
         // the parent and the child executing. We are not interested in error handling here, except
         // we try to avoid this for non-terminals; in particular pipelines often make non-terminal
         // stdin.
-        if (isatty(STDIN_FILENO)) {
+        // Only do this if the tty currently belongs to fish's pgrp. Don't try to steal it away from
+        // another process which may happen if we are run in the background with job control
+        // enabled. Note if stdin is not a tty, then tcgetpgrp() will return -1 and we will not
+        // enter this.
+        if (tcgetpgrp(STDIN_FILENO) == fish_pgrp) {
             // Ensure this doesn't send us to the background (see #5963)
             signal(SIGTTIN, SIG_IGN);
             signal(SIGTTOU, SIG_IGN);
@@ -227,30 +194,47 @@ pid_t execute_fork() {
 }
 
 #if FISH_USE_POSIX_SPAWN
-bool fork_actions_make_spawn_properties(posix_spawnattr_t *attr,
-                                        posix_spawn_file_actions_t *actions, const job_t *j,
-                                        const dup2_list_t &dup2s) {
-    // Initialize the output.
-    if (posix_spawnattr_init(attr) != 0) {
-        return false;
+
+// Given an error code, if it is the first error, record it.
+// \return whether we have any error.
+bool posix_spawner_t::check_fail(int err) {
+    if (error_ == 0) error_ = err;
+    return error_ != 0;
+}
+
+posix_spawner_t::~posix_spawner_t() {
+    if (attr_) {
+        posix_spawnattr_destroy(this->attr());
+    }
+    if (actions_) {
+        posix_spawn_file_actions_destroy(this->actions());
+    }
+}
+
+posix_spawner_t::posix_spawner_t(const job_t *j, const dup2_list_t &dup2s) {
+    // Initialize our fields. This may fail.
+    {
+        posix_spawnattr_t attr;
+        if (check_fail(posix_spawnattr_init(&attr))) return;
+        this->attr_ = attr;
     }
 
-    if (posix_spawn_file_actions_init(actions) != 0) {
-        posix_spawnattr_destroy(attr);
-        return false;
+    {
+        posix_spawn_file_actions_t actions;
+        if (check_fail(posix_spawn_file_actions_init(&actions))) return;
+        this->actions_ = actions;
     }
 
-    bool should_set_process_group_id = false;
-    int desired_process_group_id = 0;
-    if (j->wants_job_control()) {
-        should_set_process_group_id = true;
-
-        // set_child_group puts each job into its own process group
-        // do the same here if there is no PGID yet (i.e. PGID == -2)
-        desired_process_group_id = j->pgid;
-        if (desired_process_group_id == INVALID_PID) {
-            desired_process_group_id = 0;
-        }
+    // desired_pgid tracks the pgroup for the process. If it is none, the pgroup is left unchanged.
+    // If it is zero, create a new pgroup from the pid. If it is >0, join that pgroup.
+    maybe_t<pid_t> desired_pgid = none();
+    if (auto job_pgid = j->group->get_pgid()) {
+        desired_pgid = *job_pgid;
+    } else {
+        assert(j->group->needs_pgid_assignment() && "We should be expecting a pgid");
+        // We are the first external proc in the job group. Set the desired_pgid to 0 to indicate we
+        // should creating a new process group.
+        desired_pgid = 0;
     }
 
     // Set the handling for job control signals back to the default.
@@ -263,47 +247,47 @@ bool fork_actions_make_spawn_properties(posix_spawnattr_t *attr,
     short flags = 0;
     if (reset_signal_handlers) flags |= POSIX_SPAWN_SETSIGDEF;
     if (reset_sigmask) flags |= POSIX_SPAWN_SETSIGMASK;
-    if (should_set_process_group_id) flags |= POSIX_SPAWN_SETPGROUP;
+    if (desired_pgid.has_value()) flags |= POSIX_SPAWN_SETPGROUP;
 
-    int err = 0;
-    if (!err) err = posix_spawnattr_setflags(attr, flags);
+    if (check_fail(posix_spawnattr_setflags(attr(), flags))) return;
 
-    if (!err && should_set_process_group_id)
-        err = posix_spawnattr_setpgroup(attr, desired_process_group_id);
+    if (desired_pgid.has_value()) {
+        if (check_fail(posix_spawnattr_setpgroup(attr(), *desired_pgid))) return;
+    }
 
     // Everybody gets default handlers.
-    if (!err && reset_signal_handlers) {
+    if (reset_signal_handlers) {
         sigset_t sigdefault;
         get_signals_with_handlers(&sigdefault);
-        err = posix_spawnattr_setsigdefault(attr, &sigdefault);
+        if (check_fail(posix_spawnattr_setsigdefault(attr(), &sigdefault))) return;
     }
 
     // No signals blocked.
-    sigset_t sigmask;
-    sigemptyset(&sigmask);
-    if (!err && reset_sigmask) {
+    if (reset_sigmask) {
+        sigset_t sigmask;
+        sigemptyset(&sigmask);
         blocked_signals_for_job(*j, &sigmask);
-        err = posix_spawnattr_setsigmask(attr, &sigmask);
+        if (check_fail(posix_spawnattr_setsigmask(attr(), &sigmask))) return;
     }
 
     // Apply our dup2s.
     for (const auto &act : dup2s.get_actions()) {
-        if (err) break;
         if (act.target < 0) {
-            err = posix_spawn_file_actions_addclose(actions, act.src);
+            if (check_fail(posix_spawn_file_actions_addclose(actions(), act.src))) return;
         } else {
-            err = posix_spawn_file_actions_adddup2(actions, act.src, act.target);
+            if (check_fail(posix_spawn_file_actions_adddup2(actions(), act.src, act.target)))
+                return;
         }
     }
-
-    // Clean up on error.
-    if (err) {
-        posix_spawnattr_destroy(attr);
-        posix_spawn_file_actions_destroy(actions);
-    }
-
-    return !err;
 }
+
+maybe_t<pid_t> posix_spawner_t::spawn(const char *cmd, char *const argv[], char *const envp[]) {
+    if (get_error()) return none();
+    pid_t pid = -1;
+    if (check_fail(posix_spawn(&pid, cmd, &*actions_, &*attr_, argv, envp))) return none();
+    return pid;
+}
+
 #endif  // FISH_USE_POSIX_SPAWN
 
 void safe_report_exec_error(int err, const char *actual_cmd, const char *const *argv,
@@ -339,7 +323,7 @@ void safe_report_exec_error(int err, const char *actual_cmd, const char *const *
                         sz1, sz2);
                 } else {
                     // MAX_ARG_STRLEN, a linux thing that limits the size of one argument. It's
-                    // defined in binfmt.h, but we don't want to include that just to be able to
+                    // defined in binfmts.h, but we don't want to include that just to be able to
                     // print the real limit.
                     debug_safe(0,
                                "One of your arguments exceeds the operating system's argument "
@@ -423,4 +407,4 @@ static char *get_interpreter(const char *command, char *buffer, size_t buff_size
         return buffer + 2;
     }
     return nullptr;
-}
+};

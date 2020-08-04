@@ -32,6 +32,8 @@
 #include "path.h"
 #include "proc.h"
 #include "reader.h"
+#include "termsize.h"
+#include "wcstringutil.h"
 #include "wutil.h"  // IWYU pragma: keep
 
 /// Some configuration path environment variables.
@@ -46,8 +48,8 @@
 extern char **environ;
 
 /// The character used to delimit path and non-path variables in exporting and in string expansion.
-static const wchar_t PATH_ARRAY_SEP = L':';
-static const wchar_t NONPATH_ARRAY_SEP = L' ';
+static constexpr wchar_t PATH_ARRAY_SEP = L':';
+static constexpr wchar_t NONPATH_ARRAY_SEP = L' ';
 
 bool curses_initialized = false;
 
@@ -80,27 +82,33 @@ struct electric_var_t {
     static const electric_var_t *for_name(const wcstring &name);
 };
 
-static const electric_var_t electric_variables[] = {
+// Keep sorted alphabetically
+static const std::vector<electric_var_t> electric_variables{
+    {L"FISH_VERSION", electric_var_t::freadonly},
     {L"PWD", electric_var_t::freadonly | electric_var_t::fcomputed | electric_var_t::fexports},
     {L"SHLVL", electric_var_t::freadonly | electric_var_t::fexports},
+    {L"_", electric_var_t::freadonly},
+    {L"fish_kill_signal", electric_var_t::freadonly | electric_var_t::fcomputed},
+    {L"fish_pid", electric_var_t::freadonly},
+    {L"fish_private_mode", electric_var_t::freadonly},
     {L"history", electric_var_t::freadonly | electric_var_t::fcomputed},
+    {L"hostname", electric_var_t::freadonly},
     {L"pipestatus", electric_var_t::freadonly | electric_var_t::fcomputed},
     {L"status", electric_var_t::freadonly | electric_var_t::fcomputed},
-    {L"version", electric_var_t::freadonly},
-    {L"FISH_VERSION", electric_var_t::freadonly},
-    {L"fish_pid", electric_var_t::freadonly},
-    {L"hostname", electric_var_t::freadonly},
-    {L"_", electric_var_t::freadonly},
-    {L"fish_private_mode", electric_var_t::freadonly},
     {L"umask", electric_var_t::fcomputed},
-    {L"fish_kill_signal", electric_var_t::freadonly | electric_var_t::fcomputed},
+    {L"version", electric_var_t::freadonly},
 };
 
 const electric_var_t *electric_var_t::for_name(const wcstring &name) {
-    for (const auto &var : electric_variables) {
-        if (name == var.name) {
-            return &var;
-        }
+    static auto first = electric_variables.begin();
+    static auto last = electric_variables.end();
+    electric_var_t search{name.c_str(), 0};
+    auto binsearch = std::lower_bound(first, last, search,
+                                      [&](const electric_var_t &v1, const electric_var_t &v2) {
+                                          return wcscmp(v1.name, v2.name) < 0;
+                                      });
+    if (binsearch != last && wcscmp(name.c_str(), binsearch->name) == 0) {
+        return &*binsearch;
     }
     return nullptr;
 }
@@ -317,18 +325,18 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     if (vars.get(L"HOME").missing_or_empty()) {
         auto user_var = vars.get(L"USER");
         if (!user_var.missing_or_empty()) {
-            char *unam_narrow = wcs2str(user_var->as_string());
+            std::string unam_narrow = wcs2string(user_var->as_string());
             struct passwd userinfo;
             struct passwd *result;
             char buf[8192];
-            int retval = getpwnam_r(unam_narrow, &userinfo, buf, sizeof(buf), &result);
+            int retval = getpwnam_r(unam_narrow.c_str(), &userinfo, buf, sizeof(buf), &result);
             if (retval || !result) {
                 // Maybe USER is set but it's bogus. Reset USER from the db and try again.
                 setup_user(true);
                 user_var = vars.get(L"USER");
                 if (!user_var.missing_or_empty()) {
-                    unam_narrow = wcs2str(user_var->as_string());
-                    retval = getpwnam_r(unam_narrow, &userinfo, buf, sizeof(buf), &result);
+                    unam_narrow = wcs2string(user_var->as_string());
+                    retval = getpwnam_r(unam_narrow.c_str(), &userinfo, buf, sizeof(buf), &result);
                 }
             }
             if (!retval && result && userinfo.pw_dir) {
@@ -339,7 +347,6 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
                 // so it isn't necessary to warn here as well.
                 vars.set_empty(L"HOME", ENV_GLOBAL | ENV_EXPORT);
             }
-            free(unam_narrow);
         } else {
             // If $USER is empty as well (which we tried to set above), we can't get $HOME.
             vars.set_empty(L"HOME", ENV_GLOBAL | ENV_EXPORT);
@@ -357,7 +364,13 @@ void env_init(const struct config_paths_t *paths /* or NULL */) {
     } else {
         vars.set_pwd_from_getcwd();
     }
-    vars.set_termsize();  // initialize the terminal size variables
+
+    // Initialize termsize variables.
+    auto termsize = termsize_container_t::shared().initialize(vars);
+    if (vars.get(L"COLUMNS").missing_or_empty())
+        vars.set_one(L"COLUMNS", ENV_GLOBAL, to_string(termsize.width));
+    if (vars.get(L"LINES").missing_or_empty())
+        vars.set_one(L"LINES", ENV_GLOBAL, to_string(termsize.height));
 
     // Set fish_bind_mode to "default".
     vars.set_one(FISH_BIND_MODE_VAR, ENV_GLOBAL, DEFAULT_BIND_MODE);
@@ -622,7 +635,9 @@ std::shared_ptr<const null_terminated_array_t<char>> env_scoped_impl_t::create_e
             assert(var && "Variable should be present in uvars");
             // Note that std::map::insert does NOT overwrite a value already in the map,
             // which we depend on here.
-            vals.insert(std::make_pair(key, *var));
+            // Note: Using std::move around make_pair prevents the compiler from implementing
+            // copy elision.
+            vals.insert(std::make_pair(key, std::move(*var)));
         }
     }
 
@@ -734,7 +749,12 @@ maybe_t<env_var_t> env_scoped_impl_t::try_get_universal(const wcstring &key) con
 maybe_t<env_var_t> env_scoped_impl_t::get(const wcstring &key, env_mode_flags_t mode) const {
     const query_t query(mode);
 
-    maybe_t<env_var_t> result = try_get_computed(key);
+    maybe_t<env_var_t> result;
+    // Computed variables are effectively global and can't be shadowed.
+    if (query.global) {
+        result = try_get_computed(key);
+    }
+
     if (!result && query.local) {
         result = try_get_local(key);
     }
@@ -1188,6 +1208,11 @@ mod_result_t env_stack_impl_t::remove(const wcstring &key, int mode) {
 }
 
 bool env_stack_t::universal_barrier() {
+    // Only perform universal barriers for the principal env stack.
+    // This means that changes from other fish processes will only be visible when the "main thread
+    // runs."
+    if (!is_principal()) return false;
+
     ASSERT_IS_MAIN_THREAD();
     if (!uvars()) return false;
 
@@ -1209,18 +1234,6 @@ int env_stack_t::get_last_status() const { return acquire_impl()->perproc_data()
 
 void env_stack_t::set_last_statuses(statuses_t s) {
     acquire_impl()->perproc_data().statuses = std::move(s);
-}
-
-/// If they don't already exist initialize the `COLUMNS` and `LINES` env vars to reasonable
-/// defaults. They will be updated later by the `get_current_winsize()` function if they need to be
-/// adjusted.
-void env_stack_t::set_termsize() {
-    auto &vars = env_stack_t::globals();
-    auto cols = get(L"COLUMNS");
-    if (cols.missing_or_empty()) vars.set_one(L"COLUMNS", ENV_GLOBAL, DFLT_TERM_COL_STR);
-
-    auto rows = get(L"LINES");
-    if (rows.missing_or_empty()) vars.set_one(L"LINES", ENV_GLOBAL, DFLT_TERM_ROW_STR);
 }
 
 /// Update the PWD variable directory from the result of getcwd().

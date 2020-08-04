@@ -18,12 +18,6 @@ function help --description 'Show help for the fish shell'
         end
     end
 
-    set -l help_topics syntax completion editor job-control todo bugs history killring help
-    set -a help_topics color prompt title variables builtin-overview changes expand
-    set -a help_topics expand-variable expand-home expand-brace expand-wildcard
-    set -a help_topics expand-command-substitution expand-process
-
-    #
     # Find a suitable browser for viewing the help pages.
     # The first thing we try is $fish_help_browser.
     set -l fish_browser $fish_help_browser
@@ -86,7 +80,7 @@ function help --description 'Show help for the fish shell'
             # We use this instead of xdg-open because that's useless without a backend
             # like wsl-open which we'll check in a minute.
             if test -f /proc/version
-                and string match -riq 'Microsoft|WSL' </proc/version
+                and string match -riq 'Microsoft|WSL|MSYS|MINGW' </proc/version
                 and set -l cmd (command -s cmd.exe /mnt/c/Windows/System32/cmd.exe)
                 # Use the first of these.
                 set fish_browser $cmd[1]
@@ -117,6 +111,7 @@ function help --description 'Show help for the fish shell'
         end
     end
 
+    set -l fish_help_page
     switch "$fish_help_item"
         case "."
             set fish_help_page "cmds/source.html"
@@ -124,26 +119,16 @@ function help --description 'Show help for the fish shell'
             set fish_help_page "index.html#expand"
         case (__fish_print_commands)
             set fish_help_page "cmds/$fish_help_item.html"
-        case $help_topics
-            set fish_help_page "index.html#$fish_help_item"
-        case 'tut_*'
-            set fish_help_page "tutorial.html#$fish_help_item"
+        case 'completion-*'
+            set fish_help_page "completions.html#$fish_help_item"
+        case 'tut-*'
+            set fish_help_page "tutorial.html#"(string sub -s 5 -- $fish_help_item | string replace -a -- _ -)
         case tutorial
             set fish_help_page "tutorial.html"
-        case "*"
-            # If $fish_help_item is empty, this will fail,
-            # and $fish_help_page will end up as index.html
-            if type -q -f "$fish_help_item"
-                # Prefer to use fish's man pages, to avoid
-                # the annoying useless "builtin" man page bash
-                # installs on OS X
-                set -l man_arg "$__fish_data_dir/man/man1/$fish_help_item.1"
-                if test -f "$man_arg"
-                    man $man_arg
-                    return
-                end
-            end
+        case ''
             set fish_help_page "index.html"
+        case "*"
+            set fish_help_page "index.html#$fish_help_item"
     end
 
     set -l page_url
@@ -151,13 +136,13 @@ function help --description 'Show help for the fish shell'
         # Help is installed, use it
         set page_url file://$__fish_help_dir/$fish_help_page
 
-        # For Windows (Cygwin and WSL), we need to convert the base help dir to a Windows path before converting it to a file URL
+        # For Windows (Cygwin, msys2 and WSL), we need to convert the base help dir to a Windows path before converting it to a file URL
         # but only if a Windows browser is being used
         if type -q cygpath
-            and string match -qr cygstart $fish_browser[1]
+            and string match -qr '(cygstart|\.exe)(\s+|$)' $fish_browser[1]
             set page_url file://(cygpath -m $__fish_help_dir)/$fish_help_page
         else if type -q wslpath
-            and string match -qr '.exe' $fish_browser[1]
+            and string match -qr '\.exe(\s+|$)' $fish_browser[1]
             set page_url file://(wslpath -w $__fish_help_dir)/$fish_help_page
         end
     else
@@ -180,21 +165,22 @@ function help --description 'Show help for the fish shell'
             echo '<meta http-equiv="refresh" content="0;URL=\''$clean_url'\'" />' >$tmpname
             set page_url file://$tmpname
 
-            # For Windows (Cygwin and WSL), we need to convert the base help dir to a Windows path before converting it to a file URL
+            # For Windows (Cygwin, msys2 and WSL), we need to convert the base help dir to a Windows path before converting it to a file URL
             # but only if a Windows browser is being used
             if type -q cygpath
-                and string match -qr cygstart $fish_browser[1]
+                and string match -qr '(cygstart|\.exe)(\s+|$)' $fish_browser[1]
                 set page_url file://(cygpath -m $tmpname)
             else if type -q wslpath
-                and string match -qr '.exe' $fish_browser[1]
+                and string match -qr '\.exe(\s+|$)' $fish_browser[1]
                 set page_url file://(wslpath -w $tmpname)
             end
         end
     end
 
     # cmd.exe needs more coaxing.
-    if string match -qr 'cmd.exe$' -- $fish_browser[1]
-        $fish_browser /c "start $page_url"
+    if string match -qr 'cmd\.exe$' -- $fish_browser[1]
+        # The space before the /c is to prevent msys2 from expanding it to a path
+        $fish_browser " /c" start $page_url
         # If browser is known to be graphical, put into background
     else if contains -- $fish_browser[1] $graphical_browsers
         switch $fish_browser[1]
@@ -208,7 +194,7 @@ function help --description 'Show help for the fish shell'
     else
         # Work around lynx bug where <div class="contents"> always has the same formatting as links (unreadable)
         # by using a custom style sheet. See https://github.com/fish-shell/fish-shell/issues/4170
-        if string match -q 'lynx*' -- $fish_browser
+        if string match -qr '^lynx' -- $fish_browser
             set fish_browser $fish_browser -lss={$__fish_data_dir}/lynx.lss
         end
         $fish_browser $page_url

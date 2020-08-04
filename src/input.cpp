@@ -89,6 +89,7 @@ static const input_function_metadata_t input_function_metadata[] = {
     {readline_cmd_t::end_of_line, L"end-of-line"},
     {readline_cmd_t::forward_char, L"forward-char"},
     {readline_cmd_t::backward_char, L"backward-char"},
+    {readline_cmd_t::forward_single_char, L"forward-single-char"},
     {readline_cmd_t::forward_word, L"forward-word"},
     {readline_cmd_t::backward_word, L"backward-word"},
     {readline_cmd_t::forward_bigword, L"forward-bigword"},
@@ -146,8 +147,10 @@ static const input_function_metadata_t input_function_metadata[] = {
     {readline_cmd_t::repeat_jump, L"repeat-jump"},
     {readline_cmd_t::reverse_repeat_jump, L"repeat-jump-reverse"},
     {readline_cmd_t::func_and, L"and"},
+    {readline_cmd_t::func_or, L"or"},
     {readline_cmd_t::expand_abbr, L"expand-abbr"},
     {readline_cmd_t::delete_or_exit, L"delete-or-exit"},
+    {readline_cmd_t::cancel_commandline, L"cancel-commandline"},
     {readline_cmd_t::cancel, L"cancel"},
     {readline_cmd_t::undo, L"undo"},
     {readline_cmd_t::redo, L"redo"},
@@ -433,7 +436,12 @@ bool inputter_t::mapping_is_match(const input_mapping_t &m) {
     return true;
 }
 
-void inputter_t::queue_ch(const char_event_t &ch) { event_queue_.push_back(ch); }
+void inputter_t::queue_ch(const char_event_t &ch) {
+    if (ch.is_readline()) {
+        function_push_args(ch.get_readline());
+    }
+    event_queue_.push_back(ch);
+}
 
 void inputter_t::push_front(const char_event_t &ch) { event_queue_.push_front(ch); }
 
@@ -518,10 +526,18 @@ char_event_t inputter_t::readch(bool allow_commands) {
                                           : char_input_style_t::normal;
                     return res;
                 }
-                case readline_cmd_t::func_and: {
-                    if (function_status_) {
-                        return readch();
+                case readline_cmd_t::func_and:
+                case readline_cmd_t::func_or: {
+                    // If previous function has right status, we keep reading tokens
+                    if (evt.get_readline() == readline_cmd_t::func_and) {
+                        if (function_status_)
+                            return readch();
+                    } else {
+                        assert(evt.get_readline() == readline_cmd_t::func_or);
+                        if (!function_status_)
+                            return readch();
                     }
+                    // Else we flush remaining tokens
                     do {
                         evt = event_queue_.readch();
                     } while (evt.is_readline());

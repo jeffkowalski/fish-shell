@@ -19,7 +19,6 @@ enum class highlight_role_t : uint8_t {
     statement_terminator,  // process separator
     param,                 // command parameter (argument)
     comment,               // comment
-    match,                 // matching parenthesis, etc.
     search_match,          // search match
     operat,                // operator
     escape,                // escape sequences
@@ -83,25 +82,10 @@ std::string colorize(const wcstring &text, const std::vector<highlight_spec_t> &
 /// color, the next 8 bits for bg color.
 /// \param pos the cursor position. Used for quote matching, etc.
 /// \param ctx The variables and cancellation check for this operation.
+/// \param io_ok If set, allow IO which may block. This means that e.g. invalid commands may be
+/// detected.
 void highlight_shell(const wcstring &buffstr, std::vector<highlight_spec_t> &color, size_t pos,
-                     const operation_context_t &ctx);
-
-/// Perform a non-blocking shell highlighting. The function will not do any I/O that may block. As a
-/// result, invalid commands may not be detected, etc.
-void highlight_shell_no_io(const wcstring &buffstr, std::vector<highlight_spec_t> &color,
-                           size_t pos, const operation_context_t &ctx);
-
-/// Perform syntax highlighting for the text in buff. Matching quotes and parenthesis are
-/// highlighted. The result is stored in the color array as a color_code from the HIGHLIGHT_ enum
-/// for each character in buff.
-///
-/// \param buffstr The buffer on which to perform syntax highlighting
-/// \param color The array in which to store the color codes. The first 8 bits are used for fg
-/// color, the next 8 bits for bg color.
-/// \param pos the cursor position. Used for quote matching, etc.
-/// \param ctx The cancellation and other environment for this operation. This is unused.
-void highlight_universal(const wcstring &buffstr, std::vector<highlight_spec_t> &color, size_t pos,
-                         const operation_context_t &ctx);
+                     const operation_context_t &ctx, bool io_ok = false);
 
 /// \return an RGB color for a given highlight spec.
 rgb_color_t highlight_get_color(const highlight_spec_t &highlight, bool is_background);

@@ -29,6 +29,7 @@
 #include <type_traits>
 #include <unordered_set>
 
+#include "ast.h"
 #include "common.h"
 #include "env.h"
 #include "fallback.h"  // IWYU pragma: keep
@@ -44,7 +45,6 @@
 #include "parser.h"
 #include "path.h"
 #include "reader.h"
-#include "tnode.h"
 #include "wcstringutil.h"
 #include "wildcard.h"  // IWYU pragma: keep
 #include "wutil.h"     // IWYU pragma: keep
@@ -69,7 +69,7 @@
 #define HISTORY_OUTPUT_BUFFER_SIZE (64 * 1024)
 
 // The file access mode we use for creating history files
-static constexpr int history_file_mode = 0644;
+static constexpr int history_file_mode = 0600;
 
 // How many times we retry to save
 // Saving may fail if the file is modified in between our opening
@@ -1096,12 +1096,11 @@ void history_impl_t::populate_from_config_path() {
 static bool should_import_bash_history_line(const wcstring &line) {
     if (line.empty()) return false;
 
-    parse_node_tree_t parse_tree;
-    if (!parse_tree_from_string(line, parse_flag_none, &parse_tree, nullptr)) return false;
+    if (ast::ast_t::parse(line).errored()) return false;
 
     // In doing this test do not allow incomplete strings. Hence the "false" argument.
     parse_error_list_t errors;
-    parse_util_detect_errors(line, &errors, false);
+    parse_util_detect_errors(line, &errors);
     if (!errors.empty()) return false;
 
     // The following are Very naive tests!
@@ -1231,20 +1230,26 @@ static bool string_could_be_path(const wcstring &potential_path) {
     return !(potential_path.empty() || potential_path.at(0) == L'-');
 }
 
+/// impl_wrapper_t is used to avoid forming owning_lock<incomplete_type> in
+/// the .h file; see #7023.
+struct history_t::impl_wrapper_t {
+    owning_lock<history_impl_t> impl;
+    explicit impl_wrapper_t(wcstring &&name) : impl(history_impl_t(std::move(name))) {}
+};
+
 /// Very simple, just mark that we have no more pending items.
 void history_impl_t::resolve_pending() { this->has_pending_item = false; }
 
 bool history_t::chaos_mode = false;
 bool history_t::never_mmap = false;
 
-history_t::history_t(wcstring name)
-    : impl_(make_unique<owning_lock<history_impl_t>>(history_impl_t(std::move(name)))) {}
+history_t::history_t(wcstring name) : wrap_(make_unique<impl_wrapper_t>(std::move(name))) {}
 
 history_t::~history_t() = default;
 
-acquired_lock<history_impl_t> history_t::impl() { return impl_->acquire(); }
+acquired_lock<history_impl_t> history_t::impl() { return wrap_->impl.acquire(); }
 
-acquired_lock<const history_impl_t> history_t::impl() const { return impl_->acquire(); }
+acquired_lock<const history_impl_t> history_t::impl() const { return wrap_->impl.acquire(); }
 
 bool history_t::is_default() const { return impl()->is_default(); }
 
@@ -1268,38 +1273,33 @@ void history_t::add_pending_with_file_detection(const wcstring &str,
 
     // Find all arguments that look like they could be file paths.
     bool needs_sync_write = false;
-    parse_node_tree_t tree;
-    parse_tree_from_string(str, parse_flag_none, &tree, nullptr);
+    using namespace ast;
+    auto ast = ast_t::parse(str);
 
     path_list_t potential_paths;
-    for (const parse_node_t &node : tree) {
-        if (!node.has_source()) {
-            continue;
-        }
-
-        if (node.type == symbol_argument) {
-            wcstring potential_path = node.get_source(str);
+    for (const node_t &node : ast) {
+        if (const argument_t *arg = node.try_as<argument_t>()) {
+            wcstring potential_path = arg->source(str);
             bool unescaped = unescape_string_in_place(&potential_path, UNESCAPE_DEFAULT);
             if (unescaped && string_could_be_path(potential_path)) {
                 potential_paths.push_back(potential_path);
             }
-        } else if (node.type == symbol_plain_statement) {
+        } else if (const decorated_statement_t *stmt = node.try_as<decorated_statement_t>()) {
             // Hack hack hack - if the command is likely to trigger an exit, then don't do
             // background file detection, because we won't be able to write it to our history file
             // before we exit.
             // Also skip it for 'echo'. This is because echo doesn't take file paths, but also
             // because the history file test wants to find the commands in the history file
             // immediately after running them, so it can't tolerate the asynchronous file detection.
-            if (get_decoration({&tree, &node}) == parse_statement_decoration_exec) {
+            if (stmt->decoration() == statement_decoration_t::exec) {
                 needs_sync_write = true;
             }
 
-            if (maybe_t<wcstring> command = command_for_plain_statement({&tree, &node}, str)) {
-                unescape_string_in_place(&*command, UNESCAPE_DEFAULT);
-                if (*command == L"exit" || *command == L"reboot" || *command == L"restart" ||
-                    *command == L"echo") {
-                    needs_sync_write = true;
-                }
+            wcstring command = stmt->command.source(str);
+            unescape_string_in_place(&command, UNESCAPE_DEFAULT);
+            if (command == L"exit" || command == L"reboot" || command == L"restart" ||
+                command == L"echo") {
+                needs_sync_write = true;
             }
         }
     }

@@ -87,7 +87,7 @@ def esc(m):
         "\v": "\\v",
     }
     if m in map:
-        return map(m)
+        return map[m]
     if unicodedata.category(m)[0] == "C":
         return "\\x{:02x}".format(ord(m))
     else:
@@ -223,7 +223,11 @@ class TestFailure(object):
             ]
         elif self.after:
             fields["additional_output"] = "    ".join(self.after[:afterlines])
-            fmtstrs += ["  additional output:", "    {BOLD}{additional_output}{RESET}"]
+            fmtstrs += [
+                "  Context:",
+                "    {RED}{output_line}{RESET} <= does not match '{LIGHTBLUE}{input_line}{RESET}'",
+                "    {BOLD}{additional_output}{RESET}"
+            ]
         fmtstrs += ["  when running command:", "    {subbed_command}"]
         return "\n".join(fmtstrs).format(**fields)
 

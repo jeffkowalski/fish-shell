@@ -27,6 +27,7 @@
 #include "parser_keywords.h"
 #include "proc.h"
 #include "signal.h"
+#include "termsize.h"
 #include "wcstringutil.h"
 #include "wgetopt.h"
 #include "wutil.h"  // IWYU pragma: keep
@@ -44,7 +45,7 @@ struct functions_cmd_opts_t {
     wchar_t *handlers_type = nullptr;
     wchar_t *description = nullptr;
 };
-static const wchar_t *const short_options = L":HDacd:ehnqv";
+static const wchar_t *const short_options = L":Ht:Dacd:ehnqv";
 static const struct woption long_options[] = {{L"erase", no_argument, nullptr, 'e'},
                                               {L"description", required_argument, nullptr, 'd'},
                                               {L"names", no_argument, nullptr, 'n'},
@@ -261,9 +262,8 @@ static int report_function_metadata(const wchar_t *funcname, bool verbose, io_st
             append_format(comment, L"# Defined in %ls @ line %d\n", path, line_number);
             if (!streams.out_is_redirected && isatty(STDOUT_FILENO)) {
                 std::vector<highlight_spec_t> colors;
-                highlight_shell_no_io(
-                    comment, colors, comment.size(),
-                    operation_context_t{nullptr, env_stack_t::globals(), no_cancel});
+                highlight_shell(comment, colors, comment.size(),
+                                operation_context_t{nullptr, env_stack_t::globals(), no_cancel});
                 streams.out.append(str2wcstring(colorize(comment, colors)));
             } else {
                 streams.out.append(comment);
@@ -371,7 +371,12 @@ int builtin_functions(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
                 buff.append(name);
                 buff.append(L", ");
             }
-            streams.out.append(reformat_for_screen(buff));
+            if (names.size() > 0) {
+                // Trim trailing ", "
+                buff.resize(buff.size() - 2, '\0');
+            }
+
+            streams.out.append(reformat_for_screen(buff, termsize_last()));
         } else {
             for (const auto &name : names) {
                 streams.out.append(name.c_str());
@@ -436,7 +441,7 @@ int builtin_functions(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
 
                 if (!streams.out_is_redirected && isatty(STDOUT_FILENO)) {
                     std::vector<highlight_spec_t> colors;
-                    highlight_shell_no_io(def, colors, def.size(), operation_context_t::globals());
+                    highlight_shell(def, colors, def.size(), operation_context_t::globals());
                     streams.out.append(str2wcstring(colorize(def, colors)));
                 } else {
                     streams.out.append(def);

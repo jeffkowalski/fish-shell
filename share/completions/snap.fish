@@ -39,13 +39,13 @@ function __fish_snap_use_file -d 'Test if snap command should have files as pote
 end
 
 function __fish_snap_subcommand
-    set subcommand $argv[1]
+    set -l subcommand $argv[1]
     set -e argv[1]
     complete -f -c snap -n __fish_snap_no_subcommand -a $subcommand $argv
 end
 
 function __fish_snap_option
-    set subcommand $argv[1]
+    set -l subcommand $argv[1]
     set -e argv[1]
     complete -f -c snap -n "__fish_snap_using_subcommand $subcommand" $argv
 end
@@ -65,7 +65,7 @@ end
 function __fish_snap_interfaces -d 'List of interfaces'
     for snap in (__fish_snap_installed_snaps)
         if test $snap != core
-            snap interfaces $snap | string replace -r '[- ]*([^ ]*)[ ]+([^ ]+)' '$2$1' | string match -v "*Slot*"
+            snap interfaces $snap 2>/dev/null | string replace -r '[- ]*([^ ]*)[ ]+([^ ]+)' '$2$1' | string match -v "*Slot*"
         end
     end
 end
@@ -99,7 +99,7 @@ function __fish_snap_using_assertion -d 'Check if certain assertion type is used
 end
 
 function __fish_snap_assertion
-    set assertion $argv[1]
+    set -l assertion $argv[1]
     set -e argv[1]
     complete -f -c snap -n '__fish_snap_using_subcommand known; and __fish_snap_no_assertion' -a $assertion
     complete -f -c snap -n "__fish_snap_using_assertion $assertion" -a "(__fish_snap_filters $assertion)"\
