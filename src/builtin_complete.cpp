@@ -110,7 +110,7 @@ static void builtin_complete_remove(const wcstring_list_t &cmds, const wcstring_
 
 /// The complete builtin. Used for specifying programmable tab-completions. Calls the functions in
 // complete.cpp for any heavy lifting.
-int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
+maybe_t<int> builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
     ASSERT_IS_MAIN_THREAD();
 
     wchar_t *cmd = argv[0];
@@ -390,8 +390,8 @@ int builtin_complete(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
         if (!streams.out_is_redirected && isatty(STDOUT_FILENO)) {
             std::vector<highlight_spec_t> colors;
             size_t len = repr.size();
-            highlight_shell(repr, colors, len, operation_context_t::globals());
-            streams.out.append(str2wcstring(colorize(repr, colors)));
+            highlight_shell(repr, colors, len, parser.context());
+            streams.out.append(str2wcstring(colorize(repr, colors, parser.vars())));
         } else {
             streams.out.append(repr);
         }

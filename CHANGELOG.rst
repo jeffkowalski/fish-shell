@@ -21,8 +21,9 @@ Notable improvements and fixes
 -  A new ``fish_add_path`` helper function to add paths to $PATH without producing duplicates, to be used interactively or in ``config.fish`` (#6960).
 - ``fish_preexec`` and ``fish_postexec`` events are no longer triggered for empty commands.
 - The ``test`` builtin now better shows where an error occured (#6030).
-- builtins may now output before all data is read. For example, `string replace` no longer has to read all of stdin before it can begin to output.
+- builtins may now output before all data is read. For example, ``string replace`` no longer has to read all of stdin before it can begin to output.
 - A number of new debugging categories have been added, including ``config``, ``path``, ``reader`` and ``screen`` (#6511). See the output of ``fish --print-debug-categories`` for the full list.
+- ``set`` and backgrounded jobs no longer overwrite ``$pipestatus``.
 
 Syntax changes and new commands
 -------------------------------
@@ -70,6 +71,7 @@ Interactive improvements
 -  Control-Z is now available for binding (#7152).
 -  ``fish_key_reader`` sets the exit status to 0 when used with ``--help`` or ``--version`` (#6964).
 -  ``fish_key_reader`` and ``fish_indent`` send output from ``--version`` to standard output, matching other fish binaries (#6964).
+-  A new variable ``$status_generation`` is incremented only when the previous command produces a status. This can be used, for example, to check whether a failure status is a holdover due to a background job, or actually produced by the last run command.
 
 
 New or improved bindings
@@ -77,6 +79,7 @@ New or improved bindings
 
 -  As mentioned above, new readline commands ``undo`` (Ctrl+_ or Ctrl+Z) and ``redo`` (Alt-/) can be used to revert
    changes to the command line or the pager search field (#6570).
+- The readline command ``beginning-of-history`` (Page Up) now moves to the oldest search instead of the youngest - that's ``end-of-history`` (Page Down).
 -  New readline command ``forward-single-char`` to move one character to the right, and if an autosuggestion is available, only take a single char from it (#7217).
 -  New function ``__fish_preview_current_file`` (Alt+O) opens the
    current file at the cursor in a pager (#6838).
@@ -104,6 +107,7 @@ Improved terminal output
 -  The cursor shape in Vi mode changes properly in  Windows Terminal (#6999).
 -  The spurious warning about terminal size in small terminals has been removed (#6980).
 -  Dynamic titles are now enabled in Alacritty with its new terminfo entry (#7073).
+-  The width computation for certain emoji agrees better with terminals. In particular, flags now have width 2. (#7237).
 
 Completions
 ^^^^^^^^^^^
@@ -134,6 +138,7 @@ Completions
    -  ``tig``
    -  ``windscribe``
    -  ``wireshark``, ``tshark``, and ``dumpcap``
+   -  ``xbps-*``
    -  ``xxhsum``, ``xxh32sum``, ``xxh64sum`` and ``xxh128sum``
    -  ``yadm``
    -  ``zopfli``, and ``zopflipng``

@@ -167,17 +167,30 @@ bool job_t::signal(int signal) {
     return true;
 }
 
-statuses_t job_t::get_statuses() const {
+maybe_t<statuses_t> job_t::get_statuses() const {
     statuses_t st{};
+    bool has_status = false;
+    int laststatus = 0;
     st.pipestatus.reserve(processes.size());
     for (const auto &p : processes) {
         auto status = p->status;
+        if (status.is_empty()) {
+            // Corner case for if a variable assignment is part of a pipeline.
+            // e.g. `false | set foo bar | true` will push 1 in the second spot,
+            // for a complete pipestatus of `1 1 0`.
+            st.pipestatus.push_back(laststatus);
+            continue;
+        }
         if (status.signal_exited()) {
             st.kill_signal = status.signal_code();
         }
+        laststatus = status.status_value();
+        has_status = true;
         st.pipestatus.push_back(status.status_value());
     }
-    int laststatus = st.pipestatus.back();
+    if (!has_status) {
+        return none();
+    }
     st.status = flags().negate ? !laststatus : laststatus;
     return st;
 }
@@ -900,7 +913,6 @@ static bool terminal_return_from_job_group(job_group_t *jg, bool restore_attrs) 
     if (tcgetattr(STDIN_FILENO, &tmodes)) {
         // If it's not a tty, it's not a tty, and there are no attributes to save (or restore)
         if (errno == ENOTTY) return false;
-        if (errno == EIO) redirect_tty_output();
         FLOGF(warning, _(L"Could not return shell to foreground"));
         wperror(L"tcgetattr");
         return false;
@@ -998,7 +1010,11 @@ void job_t::continue_job(parser_t &parser, bool in_foreground) {
         // finished.
         const auto &p = processes.back();
         if (p->status.normal_exited() || p->status.signal_exited()) {
-            parser.set_last_statuses(get_statuses());
+            auto statuses = get_statuses();
+            if (statuses) {
+                parser.set_last_statuses(statuses.value());
+                parser.libdata().status_count++;
+            }
         }
     }
 }
