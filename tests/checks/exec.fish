@@ -9,5 +9,8 @@ not exec cat <nosuchfile
 #CHECKERR: open: No such file or directory
 echo "neg failed: $status"
 #CHECK: neg failed: 0
+
+# This needs to be last, because it actually runs exec.
 exec cat </dev/null
 echo "not reached"
+

@@ -36,6 +36,9 @@ enum {
     APPEND_MODE        // insert at end of current token/command/buffer
 };
 
+/// Handle a single readline_cmd_t command out-of-band.
+void reader_handle_command(readline_cmd_t cmd);
+
 /// Replace/append/insert the selection with/at/after the specified string.
 ///
 /// \param begin beginning of selection
@@ -131,20 +134,20 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
 
     wchar_t *cmd = argv[0];
     int buffer_part = 0;
-    int cut_at_cursor = 0;
+    bool cut_at_cursor = false;
 
     int argc = builtin_count_args(argv);
     int append_mode = 0;
 
-    int function_mode = 0;
-    int selection_mode = 0;
+    bool function_mode = false;
+    bool selection_mode = false;
 
-    int tokenize = 0;
+    bool tokenize = false;
 
-    int cursor_mode = 0;
-    int line_mode = 0;
-    int search_mode = 0;
-    int paging_mode = 0;
+    bool cursor_mode = false;
+    bool line_mode = false;
+    bool search_mode = false;
+    bool paging_mode = false;
     const wchar_t *begin = nullptr, *end = nullptr;
 
     const auto &ld = parser.libdata();
@@ -159,7 +162,7 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
     }
 
     if (!current_buffer) {
-        if (session_interactivity() != session_interactivity_t::not_interactive) {
+        if (is_interactive_session()) {
             // Prompt change requested while we don't have a prompt, most probably while reading the
             // init files. Just ignore it.
             return STATUS_CMD_ERROR;
@@ -212,7 +215,7 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
                 break;
             }
             case 'c': {
-                cut_at_cursor = 1;
+                cut_at_cursor = true;
                 break;
             }
             case 't': {
@@ -228,11 +231,11 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
                 break;
             }
             case 'f': {
-                function_mode = 1;
+                function_mode = true;
                 break;
             }
             case 'o': {
-                tokenize = 1;
+                tokenize = true;
                 break;
             }
             case 'I': {
@@ -241,23 +244,23 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
                 break;
             }
             case 'C': {
-                cursor_mode = 1;
+                cursor_mode = true;
                 break;
             }
             case 'L': {
-                line_mode = 1;
+                line_mode = true;
                 break;
             }
             case 'S': {
-                search_mode = 1;
+                search_mode = true;
                 break;
             }
             case 's': {
-                selection_mode = 1;
+                selection_mode = true;
                 break;
             }
             case 'P': {
-                paging_mode = 1;
+                paging_mode = true;
                 break;
             }
             case 'h': {
@@ -294,10 +297,26 @@ maybe_t<int> builtin_commandline(parser_t &parser, io_streams_t &streams, wchar_
             return STATUS_INVALID_ARGS;
         }
 
+        using rl = readline_cmd_t;
         for (i = w.woptind; i < argc; i++) {
             if (auto mc = input_function_get_code(argv[i])) {
-                // Inserts the readline function at the back of the queue.
-                reader_queue_ch(*mc);
+                // Don't enqueue a repaint if we're currently in the middle of one,
+                // because that's an infinite loop.
+                if (mc == rl::repaint_mode || mc == rl::force_repaint || mc == rl::repaint) {
+                    if (ld.is_repaint) continue;
+                }
+
+                // HACK: Execute these right here and now so they can affect any insertions/changes
+                // made via bindings. The correct solution is to change all `commandline`
+                // insert/replace operations into readline functions with associated data, so that
+                // all queued `commandline` operations - including buffer modifications - are
+                // executed in order
+                if (mc == rl::begin_undo_group || mc == rl::end_undo_group) {
+                    reader_handle_command(*mc);
+                } else {
+                    // Inserts the readline function at the back of the queue.
+                    reader_queue_ch(*mc);
+                }
             } else {
                 streams.err.append_format(_(L"%ls: Unknown input function '%ls'"), cmd, argv[i]);
                 builtin_print_error_trailer(parser, streams.err, cmd);

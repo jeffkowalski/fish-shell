@@ -18,7 +18,7 @@ function __fish_apt_use_package -d 'Test if apt command should have packages as 
     return 1
 end
 
-complete -c apt-get -n __fish_apt_use_package -a '(__fish_print_packages)' -d Package
+complete -c apt-get -n __fish_apt_use_package -a '(__fish_print_apt_packages)' -d Package
 
 complete -c apt-get -s h -l help -d 'Display help and exit'
 complete -f -n __fish_apt_no_subcommand -c apt-get -a update -d 'Update sources'
@@ -65,4 +65,3 @@ complete -c apt-get -l allow-unauthenticated -d 'Ignore non-authenticated packag
 complete -c apt-get -s v -l version -d 'Display version and exit'
 complete -r -c apt-get -s c -l config-file -d 'Specify a config file'
 complete -r -c apt-get -s o -l option -d 'Set a config option'
-

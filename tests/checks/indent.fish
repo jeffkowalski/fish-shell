@@ -226,6 +226,47 @@ echo < stdin >>appended yes 2>&1 no > stdout maybe 2>&    4 | cat 2>| cat
 ' | $fish_indent
 #CHECK: echo <stdin >>appended yes 2>&1 no >stdout maybe 2>&4 | cat 2>| cat
 
+
+# issue 7252
+echo -n '
+begin
+# comment
+end
+' | $fish_indent
+#CHECK: {{^}}begin
+#CHECK: {{^    }}# comment
+#CHECK: {{^}}end
+
+echo -n '
+begin
+cmd
+# comment
+end
+' | $fish_indent
+#CHECK: {{^}}begin
+#CHECK: {{^    }}cmd
+#CHECK: {{^    }}# comment
+#CHECK: {{^}}end
+
+echo -n '
+cmd \\
+continuation
+' | $fish_indent
+#CHECK: {{^}}cmd \
+#CHECK: {{^    }}continuation
+
+echo -n '
+begin
+cmd \
+continuation
+end
+' | $fish_indent
+#CHECK: {{^}}begin
+#CHECK: {{^    }}cmd \
+#CHECK: {{^    }}{{    }}continuation
+#CHECK: {{^}}end
+
+
 echo -n '
 i\
 f true
@@ -298,9 +339,69 @@ printf '%s\n' "a; and b" | $fish_indent
 printf '%s\n' "a;" "and b" | $fish_indent
 #CHECK: a
 #CHECK: and b
-printf '%s\n' "a" "; and b" | $fish_indent
+printf '%s\n' a "; and b" | $fish_indent
 #CHECK: a
 #CHECK: and b
 printf '%s\n' "a; b" | $fish_indent
 #CHECK: a
 #CHECK: b
+
+echo 'foo &&
+  #
+bar' | $fish_indent
+#CHECK: {{^}}foo &&
+#CHECK: {{^    }}#
+#CHECK: {{    }}bar
+
+echo 'command 1 |
+command 1 cont ||
+command 2' | $fish_indent
+#CHECK: {{^}}command 1 |
+#CHECK: {{^    }}command 1 cont ||
+#CHECK: {{^    }}command 2
+
+echo " foo" | $fish_indent --check
+echo $status
+#CHECK: 1
+echo foo | $fish_indent --check
+echo $status
+#CHECK: 0
+
+echo 'thing | # comment
+    thing' | $fish_indent --check
+echo $status
+#CHECK: 0
+
+echo 'echo \
+    # first indented comment
+    # second indented comment
+    indented argument
+echo' | $fish_indent --check
+echo $status
+#CHECK: 0
+
+echo 'if true;
+end' | $fish_indent
+#CHECK: if true{{$}}
+#CHECK: end
+
+echo 'if true; and false; or true
+end' | $fish_indent --check
+echo $status
+#CHECK: 0
+
+echo -n '
+function hello_continuations
+   echo cmd \
+   echo --opt1 \
+   echo --opt2 \
+   echo --opt3
+                  end
+' | $fish_indent
+
+#CHECK: function hello_continuations
+#CHECK: {{^}}    echo cmd \
+#CHECK: {{^}}        echo --opt1 \
+#CHECK: {{^}}        echo --opt2 \
+#CHECK: {{^}}        echo --opt3
+#CHECK: end

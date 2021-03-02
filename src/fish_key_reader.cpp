@@ -63,7 +63,8 @@ static bool should_exit(wchar_t wc) {
         std::fwprintf(stderr, L"Press [ctrl-%c] again to exit\n", shell_modes.c_cc[VEOF] + 0x40);
         return false;
     }
-    return std::memcmp(recent_chars, "exit", 4) == 0 || std::memcmp(recent_chars, "quit", 4) == 0;
+    return std::memcmp(recent_chars, "exit", const_strlen("exit")) == 0 ||
+           std::memcmp(recent_chars, "quit", const_strlen("quit")) == 0;
 }
 
 /// Return the name if the recent sequence of characters matches a known terminfo sequence.
@@ -145,11 +146,34 @@ static wchar_t *char_to_symbol(wchar_t wc, bool bind_friendly) {
         del_to_symbol(buf, sizeof(buf) / sizeof(*buf), wc, bind_friendly);
     } else if (wc < 0x80) {  // ASCII characters that are not control characters
         ascii_printable_to_symbol(buf, sizeof(buf) / sizeof(*buf), wc, bind_friendly);
-    } else if (wc <= 0xFFFF) {  // BMP Unicode chararacter
+    }
+// Conditional handling of BMP Unicode characters depends on the encoding. Assume width of wchar_t
+// corresponds to the encoding, i.e. WCHAR_T_BITS == 16 implies UTF-16 and WCHAR_T_BITS == 32
+// because there's no other sane way of handling the input.
+#if WCHAR_T_BITS == 16
+    else if (wc <= 0xD7FF || (wc >= 0xE000 && wc <= 0xFFFD)) {
+        // UTF-16 encoding of Unicode character in BMP range
+        std::swprintf(buf, sizeof(buf) / sizeof(*buf), L"\\u%04X", wc);
+    } else {
+        // Our support for UTF-16 surrogate pairs is non-existent.
+        // See https://github.com/fish-shell/fish-shell/issues/6585#issuecomment-783669903 for what
+        // correct handling of surrogate pairs would look like - except it would need to be done
+        // everywhere.
+
+        // 0xFFFD is the unicode codepoint for "symbol doesn't exist in codepage" and is the most
+        // correct thing we can do given the byte-by-byte parsing without any support for surrogate
+        // pairs.
+        std::swprintf(buf, sizeof(buf) / sizeof(*buf), L"\\uFFFD");
+    }
+#elif WCHAR_T_BITS == 32
+    else if (wc <= 0xFFFF) {  // BMP Unicode chararacter
         std::swprintf(buf, sizeof(buf) / sizeof(*buf), L"\\u%04X", wc);
     } else {  // Non-BMP Unicode chararacter
         std::swprintf(buf, sizeof(buf) / sizeof(*buf), L"\\U%06X", wc);
     }
+#else
+    static_assert(false, "Unsupported WCHAR_T size; unknown encoding!");
+#endif
 
     return buf;
 }
@@ -243,7 +267,7 @@ static void process_input(bool continuous_mode) {
 
 /// Setup our environment (e.g., tty modes), process key strokes, then reset the environment.
 [[noreturn]] static void setup_and_process_keys(bool continuous_mode) {
-    set_interactive_session(session_interactivity_t::implied);
+    set_interactive_session(true);
     set_main_thread();
     setup_fork_guards();
     env_init();

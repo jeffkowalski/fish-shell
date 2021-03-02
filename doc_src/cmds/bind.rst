@@ -2,7 +2,6 @@
 
 bind - handle fish key bindings
 ===============================
-
 Synopsis
 --------
 
@@ -28,9 +27,11 @@ The generic key binding that matches if no other binding does can be set by spec
 
 If the ``-k`` switch is used, the name of a key (such as 'down', 'up' or 'backspace') is used instead of a sequence. The names used are the same as the corresponding curses variables, but without the 'key\_' prefix. (See ``terminfo(5)`` for more information, or use ``bind --key-names`` for a list of all available named keys). Normally this will print an error if the current ``$TERM`` entry doesn't have a given key, unless the ``-s`` switch is given.
 
+To find out what sequence a key combination sends, you can use :ref:`fish_key_reader <cmd-fish_key_reader>`.
+
 ``COMMAND`` can be any fish command, but it can also be one of a set of special input functions. These include functions for moving the cursor, operating on the kill-ring, performing tab completion, etc. Use ``bind --function-names`` for a complete list of these input functions.
 
-When ``COMMAND`` is a shellscript command, it is a good practice to put the actual code into a `function <#function>`__ and simply bind to the function name. This way it becomes significantly easier to test the function while editing, and the result is usually more readable as well.
+When ``COMMAND`` is a shellscript command, it is a good practice to put the actual code into a :ref:`function <syntax-function>` and simply bind to the function name. This way it becomes significantly easier to test the function while editing, and the result is usually more readable as well.
 
 If a script produces output, it should finish by calling ``commandline -f repaint`` to tell fish that a repaint is in order.
 
@@ -126,7 +127,7 @@ The following special input functions are available:
 
 - ``execute``, run the current commandline
 
-- ``force-repaint``, reexecute the prompt functions without coalescing
+- ``exit``, exit the shell
 
 - ``forward-bigword``, move one whitespace-delimited word to the right
 
@@ -168,21 +169,25 @@ The following special input functions are available:
 
 - ``pager-toggle-search``, toggles the search field if the completions pager is visible.
 
-- ``repaint``, reexecutes the prompt functions and redraws the prompt. Multiple successive repaints are coalesced.
+- ``repaint``, reexecutes the prompt functions and redraws the prompt (also ``force-repaint`` for backwards-compatibility)
 
-- ``repaint-mode``, reexecutes the :ref:`fish_mode_prompt <cmd-fish_mode_prompt>` and redraws the prompt. This is useful for vi-mode. If no ``fish_mode_prompt`` exists, it acts like a normal repaint.
+- ``repaint-mode``, reexecutes the :ref:`fish_mode_prompt <cmd-fish_mode_prompt>` and redraws the prompt. This is useful for vi-mode. If no ``fish_mode_prompt`` exists or it prints nothing, it acts like a normal repaint.
 
 - ``self-insert``, inserts the matching sequence into the command line
 
 - ``self-insert-notfirst``, inserts the matching sequence into the command line, unless the cursor is at the beginning
 
-- ``suppress-autosuggestion``, remove the current autosuggestion
+- ``suppress-autosuggestion``, remove the current autosuggestion. Returns true if there was a suggestion to remove.
 
 - ``swap-selection-start-stop``, go to the other end of the highlighted text without changing the selection
 
-- ``transpose-chars``,  transpose two characters to the left of the cursor
+- ``transpose-chars``, transpose two characters to the left of the cursor
 
 - ``transpose-words``, transpose two words to the left of the cursor
+
+- ``insert-line-under``, add a new line under the current line
+
+- ``insert-line-over``, add a new line over the current line
 
 - ``up-line``, move up one line
 
@@ -197,33 +202,22 @@ The following special input functions are available:
 Examples
 --------
 
-::
+Exit the shell when :kbd:`Control`\ +\ :kbd:`D` is pressed::
 
     bind \cd 'exit'
 
-Causes ``fish`` to exit when :kbd:`Control`\ +\ :kbd:`D` is pressed.
-
-
-
-::
+Perform a history search when :kbd:`Page Up` is pressed::
 
     bind -k ppage history-search-backward
 
-Performs a history search when the :kbd:`Page Up` key is pressed.
-
-
-
-::
+Turn on Vi key bindings and rebind :kbd:`Control`\ +\ :kbd:`C` to clear the input line::
 
     set -g fish_key_bindings fish_vi_key_bindings
-    bind -M insert \cc kill-whole-line force-repaint
+    bind -M insert \cc kill-whole-line repaint
 
-Turns on Vi key bindings and rebinds :kbd:`Control`\ +\ :kbd:`C` to clear the input line.
+Launch ``git diff`` and repaint the commandline afterwards when :kbd:`Control`\ +\ :kbd:`G` is pressed::
 
-::
    bind \cg 'git diff; commandline -f repaint'
-
-Causes :kbd:`Control`\ +\ :kbd:`G` to launch ``git diff`` and repaint the commandline afterwards.
 
 .. _cmd-bind-termlimits:
 
@@ -237,7 +231,7 @@ For instance, the control key modifies a character by setting the top three bits
 - Many characters + control are indistinguishable from other keys. :kbd:`Control`\ +\ :kbd:`I` *is* tab, :kbd:`Control`\ +\ :kbd:`J` *is* newline (`\n`).
 - Control and shift don't work simultaneously
 
-Other keys don't have a direct encoding, and are sent as escape sequences. For example :kbd:`→` (Right) often sends `\e\[C`. These can differ from terminal to terminal, and the mapping is typically available in `terminfo(5)`. Sometimes however a terminal identifies as e.g. `xterm-256color` for compatibility, but then implements xterm's sequences incorrectly.
+Other keys don't have a direct encoding, and are sent as escape sequences. For example :kbd:`→` (Right) often sends ``\e\[C``. These can differ from terminal to terminal, and the mapping is typically available in `terminfo(5)`. Sometimes however a terminal identifies as e.g. ``xterm-256color`` for compatibility, but then implements xterm's sequences incorrectly.
 
 .. _cmd-bind-escape:
 

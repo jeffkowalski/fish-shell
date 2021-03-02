@@ -25,6 +25,7 @@
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>  // IWYU pragma: keep
 #endif
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/time.h>   // IWYU pragma: keep
 #include <sys/types.h>  // IWYU pragma: keep
@@ -43,6 +44,7 @@
 #include "fallback.h"  // IWYU pragma: keep
 #include "flog.h"
 #include "path.h"
+#include "signal.h"
 #include "utf8.h"
 #include "util.h"  // IWYU pragma: keep
 #include "wcstringutil.h"
@@ -442,9 +444,8 @@ std::string env_universal_t::serialize_with_vars(const var_table_t &vars) {
     contents.append("# VERSION: " UVARS_VERSION_3_0 "\n");
 
     // Preserve legacy behavior by sorting the values first
-    typedef std::pair<std::reference_wrapper<const wcstring>,
-                      std::reference_wrapper<const env_var_t>>
-        env_pair_t;
+    using env_pair_t =
+        std::pair<std::reference_wrapper<const wcstring>, std::reference_wrapper<const env_var_t>>;
     std::vector<env_pair_t> cloned(vars.begin(), vars.end());
     std::sort(cloned.begin(), cloned.end(), [](const env_pair_t &p1, const env_pair_t &p2) {
         return p1.first.get() < p2.first.get();
@@ -534,7 +535,7 @@ autoclose_fd_t env_universal_t::open_temporary_file(const wcstring &directory, w
     // This should almost always succeed on the first try.
     assert(!string_suffixes_string(L"/", directory));  //!OCLINT(multiple unary operator)
 
-    int saved_errno;
+    int saved_errno = 0;
     const wcstring tmp_name_template = directory + L"/fishd.tmp.XXXXXX";
     autoclose_fd_t result;
     std::string narrow_str;
@@ -738,9 +739,16 @@ bool env_universal_t::save(const wcstring &directory, const wcstring &vars_path)
     }
 
     if (success) {
+        wcstring real_path;
+        if (auto maybe_real_path = wrealpath(vars_path)) {
+            real_path = *maybe_real_path;
+        } else {
+            real_path = vars_path;
+        }
+
         // Ensure we maintain ownership and permissions (#2176).
         struct stat sbuf;
-        if (wstat(vars_path, &sbuf) >= 0) {
+        if (wstat(real_path, &sbuf) >= 0) {
             if (fchown(private_fd.fd(), sbuf.st_uid, sbuf.st_gid) == -1)
                 FLOGF(uvar_file, L"universal log fchown() failed");
             if (fchmod(private_fd.fd(), sbuf.st_mode) == -1)
@@ -764,7 +772,7 @@ bool env_universal_t::save(const wcstring &directory, const wcstring &vars_path)
 #endif
 
         // Apply new file.
-        success = this->move_new_vars_file_into_place(private_file_path, vars_path);
+        success = this->move_new_vars_file_into_place(private_file_path, real_path);
         if (!success) FLOGF(uvar_file, L"universal log move_new_vars_file_into_place() failed");
     }
 
@@ -1046,7 +1054,7 @@ static wcstring get_machine_identifier() {
     return result;
 }
 
-class universal_notifier_shmem_poller_t : public universal_notifier_t {
+class universal_notifier_shmem_poller_t final : public universal_notifier_t {
 #ifdef __CYGWIN__
     // This is what our shared memory looks like. Everything here is stored in network byte order
     // (big-endian).
@@ -1060,9 +1068,9 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
 #define SHMEM_VERSION_CURRENT 1000
 
    private:
-    long long last_change_time;
-    uint32_t last_seed;
-    volatile universal_notifier_shmem_t *region;
+    long long last_change_time{0};
+    uint32_t last_seed{0};
+    volatile universal_notifier_shmem_t *region{nullptr};
 
     void open_shmem() {
         assert(region == nullptr);
@@ -1072,52 +1080,45 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
         snprintf(path, sizeof path, "/%ls_shmem_%d", program_name ? program_name : L"fish",
                  getuid());
 
-        bool errored = false;
         autoclose_fd_t fd{shm_open(path, O_RDWR | O_CREAT, 0600)};
         if (!fd.valid()) {
             const char *error = std::strerror(errno);
             FLOGF(error, _(L"Unable to open shared memory with path '%s': %s"), path, error);
-            errored = true;
+            return;
         }
 
         // Get the size.
         off_t size = 0;
-        if (!errored) {
-            struct stat buf = {};
-            if (fstat(fd.fd(), &buf) < 0) {
-                const char *error = std::strerror(errno);
-                FLOGF(error, _(L"Unable to fstat shared memory object with path '%s': %s"), path,
-                      error);
-                errored = true;
-            }
-            size = buf.st_size;
+        struct stat buf = {};
+        if (fstat(fd.fd(), &buf) < 0) {
+            const char *error = std::strerror(errno);
+            FLOGF(error, _(L"Unable to fstat shared memory object with path '%s': %s"), path,
+                  error);
+            return;
         }
+        size = buf.st_size;
 
         // Set the size, if it's too small.
-        bool set_size = !errored && size < (off_t)sizeof(universal_notifier_shmem_t);
-        if (set_size && ftruncate(fd.fd(), sizeof(universal_notifier_shmem_t)) < 0) {
-            const char *error = std::strerror(errno);
-            FLOGF(error, _(L"Unable to truncate shared memory object with path '%s': %s"), path,
-                  error);
-            errored = true;
+        if (size < (off_t)sizeof(universal_notifier_shmem_t)) {
+            if (ftruncate(fd.fd(), sizeof(universal_notifier_shmem_t)) < 0) {
+                const char *error = std::strerror(errno);
+                FLOGF(error, _(L"Unable to truncate shared memory object with path '%s': %s"), path,
+                      error);
+                return;
+            }
         }
 
         // Memory map the region.
-        if (!errored) {
-            void *addr = mmap(nullptr, sizeof(universal_notifier_shmem_t), PROT_READ | PROT_WRITE,
-                              MAP_SHARED, fd.fd(), 0);
-            if (addr == MAP_FAILED) {
-                const char *error = std::strerror(errno);
-                FLOGF(error, _(L"Unable to memory map shared memory object with path '%s': %s"),
-                      path, error);
-                this->region = nullptr;
-            } else {
-                this->region = static_cast<universal_notifier_shmem_t *>(addr);
-            }
+        void *addr = mmap(nullptr, sizeof(universal_notifier_shmem_t), PROT_READ | PROT_WRITE,
+                          MAP_SHARED, fd.fd(), 0);
+        if (addr == MAP_FAILED) {
+            const char *error = std::strerror(errno);
+            FLOGF(error, _(L"Unable to memory map shared memory object with path '%s': %s"), path,
+                  error);
+            this->region = nullptr;
+            return;
         }
-
-        // Close the fd, even if the mapping succeeded.
-        fd.close();
+        this->region = static_cast<universal_notifier_shmem_t *>(addr);
 
         // Read the current seed.
         this->poll();
@@ -1129,7 +1130,7 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
     // purposes, however, it's useful to keep them in the same process, so we increment the value.
     // This isn't "safe" in the sense that multiple simultaneous increments may result in one being
     // lost, but it should always result in the value being changed, which is sufficient.
-    void post_notification() {
+    void post_notification() override {
         if (region != nullptr) {
             /* Read off the seed */
             uint32_t seed = ntohl(region->universal_variable_seed);  //!OCLINT(constant cond op)
@@ -1147,13 +1148,10 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
         }
     }
 
-    universal_notifier_shmem_poller_t() : last_change_time(0), last_seed(0), region(nullptr) {
-        open_shmem();
-    }
+    universal_notifier_shmem_poller_t() { open_shmem(); }
 
     ~universal_notifier_shmem_poller_t() {
         if (region != nullptr) {
-            // Behold: C++ in all its glory!
             void *address = const_cast<void *>(static_cast<volatile void *>(region));
             if (munmap(address, sizeof(universal_notifier_shmem_t)) < 0) {
                 wperror(L"munmap");
@@ -1161,7 +1159,7 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
         }
     }
 
-    bool poll() {
+    bool poll() override {
         bool result = false;
         if (region != nullptr) {
             uint32_t seed = ntohl(region->universal_variable_seed);  //!OCLINT(constant cond op)
@@ -1174,7 +1172,7 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
         return result;
     }
 
-    unsigned long usec_delay_between_polls() const {
+    unsigned long usec_delay_between_polls() const override {
         // If it's been less than five seconds since the last change, we poll quickly Otherwise we
         // poll more slowly. Note that a poll is a very cheap shmem read. The bad part about making
         // this high is the process scheduling/wakeups it produces.
@@ -1193,11 +1191,13 @@ class universal_notifier_shmem_poller_t : public universal_notifier_t {
 };
 
 /// A notifyd-based notifier. Very straightforward.
-class universal_notifier_notifyd_t : public universal_notifier_t {
+class universal_notifier_notifyd_t final : public universal_notifier_t {
 #ifdef FISH_NOTIFYD_AVAILABLE
-    int notify_fd;
-    int token;
-    std::string name;
+    // Note that we should not use autoclose_fd_t, as notify_cancel() takes responsibility for
+    // closing it.
+    int notify_fd{-1};
+    int token{-1};  // NOTIFY_TOKEN_INVALID
+    std::string name{};
 
     void setup_notifyd() {
         // Per notify(3), the user.uid.%d style is only accessible to processes with that uid.
@@ -1208,40 +1208,40 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
 
         uint32_t status =
             notify_register_file_descriptor(name.c_str(), &this->notify_fd, 0, &this->token);
+
         if (status != NOTIFY_STATUS_OK) {
             FLOGF(warning, "notify_register_file_descriptor() failed with status %u.", status);
             FLOGF(warning, "Universal variable notifications may not be received.");
         }
-        if (this->notify_fd >= 0) {
+        if (notify_fd >= 0) {
             // Mark us for non-blocking reads, and CLO_EXEC.
-            int flags = fcntl(this->notify_fd, F_GETFL, 0);
+            int flags = fcntl(notify_fd, F_GETFL, 0);
             if (flags >= 0 && !(flags & O_NONBLOCK)) {
-                fcntl(this->notify_fd, F_SETFL, flags | O_NONBLOCK);
+                fcntl(notify_fd, F_SETFL, flags | O_NONBLOCK);
             }
 
-            set_cloexec(this->notify_fd);
+            (void)set_cloexec(notify_fd);
             // Serious hack: notify_fd is likely the read end of a pipe. The other end is owned by
             // libnotify, which does not mark it as CLO_EXEC (it should!). The next fd is probably
             // notify_fd + 1. Do it ourselves. If the implementation changes and some other FD gets
             // marked as CLO_EXEC, that's probably a good thing.
-            set_cloexec(this->notify_fd + 1);
+            (void)set_cloexec(notify_fd + 1);
         }
     }
 
    public:
-    universal_notifier_notifyd_t() : notify_fd(-1), token(-1 /* NOTIFY_TOKEN_INVALID */) {
-        setup_notifyd();
-    }
+    universal_notifier_notifyd_t() { setup_notifyd(); }
 
     ~universal_notifier_notifyd_t() {
         if (token != -1 /* NOTIFY_TOKEN_INVALID */) {
+            // Note this closes notify_fd.
             notify_cancel(token);
         }
     }
 
-    int notification_fd() const { return notify_fd; }
+    int notification_fd() const override { return notify_fd; }
 
-    bool notification_fd_became_readable(int fd) {
+    bool notification_fd_became_readable(int fd) override {
         // notifyd notifications come in as 32 bit values. We don't care about the value. We set
         // ourselves as non-blocking, so just read until we can't read any more.
         assert(fd == notify_fd);
@@ -1255,7 +1255,7 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
         return read_something;
     }
 
-    void post_notification() {
+    void post_notification() override {
         uint32_t status = notify_post(name.c_str());
         if (status != NOTIFY_STATUS_OK) {
             FLOGF(warning,
@@ -1271,10 +1271,153 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
 #endif
 };
 
-#if !defined(__APPLE__) && !defined(__CYGWIN__)
-#define NAMED_PIPE_FLASH_DURATION_USEC (1e5)
-#define SUSTAINED_READABILITY_CLEANUP_DURATION_USEC (5 * 1e6)
+/// Returns a "variables" file in the appropriate runtime directory. This is called infrequently and
+/// so does not need to be cached.
+static wcstring default_named_pipe_path() {
+    wcstring result = env_get_runtime_path();
+    if (!result.empty()) {
+        result.append(L"/fish_universal_variables");
+    }
+    return result;
+}
+
+/// Create a fifo (named pipe) at \p test_path if non-null, or a default runtime path if null.
+/// Open the fifo for both reading and writing, in non-blocking mode.
+/// \return the fifo, or an invalid fd on failure.
+static autoclose_fd_t make_fifo(const wchar_t *test_path, const wchar_t *suffix) {
+    wcstring vars_path = test_path ? wcstring(test_path) : default_named_pipe_path();
+    vars_path.append(suffix);
+    const std::string narrow_path = wcs2string(vars_path);
+
+    int mkfifo_status = mkfifo(narrow_path.c_str(), 0600);
+    if (mkfifo_status == -1 && errno != EEXIST) {
+        const char *error = std::strerror(errno);
+        const wchar_t *errmsg = _(L"Unable to make a pipe for universal variables using '%ls': %s");
+        FLOGF(error, errmsg, vars_path.c_str(), error);
+        return autoclose_fd_t{};
+    }
+
+    autoclose_fd_t res{wopen_cloexec(vars_path, O_RDWR | O_NONBLOCK, 0600)};
+    if (!res.valid()) {
+        const char *error = std::strerror(errno);
+        const wchar_t *errmsg = _(L"Unable to open a pipe for universal variables using '%ls': %s");
+        FLOGF(error, errmsg, vars_path.c_str(), error);
+    }
+    return res;
+}
+
+// A universal notifier which uses SIGIO with a named pipe. This relies on the following behavior
+// which appears to work on Linux: if data becomes available on the pipe then all processes get
+// SIGIO even if the data is read (i.e. there is no race between SIGIO and another proc reading).
+//
+// A key difference between Linux and Mac is that on Linux SIGIO is only delivered if the pipe was
+// previously empty. That is, two successive writes with no reads will produce two SIGIOs on Mac but
+// only one on Linux.
+//
+// So, to post a notification, write anything to the pipe; if that would block drain the pipe and
+// try again.
+//
+// To receive a notification, watch for SIGIO on the read end, then read out the data to enable
+// SIGIO to be delivered again.
+class universal_notifier_sigio_t final : public universal_notifier_t {
+#ifdef SIGIO
+   public:
+    // Note we use a different suffix from universal_notifier_named_pipe_t to produce different
+    // FIFOs. This is because universal_notifier_named_pipe_t is level triggered while we are edge
+    // triggered. If they shared the same FIFO, then the named_pipe variant would keep firing
+    // forever.
+    explicit universal_notifier_sigio_t(const wchar_t *test_path)
+        : pipe_(try_make_pipe(test_path, L".notify")) {}
+
+    ~universal_notifier_sigio_t() = default;
+
+    void post_notification() override {
+        if (!pipe_.valid()) return;
+
+        // Write a byte to send SIGIO. If the pipe is full, read some and try again.
+        while (!write_1_byte()) {
+            if (errno == EINTR) {
+                continue;
+            } else if (errno == EAGAIN) {
+                // The pipe is full. Try once more.
+                drain_some();
+                write_1_byte();
+                break;
+            } else {
+                break;
+            }
+        }
+    }
+
+    bool poll() override {
+        if (sigio_count_ != signal_get_sigio_count()) {
+            // On Mac, SIGIO is generated on every write to the pipe.
+            // On Linux, it is generated only when the pipe goes from empty to non-empty.
+            // Read from the pipe so that SIGIO may be delivered again.
+            drain_some();
+            // We may have gotten another SIGIO because the pipe just became writable again.
+            // In particular BSD sends SIGIO on read even if there is no data to be read.
+            // Re-fetch the sigio count.
+            sigio_count_ = signal_get_sigio_count();
+            return true;
+        }
+        return false;
+    }
+
+   private:
+    // Construct a pipe for a given fifo path, arranging for SIGIO to be delivered.
+    // \return an invalid fd on failure.
+    static autoclose_fd_t try_make_pipe(const wchar_t *test_path, const wchar_t *suffix) {
+        autoclose_fd_t pipe = make_fifo(test_path, suffix);
+        if (!pipe.valid()) {
+            return autoclose_fd_t{};
+        }
+        // Note that O_ASYNC cannot be passed to open() (see Linux kernel bug #5993).
+        // We have to set it afterwards like so.
+        // Linux got support for O_ASYNC on fifos in 2.6 (released 2003). Treat its absence as a
+        // failure, but don't be noisy if this fails. Non-Linux platforms without O_ASYNC should use
+        // a different notifier strategy to avoid running into this.
+#ifdef O_ASYNC
+        if (fcntl(pipe.fd(), F_SETFL, O_NONBLOCK | O_ASYNC) == -1)
 #endif
+        {
+            FLOGF(uvar_file,
+                  _(L"fcntl(F_SETFL) failed, universal variable notifications disabled"));
+            return autoclose_fd_t{};
+        }
+        if (fcntl(pipe.fd(), F_SETOWN, getpid()) == -1) {
+            FLOGF(uvar_file,
+                  _(L"fcntl(F_SETOWN) failed, universal variable notifications disabled"));
+            return autoclose_fd_t{};
+        }
+        return pipe;
+    }
+
+    // Try writing a single byte to our pipe.
+    // \return true on success, false on error, in which case errno will be set.
+    bool write_1_byte() const {
+        assert(pipe_.valid() && "Invalid pipe");
+        char c = 0x42;
+        ssize_t amt = write(pipe_.fd(), &c, sizeof c);
+        return amt > 0;
+    }
+
+    // Read some data off of the pipe, discarding it.
+    void drain_some() const {
+        if (!pipe_.valid()) return;
+        char buff[256];
+        ignore_result(read(pipe_.fd(), buff, sizeof buff));
+    }
+
+    autoclose_fd_t pipe_{};
+    uint32_t sigio_count_{0};
+#else
+   public:
+    [[noreturn]] universal_notifier_sigio_t() {
+        DIE("universal_notifier_sigio_t cannot be used on this system");
+    }
+#endif
+};
 
 // Named-pipe based notifier. All clients open the same named pipe for reading and writing. The
 // pipe's readability status is a trigger to enter polling mode.
@@ -1285,42 +1428,34 @@ class universal_notifier_notifyd_t : public universal_notifier_t {
 // mode until the pipe is no longer readable. To guard against the possibility of a shell exiting
 // when there is data remaining in the pipe, if the pipe is kept readable too long, clients will
 // attempt to read data out of it (to render it no longer readable).
-class universal_notifier_named_pipe_t : public universal_notifier_t {
-#if !defined(__APPLE__) && !defined(__CYGWIN__)
-    int pipe_fd;
-    long long readback_time_usec;
-    size_t readback_amount;
+class universal_notifier_named_pipe_t final : public universal_notifier_t {
+#if !defined(__CYGWIN__)
+    autoclose_fd_t pipe_fd;
+    long long readback_time_usec{0};
+    size_t readback_amount{0};
 
-    bool polling_due_to_readable_fd;
-    long long drain_if_still_readable_time_usec;
+    // We "flash" the pipe to make it briefly readable, for this many usec.
+    static constexpr long long k_flash_duration_usec = 1e5;
 
-    void make_pipe(const wchar_t *test_path);
+    // If the pipe remains readable for this many usec, we drain it.
+    static constexpr long long k_readable_too_long_duration_usec = 5e6;
+
+    bool polling_due_to_readable_fd{false};
+    long long drain_if_still_readable_time_usec{0};
 
     void drain_excessive_data() const {
         // The pipe seems to have data on it, that won't go away. Read a big chunk out of it. We
         // don't read until it's exhausted, because if someone were to pipe say /dev/null, that
         // would cause us to hang!
-        size_t read_amt = 64 * 1024;
-        void *buff = malloc(read_amt);
-        ignore_result(read(this->pipe_fd, buff, read_amt));
-        free(buff);
+        char buff[512];
+        ignore_result(read(pipe_fd.fd(), buff, sizeof buff));
     }
 
    public:
     explicit universal_notifier_named_pipe_t(const wchar_t *test_path)
-        : pipe_fd(-1),
-          readback_time_usec(0),
-          readback_amount(0),
-          polling_due_to_readable_fd(false),
-          drain_if_still_readable_time_usec(0) {
-        make_pipe(test_path);
-    }
+        : pipe_fd(make_fifo(test_path, L".notifier")) {}
 
-    ~universal_notifier_named_pipe_t() override {
-        if (pipe_fd >= 0) {
-            close(pipe_fd);
-        }
-    }
+    ~universal_notifier_named_pipe_t() override = default;
 
     int notification_fd() const override {
         if (polling_due_to_readable_fd) {
@@ -1329,7 +1464,7 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
             return -1;
         }
         // We are not in polling mode. Return the fd so it can be watched.
-        return pipe_fd;
+        return pipe_fd.fd();
     }
 
     bool notification_fd_became_readable(int fd) override {
@@ -1342,28 +1477,26 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
         bool should_sync = false;
         if (readback_time_usec == 0) {
             polling_due_to_readable_fd = true;
-            drain_if_still_readable_time_usec =
-                get_time() + SUSTAINED_READABILITY_CLEANUP_DURATION_USEC;
+            drain_if_still_readable_time_usec = get_time() + k_readable_too_long_duration_usec;
             should_sync = true;
         }
         return should_sync;
     }
 
     void post_notification() override {
-        if (pipe_fd >= 0) {
-            // We need to write some data (any data) to the pipe, then wait for a while, then read
-            // it back. Nobody is expected to read it except us.
-            int pid_nbo = htonl(getpid());  //!OCLINT(constant cond op)
-            ssize_t amt_written = write(this->pipe_fd, &pid_nbo, sizeof pid_nbo);
-            if (amt_written < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
-                // Very unsual: the pipe is full!
-                drain_excessive_data();
-            }
-
-            // Now schedule a read for some time in the future.
-            this->readback_time_usec = get_time() + NAMED_PIPE_FLASH_DURATION_USEC;
-            this->readback_amount += sizeof pid_nbo;
+        if (!pipe_fd.valid()) return;
+        // We need to write some data (any data) to the pipe, then wait for a while, then read
+        // it back. Nobody is expected to read it except us.
+        char c[1] = {'\0'};
+        ssize_t amt_written = write(pipe_fd.fd(), c, sizeof c);
+        if (amt_written < 0 && (errno == EWOULDBLOCK || errno == EAGAIN)) {
+            // Very unsual: the pipe is full!
+            drain_excessive_data();
         }
+
+        // Now schedule a read for some time in the future.
+        this->readback_time_usec = get_time() + k_flash_duration_usec;
+        this->readback_amount += sizeof c;
     }
 
     unsigned long usec_delay_between_polls() const override {
@@ -1382,7 +1515,7 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
         unsigned long polling_delay = ULONG_MAX;
         if (polling_due_to_readable_fd) {
             // We're in polling mode. Don't return a value less than our polling interval.
-            polling_delay = NAMED_PIPE_FLASH_DURATION_USEC;
+            polling_delay = k_flash_duration_usec;
         }
 
         // Now return the smaller of the two values. If we get ULONG_MAX, it means there's no more
@@ -1395,13 +1528,15 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
     }
 
     bool poll() override {
+        if (!pipe_fd.valid()) return false;
+
         // Check if we are past the readback time.
         if (this->readback_time_usec > 0 && get_time() >= this->readback_time_usec) {
             // Read back what we wrote. We do nothing with the value.
             while (this->readback_amount > 0) {
                 char buff[64];
                 size_t amt_to_read = std::min(this->readback_amount, sizeof(buff));
-                ignore_result(read(this->pipe_fd, buff, amt_to_read));
+                ignore_result(read(this->pipe_fd.fd(), buff, amt_to_read));
                 this->readback_amount -= amt_to_read;
             }
             assert(this->readback_amount == 0);
@@ -1409,7 +1544,7 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
         }
 
         // Check to see if we are doing readability polling.
-        if (!polling_due_to_readable_fd || pipe_fd < 0) {
+        if (!polling_due_to_readable_fd) {
             return false;
         }
 
@@ -1417,10 +1552,10 @@ class universal_notifier_named_pipe_t : public universal_notifier_t {
         // See if this is still readable.
         fd_set fds;
         FD_ZERO(&fds);
-        FD_SET(this->pipe_fd, &fds);
+        FD_SET(pipe_fd.fd(), &fds);
         struct timeval timeout = {};
-        select(this->pipe_fd + 1, &fds, nullptr, nullptr, &timeout);
-        if (!FD_ISSET(this->pipe_fd, &fds)) {
+        select(pipe_fd.fd() + 1, &fds, nullptr, nullptr, &timeout);
+        if (!FD_ISSET(pipe_fd.fd(), &fds)) {
             // No longer readable, no longer polling.
             polling_due_to_readable_fd = false;
             drain_if_still_readable_time_usec = 0;
@@ -1447,6 +1582,17 @@ universal_notifier_t::notifier_strategy_t universal_notifier_t::resolve_default_
     return strategy_notifyd;
 #elif defined(__CYGWIN__)
     return strategy_shmem_polling;
+#elif defined(SIGIO) && (defined(__APPLE__) || defined(__BSD__) || defined(__linux__))
+    // The SIGIO notifier relies on an extremely specific interaction between signal handling and
+    // O_ASYNC writes, and doesn't excercise codepaths that are particularly well explored on all
+    // POSIX and POSIX-like systems, so we only explicitly enable it on platforms where it's known
+    // to work. See discussion in #6585 for examples of breakage.
+    //
+    // The SIGIO notifier does not yet work on WSL. See #7429
+    if (is_windows_subsystem_for_linux()) {
+        return strategy_named_pipe;
+    }
+    return strategy_sigio;
 #else
     return strategy_named_pipe;
 #endif
@@ -1467,6 +1613,9 @@ std::unique_ptr<universal_notifier_t> universal_notifier_t::new_notifier_for_str
         case strategy_shmem_polling: {
             return make_unique<universal_notifier_shmem_poller_t>();
         }
+        case strategy_sigio: {
+            return make_unique<universal_notifier_sigio_t>(test_path);
+        }
         case strategy_named_pipe: {
             return make_unique<universal_notifier_named_pipe_t>(test_path);
         }
@@ -1482,9 +1631,9 @@ universal_notifier_t::~universal_notifier_t() = default;
 
 int universal_notifier_t::notification_fd() const { return -1; }
 
-void universal_notifier_t::post_notification() {}
-
 bool universal_notifier_t::poll() { return false; }
+
+void universal_notifier_t::post_notification() {}
 
 unsigned long universal_notifier_t::usec_delay_between_polls() const { return 0; }
 
@@ -1492,41 +1641,3 @@ bool universal_notifier_t::notification_fd_became_readable(int fd) {
     UNUSED(fd);
     return false;
 }
-
-#if !defined(__APPLE__) && !defined(__CYGWIN__)
-/// Returns a "variables" file in the appropriate runtime directory. This is called infrequently and
-/// so does not need to be cached.
-static wcstring default_named_pipe_path() {
-    wcstring result = env_get_runtime_path();
-    if (!result.empty()) {
-        result.append(L"/fish_universal_variables");
-    }
-    return result;
-}
-
-void universal_notifier_named_pipe_t::make_pipe(const wchar_t *test_path) {
-    wcstring vars_path = test_path ? wcstring(test_path) : default_named_pipe_path();
-    vars_path.append(L".notifier");
-    const std::string narrow_path = wcs2string(vars_path);
-
-    int mkfifo_status = mkfifo(narrow_path.c_str(), 0600);
-    if (mkfifo_status == -1 && errno != EEXIST) {
-        const char *error = std::strerror(errno);
-        const wchar_t *errmsg = _(L"Unable to make a pipe for universal variables using '%ls': %s");
-        FLOGF(error, errmsg, vars_path.c_str(), error);
-        pipe_fd = -1;
-        return;
-    }
-
-    int fd = wopen_cloexec(vars_path, O_RDWR | O_NONBLOCK, 0600);
-    if (fd < 0) {
-        const char *error = std::strerror(errno);
-        const wchar_t *errmsg = _(L"Unable to open a pipe for universal variables using '%ls': %s");
-        FLOGF(error, errmsg, vars_path.c_str(), error);
-        pipe_fd = -1;
-        return;
-    }
-
-    pipe_fd = fd;
-}
-#endif

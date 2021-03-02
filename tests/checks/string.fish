@@ -42,6 +42,51 @@ string length "hello, world"
 string length -q ""; and echo not zero length; or echo zero length
 # CHECK: zero length
 
+string pad foo
+# CHECK: foo
+
+string pad -r -w 7 -c - foo
+# CHECK: foo----
+
+string pad --width 7 -c '=' foo
+# CHECK: ====foo
+
+echo \|(string pad --width 10 --right foo)\|
+# CHECK: |foo       |
+
+begin
+    set -l fish_emoji_width 2
+    # Pad string with multi-width emoji.
+    string pad -w 4 -c . 🐟
+    # CHECK: ..🐟
+
+    # Pad with multi-width character.
+    string pad -w 3 -c 🐟 .
+    # CHECK: 🐟.
+
+    # Multi-width pad with remainder, complemented with a space.
+    string pad -w 4 -c 🐟 . ..
+    # CHECK: 🐟 .
+    # CHECK: 🐟..
+end
+
+# Pad to the maximum length.
+string pad -c . long longer longest
+# CHECK: ...long
+# CHECK: .longer
+# CHECK: longest
+
+# This tests current behavior where the max width of an argument overrules
+# the width parameter. This could be changed if needed.
+string pad -c_ --width 5 longer-than-width-param x
+# CHECK: longer-than-width-param
+# CHECK: ______________________x
+
+# Current behavior is that only a single padding character is supported.
+# We can support longer strings in future without breaking compatibilty.
+string pad -c ab -w4 .
+# CHECKERR: string pad: Padding should be a character 'ab'
+
 string sub --length 2 abcde
 # CHECK: ab
 
@@ -192,7 +237,7 @@ string unescape --style=url (string escape --style=url 'a b#c"\'d')
 # CHECK: a b#c"'d
 
 string unescape --style=url (string escape --style=url \na\nb%c~d\n)
-# CHECK: 
+# CHECK:
 # CHECK: a
 # CHECK: b%c~d
 
@@ -260,7 +305,7 @@ string replace -a " " _ "spaces to underscores"
 # CHECK: spaces_to_underscores
 
 string replace -r -a "[^\d.]+" " " "0 one two 3.14 four 5x"
-# CHECK: 0 3.14 5 
+# CHECK: 0 3.14 5
 
 string replace -r "(\w+)\s+(\w+)" "\$2 \$1 \$\$" "left right"
 # CHECK: right left $
@@ -295,7 +340,7 @@ and echo Unexpected exit status at line (status --current-line-number)
 # 'string match -r with empty capture groups'
 string match -r '^([ugoa]*)([=+-]?)([rwx]*)$' '=r'
 #CHECK: =r
-#CHECK: 
+#CHECK:
 #CHECK: =
 #CHECK: r
 
@@ -365,6 +410,27 @@ string repeat -n3 -m20 foo
 
 string repeat -m4 foo
 # CHECK: foof
+
+string repeat -n 5 a b c
+# CHECK: aaaaa
+# CHECK: bbbbb
+# CHECK: ccccc
+
+string repeat -n 5 --max 4 123 456 789
+# CHECK: 1231
+# CHECK: 4564
+# CHECK: 7897
+
+string repeat -n 5 --max 4 123 '' 789
+# CHECK: 1231
+# CHECK:
+# CHECK: 7897
+
+# Historical string repeat behavior is no newline if no output.
+echo -n before
+string repeat -n 5 ''
+echo after
+# CHECK: beforeafter
 
 string repeat -n-1 foo; and echo "exit 0"
 # CHECKERR: string repeat: Invalid count value '-1'
@@ -575,13 +641,13 @@ printf '[%s]\n' (string collect one\n\n two\n)
 # CHECK: [two]
 printf '[%s]\n' (string collect -N one\n\n two\n)
 # CHECK: [one
-# CHECK: 
+# CHECK:
 # CHECK: ]
 # CHECK: [two
 # CHECK: ]
 printf '[%s]\n' (string collect --no-trim-newlines one\n\n two\n)
 # CHECK: [one
-# CHECK: 
+# CHECK:
 # CHECK: ]
 # CHECK: [two
 # CHECK: ]
@@ -619,3 +685,31 @@ echo $status
 string match -eq asd asd
 echo $status
 # CHECK: 0
+
+# Unmatched capturing groups are treated as empty
+echo az | string replace -r -- 'a(b.+)?z' 'a:$1z'
+# CHECK: a:z
+
+# --quiet should quit early
+echo "Checking that --quiet quits early - if this is broken it hangs"
+# CHECK: Checking that --quiet quits early - if this is broken it hangs
+yes | string match -q y
+echo $status
+# CHECK: 0
+yes | string length -q
+echo $status
+# CHECK: 0
+yes | string replace -q y n
+echo $status
+# CHECK: 0
+
+# `string` can't be wrapped properly anymore, since `string match` creates variables:
+function string
+    builtin string $argv
+end
+# CHECKERR: checks/string.fish (line {{\d+}}): function: The name 'string' is reserved, and cannot be used as a function name
+# CHECKERR: function string
+# CHECKERR: ^
+
+string escape \x7F
+# CHECK: \x7f

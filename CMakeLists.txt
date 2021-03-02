@@ -39,29 +39,32 @@ if (CMAKE_GENERATOR STREQUAL "Ninja" AND
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fdiagnostics-color=always")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fdiagnostics-color=always")
 endif()
+
 # Enable a whole bunch of warnings, but turn off:
-# - implicit fallthrough because that does not recognize some cases where it's desired (and I *really* want this one!)
 # - comment because we use a bunch of those, and they're not really all that harmful.
 # - address, because that occurs for our mkostemp check (weak-linking requires us to compare `&mkostemp == nullptr`).
-# - strict-aliasing, because on old GCCs (*Travis*) those are triggered by maybe.h, so you get it every time it is included.
-# - redundant-move, because we have one that is required on old libc
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra \
--Wno-implicit-fallthrough \
 -Wno-comment \
 -Wno-address \
--Wno-strict-aliasing \
 ")
 
 # Disable exception handling.
 add_compile_options(-fno-exceptions)
 
-# Prefer the gold linker because it doesn't emit useless warnings about sys_nerr and _sys_errlist.
-if (UNIX AND NOT APPLE)
-  execute_process(COMMAND ${CMAKE_C_COMPILER} -fuse-ld=gold -Wl,--version
-                  ERROR_QUIET OUTPUT_VARIABLE LD_VERSION)
-  if ("${LD_VERSION}" MATCHES "GNU gold")
-    set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=gold")
-  endif()
+# Prefer lld or the gold linker because they don't emit useless warnings about sys_nerr and
+# _sys_errlist. They're also faster (significantly so in the case of lld).
+if (UNIX)
+    execute_process(COMMAND ${CMAKE_C_COMPILER} -fuse-ld=lld -Wl,--version
+        ERROR_QUIET OUTPUT_VARIABLE LD_VERSION)
+    if ("${LD_VERSION}" MATCHES "LLD ")
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=lld")
+    elseif (NOT APPLE)
+        execute_process(COMMAND ${CMAKE_C_COMPILER} -fuse-ld=gold -Wl,--version
+            ERROR_QUIET OUTPUT_VARIABLE LD_VERSION)
+        if ("${LD_VERSION}" MATCHES "GNU gold")
+            set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -fuse-ld=gold")
+        endif()
+    endif()
 endif()
 
 # Hide the CMake Rules directories in Xcode projects.
@@ -107,7 +110,7 @@ set(FISH_SRCS
     src/builtin_pwd.cpp src/builtin_random.cpp src/builtin_read.cpp
     src/builtin_realpath.cpp src/builtin_return.cpp src/builtin_set.cpp
     src/builtin_set_color.cpp src/builtin_source.cpp src/builtin_status.cpp
-    src/builtin_string.cpp src/builtin_test.cpp src/builtin_ulimit.cpp
+    src/builtin_string.cpp src/builtin_test.cpp src/builtin_type.cpp src/builtin_ulimit.cpp
     src/builtin_wait.cpp src/color.cpp src/common.cpp src/complete.cpp src/env.cpp
     src/env_dispatch.cpp src/env_universal_common.cpp src/event.cpp src/exec.cpp
     src/expand.cpp src/fallback.cpp src/fd_monitor.cpp src/fish_version.cpp
@@ -120,7 +123,7 @@ set(FISH_SRCS
     src/proc.cpp src/reader.cpp src/redirection.cpp src/sanity.cpp src/screen.cpp
     src/signal.cpp src/termsize.cpp src/timer.cpp src/tinyexpr.cpp
     src/tokenizer.cpp src/topic_monitor.cpp src/trace.cpp src/utf8.cpp src/util.cpp
-    src/wcstringutil.cpp src/wgetopt.cpp src/wildcard.cpp src/wutil.cpp
+    src/wcstringutil.cpp src/wgetopt.cpp src/wildcard.cpp src/wutil.cpp src/fds.cpp
 )
 
 # Header files are just globbed.
@@ -211,6 +214,15 @@ include(cmake/Install.cmake)
 
 # Mac app.
 include(cmake/MacApp.cmake)
+
+# ThreadSanitizer likes to muck with signal handlers, which interferes
+# with fish_test_helper printing the ignored signal mask.
+# Ensure fish_test_helper does not use TSan.
+# Note the environment var is CXXFLAGS, but the CMake var is CMAKE_CXX_FLAGS.
+if (CMAKE_CXX_FLAGS MATCHES ".*-fsanitize=thread.*")
+  target_compile_options(fish_test_helper PRIVATE "-fno-sanitize=all")
+  target_link_libraries(fish_test_helper "-fno-sanitize=all")
+endif()
 
 # Lint targets
 # This could be implemented as target properties, but the script has the useful feature of only

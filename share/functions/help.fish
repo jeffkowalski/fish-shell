@@ -117,7 +117,10 @@ function help --description 'Show help for the fish shell'
             set fish_help_page "cmds/source.html"
         case globbing
             set fish_help_page "index.html#expand"
-        case (__fish_print_commands)
+        case (builtin -n) (__fish_print_commands)
+            # If the docs aren't installed, __fish_print_commands won't print anything
+            # Since we document all our builtins, check those at least.
+            # The alternative is to create this list at build time.
             set fish_help_page "cmds/$fish_help_item.html"
         case 'completion-*'
             set fish_help_page "completions.html#$fish_help_item"
@@ -125,6 +128,14 @@ function help --description 'Show help for the fish shell'
             set fish_help_page "tutorial.html#"(string sub -s 5 -- $fish_help_item | string replace -a -- _ -)
         case tutorial
             set fish_help_page "tutorial.html"
+        case releasenotes
+            set fish_help_page relnotes.html
+        case completions
+            set fish_help_page completions.html
+        case faq
+            set fish_help_page faq.html
+        case fish-for-bash-users
+            set fish_help_page fish_for_bash_users.html
         case ''
             set fish_help_page "index.html"
         case "*"
@@ -161,6 +172,7 @@ function help --description 'Show help for the fish shell'
             set -q TMPDIR
             or set -l TMPDIR /tmp
             set -l tmpdir (mktemp -d $TMPDIR/help.XXXXXX)
+            or return 1
             set -l tmpname $tmpdir/help.html
             echo '<meta http-equiv="refresh" content="0;URL=\''$clean_url'\'" />' >$tmpname
             set page_url file://$tmpname
@@ -190,7 +202,7 @@ function help --description 'Show help for the fish shell'
                 printf (_ 'help: Help is being displayed in %s.\n') $fish_browser[1]
         end
         $fish_browser $page_url &
-        disown
+        disown $last_pid >/dev/null 2>&1
     else
         # Work around lynx bug where <div class="contents"> always has the same formatting as links (unreadable)
         # by using a custom style sheet. See https://github.com/fish-shell/fish-shell/issues/4170

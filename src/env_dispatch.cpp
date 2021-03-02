@@ -37,6 +37,7 @@
 #include "common.h"
 #include "complete.h"
 #include "env.h"
+#include "env_dispatch.h"
 #include "env_universal_common.h"
 #include "event.h"
 #include "fallback.h"  // IWYU pragma: keep
@@ -194,11 +195,6 @@ void env_dispatch_var_change(const wcstring &key, env_stack_t &vars) {
     if (!s_var_dispatch_table) return;
 
     s_var_dispatch_table->dispatch(key, vars);
-
-    // Eww.
-    if (string_prefixes_string(L"fish_color_", key)) {
-        reader_react_to_color_change();
-    }
 }
 
 /// Universal variable callback function. This function makes sure the proper events are triggered
@@ -220,7 +216,7 @@ void env_universal_callbacks(env_stack_t *stack, const callback_data_list_t &cal
 
 static void handle_fish_term_change(const env_stack_t &vars) {
     update_fish_color_support(vars);
-    reader_react_to_color_change();
+    reader_schedule_prompt_repaint();
 }
 
 static void handle_change_ambiguous_width(const env_stack_t &vars) {
@@ -312,8 +308,17 @@ static std::unique_ptr<const var_dispatch_table_t> create_dispatch_table() {
     var_dispatch_table->add(L"TZ", handle_tz_change);
     var_dispatch_table->add(L"fish_use_posix_spawn", handle_fish_use_posix_spawn_change);
 
-    // This std::move is required to avoid a build error on old versions of libc++ (#5801)
+    // This std::move is required to avoid a build error on old versions of libc++ (#5801),
+    // but it causes a different warning under newer versions of GCC (observed under GCC 9.3.0,
+    // but not under llvm/clang 9).
+#if __GNUC__ > 4
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wredundant-move"
+#endif
     return std::move(var_dispatch_table);
+#if __GNUC__ > 4
+#pragma GCC diagnostic pop
+#endif
 }
 
 static void run_inits(const environment_t &vars) {
@@ -358,7 +363,7 @@ static void update_fish_color_support(const environment_t &vars) {
             }
         } else {
             support_term256 = true;
-            debug(2, L"256 color support enabled for TERM=%ls", term.c_str());
+            FLOGF(term_support, L"256 color support enabled for TERM=%ls", term.c_str());
         }
     } else if (cur_term != nullptr) {
         // See if terminfo happens to identify 256 colors
@@ -373,9 +378,49 @@ static void update_fish_color_support(const environment_t &vars) {
         FLOGF(term_support, L"'fish_term24bit' preference: 24-bit color %ls",
               support_term24bit ? L"enabled" : L"disabled");
     } else {
-        // We don't attempt to infer term24 bit support yet.
-        // XXX: actually, we do, in config.fish.
-        // So we actually change the color mode shortly after startup
+        if (vars.get(L"STY") || string_prefixes_string(L"eterm", term)) {
+            // Screen and emacs' ansi-term swallow truecolor sequences,
+            // so we ignore them unless force-enabled.
+            FLOGF(term_support, L"Truecolor support: disabling for eterm/screen");
+            support_term24bit = false;
+        } else if (cur_term != nullptr && max_colors >= 32767) {
+            // $TERM wins, xterm-direct reports 32767 colors, we assume that's the minimum
+            // as xterm is weird when it comes to color.
+            FLOGF(term_support, L"Truecolor support: Enabling per terminfo for %ls with %d colors",
+                  term.c_str(), max_colors);
+            support_term24bit = true;
+        } else {
+            if (auto ct = vars.get(L"COLORTERM")) {
+                // If someone set $COLORTERM, that's the sort of color they want.
+                if (ct->as_string() == L"truecolor" || ct->as_string() == L"24bit") {
+                    FLOGF(term_support, L"Truecolor support: Enabling per $COLORTERM='%ls'",
+                          ct->as_string().c_str());
+                    support_term24bit = true;
+                }
+            } else if (vars.get(L"KONSOLE_VERSION") || vars.get(L"KONSOLE_PROFILE_NAME")) {
+                // All konsole versions that use $KONSOLE_VERSION are new enough to support this,
+                // so no check is necessary.
+                FLOGF(term_support, L"Truecolor support: Enabling for Konsole");
+                support_term24bit = true;
+            } else if (auto it = vars.get(L"ITERM_SESSION_ID")) {
+                // Supporting versions of iTerm include a colon here.
+                // We assume that if this is iTerm, it can't also be st, so having this check
+                // inside is okay.
+                if (it->as_string().find(L':') != wcstring::npos) {
+                    FLOGF(term_support, L"Truecolor support: Enabling for ITERM");
+                    support_term24bit = true;
+                }
+            } else if (string_prefixes_string(L"st-", term)) {
+                FLOGF(term_support, L"Truecolor support: Enabling for st");
+                support_term24bit = true;
+            } else if (auto vte = vars.get(L"VTE_VERSION")) {
+                if (fish_wcstod(vte->as_string().c_str(), nullptr) > 3600) {
+                    FLOGF(term_support, L"Truecolor support: Enabling for VTE version %ls",
+                          vte->as_string().c_str());
+                    support_term24bit = true;
+                }
+            }
+        }
     }
     color_support_t support = (support_term256 ? color_support_term256 : 0) |
                               (support_term24bit ? color_support_term24bit : 0);
@@ -396,12 +441,11 @@ static bool initialize_curses_using_fallback(const char *term) {
     auto term_env = wcs2string(term_var->as_string());
     if (term_env == DEFAULT_TERM1 || term_env == DEFAULT_TERM2) return false;
 
-    if (session_interactivity() != session_interactivity_t::not_interactive)
-        FLOGF(warning, _(L"Using fallback terminal type '%s'."), term);
+    if (is_interactive_session()) FLOGF(warning, _(L"Using fallback terminal type '%s'."), term);
 
     int err_ret;
     if (setupterm(const_cast<char *>(term), STDOUT_FILENO, &err_ret) == OK) return true;
-    if (session_interactivity() != session_interactivity_t::not_interactive) {
+    if (is_interactive_session()) {
         FLOGF(warning, _(L"Could not set up terminal using the fallback terminal type '%s'."),
               term);
     }
@@ -426,9 +470,9 @@ static bool does_term_support_setting_title(const environment_t &vars) {
     const wcstring term_str = term_var->as_string();
     const wchar_t *term = term_str.c_str();
     bool recognized = contains(title_terms, term_var->as_string());
-    if (!recognized) recognized = !std::wcsncmp(term, L"xterm-", std::wcslen(L"xterm-"));
-    if (!recognized) recognized = !std::wcsncmp(term, L"screen-", std::wcslen(L"screen-"));
-    if (!recognized) recognized = !std::wcsncmp(term, L"tmux-", std::wcslen(L"tmux-"));
+    if (!recognized) recognized = !std::wcsncmp(term, L"xterm-", const_strlen(L"xterm-"));
+    if (!recognized) recognized = !std::wcsncmp(term, L"screen-", const_strlen(L"screen-"));
+    if (!recognized) recognized = !std::wcsncmp(term, L"tmux-", const_strlen(L"tmux-"));
     if (!recognized) {
         if (std::wcscmp(term, L"linux") == 0) return false;
         if (std::wcscmp(term, L"dumb") == 0) return false;
@@ -462,7 +506,7 @@ static void init_curses(const environment_t &vars) {
     int err_ret;
     if (setupterm(nullptr, STDOUT_FILENO, &err_ret) == ERR) {
         auto term = vars.get(L"TERM");
-        if (session_interactivity() != session_interactivity_t::not_interactive) {
+        if (is_interactive_session()) {
             FLOGF(warning, _(L"Could not set up terminal."));
             if (term.missing_or_empty()) {
                 FLOGF(warning, _(L"TERM environment variable not set."));

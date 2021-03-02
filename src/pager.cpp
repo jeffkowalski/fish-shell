@@ -14,6 +14,7 @@
 #include "common.h"
 #include "complete.h"
 #include "fallback.h"
+#include "flog.h"
 #include "highlight.h"
 #include "pager.h"
 #include "reader.h"
@@ -349,17 +350,14 @@ bool pager_t::completion_info_passes_filter(const comp_t &info) const {
 
     const wcstring &needle = this->search_field_line.text();
 
-    // We do full fuzzy matching just like the completion code itself.
-    const fuzzy_match_type_t limit = fuzzy_match_none;
-
     // Match against the description.
-    if (string_fuzzy_match_string(needle, info.desc, limit).type != fuzzy_match_none) {
+    if (string_fuzzy_match_string(needle, info.desc)) {
         return true;
     }
 
     // Match against the completion strings.
     for (const auto &i : info.comp) {
-        if (string_fuzzy_match_string(needle, prefix + i, limit).type != fuzzy_match_none) {
+        if (string_fuzzy_match_string(needle, prefix + i)) {
             return true;
         }
     }
@@ -575,26 +573,29 @@ page_rendering_t pager_t::render() const {
     return rendering;
 }
 
+bool pager_t::rendering_needs_update(const page_rendering_t &rendering) const {
+    // Common case is no pager.
+    if (this->empty() && rendering.screen_data.empty()) return false;
+
+    return (this->empty() && !rendering.screen_data.empty()) ||     // Do update after clear().
+           rendering.term_width != this->available_term_width ||    //
+           rendering.term_height != this->available_term_height ||  //
+           rendering.selected_completion_idx !=
+               this->visual_selected_completion_index(rendering.rows, rendering.cols) ||    //
+           rendering.search_field_shown != this->search_field_shown ||                      //
+           rendering.search_field_line.text() != this->search_field_line.text() ||          //
+           rendering.search_field_line.position() != this->search_field_line.position() ||  //
+           (rendering.remaining_to_disclose > 0 && this->fully_disclosed);
+}
+
 void pager_t::update_rendering(page_rendering_t *rendering) const {
-    if (rendering->term_width != this->available_term_width ||
-        rendering->term_height != this->available_term_height ||
-        rendering->selected_completion_idx !=
-            this->visual_selected_completion_index(rendering->rows, rendering->cols) ||
-        rendering->search_field_shown != this->search_field_shown ||
-        rendering->search_field_line.text() != this->search_field_line.text() ||
-        rendering->search_field_line.position() != this->search_field_line.position() ||
-        (rendering->remaining_to_disclose > 0 && this->fully_disclosed)) {
+    if (rendering_needs_update(*rendering)) {
         *rendering = this->render();
     }
 }
 
-pager_t::pager_t()
-    : available_term_width(0),
-      available_term_height(0),
-      selected_completion_idx(PAGER_SELECTION_NONE),
-      suggested_row_start(0),
-      fully_disclosed(false),
-      search_field_shown(false) {}
+pager_t::pager_t() = default;
+pager_t::~pager_t() = default;
 
 bool pager_t::empty() const { return unfiltered_completion_infos.empty(); }
 
@@ -855,14 +856,4 @@ size_t pager_t::cursor_position() const {
     return result;
 }
 
-// Constructor
-page_rendering_t::page_rendering_t()
-    : term_width(-1),
-      term_height(-1),
-      rows(0),
-      cols(0),
-      row_start(0),
-      row_end(0),
-      selected_completion_idx(-1),
-      remaining_to_disclose(0),
-      search_field_shown(false) {}
+page_rendering_t::page_rendering_t() = default;

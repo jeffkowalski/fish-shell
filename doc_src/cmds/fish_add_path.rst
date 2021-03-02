@@ -20,7 +20,7 @@ Description
 
 It is (by default) safe to use ``fish_add_path`` in config.fish, or it can be used once, interactively, and the paths will stay in future because of :ref:`universal variables <variables-universal>`. This is a "do what I mean" style command, if you need more control, consider modifying the variable yourself.
 
-Components are normalized by :ref:`realpath <cmd-realpath>`. This means that trailing slashes are ignored and symlinks are resolved, and relative paths are made absolute. If a component already exists, it is not added again and stays in the same place unless the ``--move`` switch is given.
+Components are normalized by :ref:`realpath <cmd-realpath>`. This means that trailing slashes are ignored and relative paths are made absolute (but symlinks are not resolved). If a component already exists, it is not added again and stays in the same place unless the ``--move`` switch is given.
 
 Components are added in the order they are given, and they are prepended to the path unless ``--append`` is given (if $fish_user_paths is used, that means they are last in $fish_user_paths, which is itself prepended to $PATH, so they still stay ahead of the system paths).
 
@@ -50,17 +50,20 @@ Example
 ::
 
    # I just installed mycoolthing and need to add it to the path to use it.
-   fish_add_path /opt/mycoolthing/bin
+   > fish_add_path /opt/mycoolthing/bin
 
    # I want my ~/.local/bin to be checked first.
-   fish_add_path -m ~/.local/bin
+   > fish_add_path -m ~/.local/bin
 
    # I prefer using a global fish_user_paths
-   fish_add_path -g ~/.local/bin ~/.otherbin /usr/local/sbin
+   > fish_add_path -g ~/.local/bin ~/.otherbin /usr/local/sbin
 
    # I want to append to the entire $PATH because this directory contains fallbacks
-   fish_add_path -aP /opt/fallback/bin
+   > fish_add_path -aP /opt/fallback/bin
 
    # I want to add the bin/ directory of my current $PWD (say /home/nemo/)
    > fish_add_path -v bin/
    set fish_user_paths /home/nemo/bin /usr/bin /home/nemo/.local/bin
+
+   # I have installed ruby via homebrew
+   > fish_add_path /usr/local/opt/ruby/bin

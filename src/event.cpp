@@ -182,17 +182,6 @@ wcstring event_get_desc(const parser_t &parser, const event_t &evt) {
     }
 }
 
-#if 0
-static void show_all_handlers(void) {
-    std::fwprintf(stdout, L"event handlers:\n");
-    for (const auto& event : events) {
-        auto foo = event;
-        wcstring tmp = event_get_desc(foo);
-        std::fwprintf(stdout, L"    handler now %ls\n", tmp.c_str());
-    }
-}
-#endif
-
 void event_add_handler(std::shared_ptr<event_handler_t> eh) {
     if (eh->desc.type == event_type_t::signal) {
         signal_handle(eh->desc.param1.signal);
@@ -276,6 +265,7 @@ static void event_fire_internal(parser_t &parser, const event_t &event) {
         scoped_push<bool> interactive{&ld.is_interactive, false};
         auto prev_statuses = parser.get_last_statuses();
 
+        FLOGF(event, L"Firing event '%ls'", event.desc.str_param1.c_str());
         block_t *b = parser.push_block(block_t::event_block(event));
         parser.eval(buffer, io_chain_t());
         parser.pop_block(b);
@@ -398,7 +388,7 @@ void event_print(io_streams_t &streams, maybe_t<event_type_t> type_filter) {
 
         if (!last_type || *last_type != evt->desc.type) {
             if (last_type) streams.out.append(L"\n");
-            last_type = static_cast<event_type_t>(evt->desc.type);
+            last_type = evt->desc.type;
             streams.out.append_format(L"Event %ls\n", event_name_for_type(*last_type));
         }
         switch (evt->desc.type) {

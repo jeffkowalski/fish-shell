@@ -12,9 +12,6 @@
 #include <sys/stat.h>
 
 #include <cstring>
-#if defined(__linux__)
-#include <sys/statfs.h>
-#endif
 #include <sys/mount.h>
 #include <sys/statvfs.h>
 #include <sys/types.h>
@@ -84,7 +81,7 @@ bool wreaddir_resolving(DIR *dir, const wcstring &dir_path, wcstring &out_name, 
         if (stat(fullpath.c_str(), &buf) != 0) {
             is_dir = false;
         } else {
-            is_dir = static_cast<bool>(S_ISDIR(buf.st_mode));
+            is_dir = S_ISDIR(buf.st_mode);
         }
     }
     *out_is_dir = is_dir;
@@ -142,50 +139,6 @@ wcstring wgetcwd() {
     return wcstring();
 }
 
-int set_cloexec(int fd, bool should_set) {
-    // Note we don't want to overwrite existing flags like O_NONBLOCK which may be set. So fetch the
-    // existing flags and modify them.
-    int flags = fcntl(fd, F_GETFD, 0);
-    if (flags < 0) {
-        return -1;
-    }
-    int new_flags = flags;
-    if (should_set) {
-        new_flags |= FD_CLOEXEC;
-    } else {
-        new_flags &= ~FD_CLOEXEC;
-    }
-    if (flags == new_flags) {
-        return 0;
-    } else {
-        return fcntl(fd, F_SETFD, new_flags);
-    }
-}
-
-int open_cloexec(const std::string &path, int flags, mode_t mode) {
-    return open_cloexec(path.c_str(), flags, mode);
-}
-
-int open_cloexec(const char *path, int flags, mode_t mode) {
-    int fd;
-
-// Prefer to use O_CLOEXEC.
-#ifdef O_CLOEXEC
-    fd = open(path, flags | O_CLOEXEC, mode);
-#else
-    fd = open(path, flags, mode);
-    if (fd >= 0 && !set_cloexec(fd)) {
-        exec_close(fd);
-        fd = -1;
-    }
-#endif
-    return fd;
-}
-
-int wopen_cloexec(const wcstring &pathname, int flags, mode_t mode) {
-    cstring tmp = wcs2string(pathname);
-    return open_cloexec(tmp, flags, mode);
-}
 
 DIR *wopendir(const wcstring &name) {
     const cstring tmp = wcs2string(name);
@@ -254,40 +207,6 @@ int make_fd_blocking(int fd) {
         err = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
     }
     return err == -1 ? errno : 0;
-}
-
-int fd_check_is_remote(int fd) {
-#if defined(__linux__)
-    struct statfs buf {};
-    if (fstatfs(fd, &buf) < 0) {
-        return -1;
-    }
-    // Linux has constants for these like NFS_SUPER_MAGIC, SMB_SUPER_MAGIC, CIFS_MAGIC_NUMBER but
-    // these are in varying headers. Simply hard code them.
-    // NOTE: The cast is necessary for 32-bit systems because of the 4-byte CIFS_MAGIC_NUMBER
-    switch (static_cast<unsigned int>(buf.f_type)) {
-        case 0x6969:       // NFS_SUPER_MAGIC
-        case 0x517B:       // SMB_SUPER_MAGIC
-        case 0xFE534D42U:  // SMB2_MAGIC_NUMBER - not in the manpage
-        case 0xFF534D42U:  // CIFS_MAGIC_NUMBER
-            return 1;
-        default:
-            // Other FSes are assumed local.
-            return 0;
-    }
-#elif defined(ST_LOCAL)
-    // ST_LOCAL is a flag to statvfs, which is itself standardized.
-    // In practice the only system to use this path is NetBSD.
-    struct statvfs buf {};
-    if (fstatvfs(fd, &buf) < 0) return -1;
-    return (buf.f_flag & ST_LOCAL) ? 0 : 1;
-#elif defined(MNT_LOCAL)
-    struct statfs buf {};
-    if (fstatfs(fd, &buf) < 0) return -1;
-    return (buf.f_flags & MNT_LOCAL) ? 0 : 1;
-#else
-    return -1;
-#endif
 }
 
 static inline void safe_append(char *buffer, const char *s, size_t buffsize) {
@@ -403,7 +322,7 @@ maybe_t<wcstring> wrealpath(const wcstring &pathname) {
     return str2wcstring(real_path);
 }
 
-wcstring normalize_path(const wcstring &path) {
+wcstring normalize_path(const wcstring &path, bool allow_leading_double_slashes) {
     // Count the leading slashes.
     const wchar_t sep = L'/';
     size_t leading_slashes = 0;
@@ -430,7 +349,8 @@ wcstring normalize_path(const wcstring &path) {
     wcstring result = join_strings(new_comps, sep);
     // Prepend one or two leading slashes.
     // Two slashes are preserved. Three+ slashes are collapsed to one. (!)
-    result.insert(0, leading_slashes > 2 ? 1 : leading_slashes, sep);
+    result.insert(0, allow_leading_double_slashes && leading_slashes > 2 ? 1 : leading_slashes,
+                  sep);
     // Ensure ./ normalizes to . and not empty.
     if (result.empty()) result.push_back(L'.');
     return result;
@@ -587,7 +507,7 @@ ssize_t wwrite_to_fd(const wchar_t *input, size_t input_len, int fd) {
 }
 
 /// Return one if the code point is in a Unicode private use area.
-int fish_is_pua(wint_t wc) {
+static int fish_is_pua(wint_t wc) {
     if (PUA1_START <= wc && wc < PUA1_END) return 1;
     if (PUA2_START <= wc && wc < PUA2_END) return 1;
     if (PUA3_START <= wc && wc < PUA3_END) return 1;
@@ -601,16 +521,6 @@ int fish_iswalnum(wint_t wc) {
     if (fish_is_pua(wc)) return 0;
     return iswalnum(wc);
 }
-
-#if 0
-/// We need this because there are too many implementations that don't return the proper answer for
-/// some code points. See issue #3050.
-int fish_iswalpha(wint_t wc) {
-    if (fish_reserved_codepoint(wc)) return 0;
-    if (fish_is_pua(wc)) return 0;
-    return iswalpha(wc);
-}
-#endif
 
 /// We need this because there are too many implementations that don't return the proper answer for
 /// some code points. See issue #3050.

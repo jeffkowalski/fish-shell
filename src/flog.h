@@ -56,6 +56,8 @@ class category_list_t {
 
     category_t config{L"config", L"Finding and reading configuration"};
 
+    category_t event{L"event", L"Firing events"};
+
     category_t exec_job_status{L"exec-job-status", L"Jobs changing status"};
 
     category_t exec_job_exec{L"exec-job-exec", L"Jobs being executed"};
@@ -99,6 +101,7 @@ class category_list_t {
     category_t term_support{L"term-support", L"Terminal feature detection"};
 
     category_t reader{L"reader", L"The interactive reader/input system"};
+    category_t reader_render{L"reader-render", L"Rendering the command line"};
     category_t complete{L"complete", L"The completion system"};
     category_t path{L"path", L"Searching/using paths"};
 
@@ -136,7 +139,7 @@ class logger_t {
     }
 
     template <typename T, typename... Ts>
-    void log_args_impl(const T &arg, const Ts &... rest) {
+    void log_args_impl(const T &arg, const Ts &...rest) {
         log1(arg);
         log1(' ');
         log_args_impl<Ts...>(rest...);
@@ -148,7 +151,7 @@ class logger_t {
     logger_t();
 
     template <typename... Args>
-    void log_args(const category_t &cat, const Args &... args) {
+    void log_args(const category_t &cat, const Args &...args) {
         log1(cat.name);
         log1(": ");
         log_args_impl(args...);

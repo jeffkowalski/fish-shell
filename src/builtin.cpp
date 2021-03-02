@@ -4,7 +4,8 @@
 //
 // 1). Create a function in builtin.c with the following signature:
 //
-//     <tt>static maybe_t<int> builtin_NAME(parser_t &parser, io_streams_t &streams, wchar_t **argv)</tt>
+//     <tt>static maybe_t<int> builtin_NAME(parser_t &parser, io_streams_t &streams, wchar_t
+//     **argv)</tt>
 //
 // where NAME is the name of the builtin, and args is a zero-terminated list of arguments.
 //
@@ -61,6 +62,7 @@
 #include "builtin_status.h"
 #include "builtin_string.h"
 #include "builtin_test.h"
+#include "builtin_type.h"
 #include "builtin_ulimit.h"
 #include "builtin_wait.h"
 #include "common.h"
@@ -216,7 +218,7 @@ static maybe_t<int> builtin_generic(parser_t &parser, io_streams_t &streams, wch
 
     // Hackish - if we have no arguments other than the command, we are a "naked invocation" and we
     // just print help.
-    if (argc == 1) {
+    if (argc == 1 || wcscmp(cmd, L"time") == 0) {
         builtin_print_help(parser, streams, cmd);
         return STATUS_INVALID_ARGS;
     }
@@ -234,11 +236,17 @@ static maybe_t<int> builtin_count(parser_t &parser, io_streams_t &streams, wchar
 
     // Count the newlines coming in via stdin like `wc -l`.
     if (streams.stdin_is_directly_redirected) {
+        assert(streams.stdin_fd >= 0 &&
+               "Should have a valid fd since stdin is directly redirected");
         char buf[COUNT_CHUNK_SIZE];
         while (true) {
             long n = read_blocked(streams.stdin_fd, buf, COUNT_CHUNK_SIZE);
-            // Ignore all errors for now.
-            if (n <= 0) break;
+            if (n == 0) {
+                break;
+            } else if (n < 0) {
+                wperror(L"read");
+                return STATUS_CMD_ERROR;
+            }
             for (int i = 0; i < n; i++) {
                 if (buf[i] == L'\n') {
                     argc++;
@@ -256,7 +264,8 @@ static maybe_t<int> builtin_count(parser_t &parser, io_streams_t &streams, wchar
 
 /// This function handles both the 'continue' and the 'break' builtins that are used for loop
 /// control.
-static maybe_t<int> builtin_break_continue(parser_t &parser, io_streams_t &streams, wchar_t **argv) {
+static maybe_t<int> builtin_break_continue(parser_t &parser, io_streams_t &streams,
+                                           wchar_t **argv) {
     int is_break = (std::wcscmp(argv[0], L"break") == 0);
     int argc = builtin_count_args(argv);
 
@@ -401,6 +410,7 @@ static const builtin_data_t builtin_datas[] = {
     {L"test", &builtin_test, N_(L"Test a condition")},
     {L"time", &builtin_generic, N_(L"Measure how long a command or block takes")},
     {L"true", &builtin_true, N_(L"Return a successful result")},
+    {L"type", &builtin_type, N_(L"Check if a thing is a thing")},
     {L"ulimit", &builtin_ulimit, N_(L"Set or get the shells resource usage limits")},
     {L"wait", &builtin_wait, N_(L"Wait for background processes completed")},
     {L"while", &builtin_generic, N_(L"Perform a command multiple times")},
@@ -463,7 +473,15 @@ proc_status_t builtin_run(parser_t &parser, wchar_t **argv, io_streams_t &stream
         if (!ret) {
             return proc_status_t::empty();
         }
-        return proc_status_t::from_exit_code(ret.value());
+
+        // The exit code is cast to an 8-bit unsigned integer, so saturate to 255. Otherwise,
+        // multiples of 256 are reported as 0.
+        int code = ret.value();
+        if (code > 255) {
+            code = 255;
+        }
+
+        return proc_status_t::from_exit_code(code);
     }
 
     FLOGF(error, UNKNOWN_BUILTIN_ERR_MSG, argv[0]);

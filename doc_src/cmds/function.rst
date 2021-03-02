@@ -28,7 +28,7 @@ The following options are available:
 
 - ``-e`` or ``--on-event EVENT_NAME`` tells fish to run this function when the specified named event is emitted. Fish internally generates named events e.g. when showing the prompt.
 
-- ``-v`` or ``--on-variable VARIABLE_NAME`` tells fish to run this function when the variable VARIABLE_NAME changes value.
+- ``-v`` or ``--on-variable VARIABLE_NAME`` tells fish to run this function when the variable VARIABLE_NAME changes value. Note that the function will not necessarily be run for each change; rather, it will be run when the variable has changed at least once.
 
 - ``-j PGID`` or ``--on-job-exit PGID`` tells fish to run this function when the job with group ID PGID exits. Instead of PGID, the string 'caller' can be specified. This is only legal when in a command substitution, and will result in the handler being triggered by the exit of the job which created this command substitution.
 
@@ -49,8 +49,6 @@ If the user enters any additional arguments after the function, they are inserte
 By using one of the event handler switches, a function can be made to run automatically at specific events. The user may generate new events using the :ref:`emit <cmd-emit>` builtin. Fish generates the following named events:
 
 - ``fish_prompt``, which is emitted whenever a new fish prompt is about to be displayed.
-
-- ``fish_command_not_found``, which is emitted whenever a command lookup failed.
 
 - ``fish_preexec``, which is emitted right before executing an interactive command. The commandline is passed as the first parameter. Not emitted if command is empty.
 

@@ -16,7 +16,7 @@ Synopsis
 Description
 -----------
 
-By defining the ``fish_prompt`` function, the user can choose a custom prompt. The ``fish_prompt`` function is executed when the prompt is to be shown, and the output is used as a prompt.
+The ``fish_prompt`` function is executed when the prompt is to be shown, and the output is used as a prompt.
 
 The exit status of commands within ``fish_prompt`` will not modify the value of :ref:`$status <variables-status>` outside of the ``fish_prompt`` function.
 
@@ -33,7 +33,10 @@ A simple prompt:
 ::
 
     function fish_prompt -d "Write out the prompt"
-        printf '%s@%s%s%s%s> ' (whoami) (hostname | cut -d . -f 1) \
+        # This shows up as USER@HOST /home/user/ >, with the directory colored
+        # $USER and $hostname are set by fish, so you can just use them
+        # instead of using `whoami` and `hostname`
+        printf '%s@%s %s%s%s > ' $USER $hostname \
             (set_color $fish_color_cwd) (prompt_pwd) (set_color normal)
     end
 

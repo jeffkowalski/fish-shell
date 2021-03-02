@@ -19,27 +19,6 @@
 #include "common.h"
 #include "maybe.h"
 
-/// Sets CLO_EXEC on a given fd according to the value of \p should_set.
-int set_cloexec(int fd, bool should_set = true);
-
-/// Wide character version of open() that also sets the close-on-exec flag (atomically when
-/// possible).
-int wopen_cloexec(const wcstring &pathname, int flags, mode_t mode = 0);
-
-/// Narrow versions of wopen_cloexec.
-int open_cloexec(const std::string &path, int flags, mode_t mode = 0);
-int open_cloexec(const char *path, int flags, mode_t mode = 0);
-
-/// Mark an fd as nonblocking; returns errno or 0 on success.
-int make_fd_nonblocking(int fd);
-
-/// Mark an fd as blocking; returns errno or 0 on success.
-int make_fd_blocking(int fd);
-
-/// Check if an fd is on a remote filesystem (NFS, SMB, CFS)
-/// Return 1 if remote, 0 if local, -1 on error or if not implemented on this platform.
-int fd_check_is_remote(int fd);
-
 /// Wide character version of opendir(). Note that opendir() is guaranteed to set close-on-exec by
 /// POSIX (hooray).
 DIR *wopendir(const wcstring &name);
@@ -76,7 +55,7 @@ maybe_t<wcstring> wrealpath(const wcstring &pathname);
 /// 1. Collapse multiple /s into a single /, except maybe at the beginning.
 /// 2. .. goes up a level.
 /// 3. Remove /./ in the middle.
-wcstring normalize_path(const wcstring &path);
+wcstring normalize_path(const wcstring &path, bool allow_leading_double_slashes = true);
 
 /// Given an input path \p path and a working directory \p wd, do a "normalizing join" in a way
 /// appropriate for cd. That is, return effectively wd + path while resolving leading ../s from
@@ -117,7 +96,7 @@ int wrename(const wcstring &oldName, const wcstring &newv);
 /// This does NOT retry on EINTR or EAGAIN, it simply returns.
 /// \return -1 on error in which case errno will have been set. In this event, the number of bytes
 /// actually written cannot be obtained.
-ssize_t wwrite_to_fd(const wchar_t *s, size_t len, int fd);
+ssize_t wwrite_to_fd(const wchar_t *input, size_t len, int fd);
 
 /// Variant of above that accepts a wcstring.
 inline ssize_t wwrite_to_fd(const wcstring &s, int fd) {
@@ -134,11 +113,9 @@ inline ssize_t wwrite_to_fd(const wcstring &s, int fd) {
 // We need this because there are too many implementations that don't return the proper answer for
 // some code points. See issue #3050.
 #ifndef FISH_NO_ISW_WRAPPERS
-#define iswalpha fish_iswalpha
 #define iswalnum fish_iswalnum
 #define iswgraph fish_iswgraph
 #endif
-int fish_iswalpha(wint_t wc);
 int fish_iswalnum(wint_t wc);
 int fish_iswgraph(wint_t wc);
 

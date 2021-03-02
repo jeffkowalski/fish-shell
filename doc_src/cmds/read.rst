@@ -30,9 +30,9 @@ The following options are available:
 - ``-n NCHARS`` or ``--nchars=NCHARS`` makes ``read`` return after reading NCHARS characters or the end of
   the line, whichever comes first.
 
-- ``-p PROMPT_CMD`` or ``--prompt=PROMPT_CMD`` uses the output of the shell command ``PROMPT_CMD`` as the prompt for the interactive mode. The default prompt command is `set_color green; echo read; set_color normal; echo "> "`
+- ``-p PROMPT_CMD`` or ``--prompt=PROMPT_CMD`` uses the output of the shell command ``PROMPT_CMD`` as the prompt for the interactive mode. The default prompt command is ``set_color green; echo read; set_color normal; echo "> "``
 
-- ``-P PROMPT_STR`` or ``--prompt-str=PROMPT_STR`` uses the string as the prompt for the interactive mode. It is equivalent to `echo PROMPT_STR` and is provided solely to avoid the need to frame the prompt as a command. All special characters in the string are automatically escaped before being passed to the :ref:`echo <cmd-echo>` command.
+- ``-P PROMPT_STR`` or ``--prompt-str=PROMPT_STR`` uses the string as the prompt for the interactive mode. It is equivalent to ``echo PROMPT_STR`` and is provided solely to avoid the need to frame the prompt as a command. All special characters in the string are automatically escaped before being passed to the :ref:`echo <cmd-echo>` command.
 
 - ``-R RIGHT_PROMPT_CMD`` or ``--right-prompt=RIGHT_PROMPT_CMD`` uses the output of the shell command ``RIGHT_PROMPT_CMD`` as the right prompt for the interactive mode. There is no default right prompt command.
 
@@ -58,9 +58,9 @@ If no option to determine how to split like ``--delimiter``, ``--line`` or ``--t
 
 With the ``--line`` option, ``read`` reads a line of input from standard input into each provided variable, stopping when each variable has been filled. The line is not tokenized.
 
-If no variable names are provided, ``read`` enters a special case that simply provides redirection from standard input to standard output, useful for command substitution. For instance, the fish shell command below can be used to read data that should be provided via a command line argument from the console instead of hardcoding it in the command itself, allowing the command to both be reused as-is in various contexts with different input values and preventing possibly sensitive text from being included in the shell history:
+If no variable names are provided, ``read`` enters a special case that simply provides redirection from standard input to standard output, useful for command substitution. For instance, the fish shell command below can be used to read data that should be provided via a command line argument from the console instead of hardcoding it in the command itself, allowing the command to both be reused as-is in various contexts with different input values and preventing possibly sensitive text from being included in the shell history::
 
-``mysql -uuser -p(read)``
+    mysql -uuser -p(read)
 
 When running in this mode, ``read`` does not split the input in any way and text is redirected to standard output without any further processing or manipulation.
 
@@ -75,11 +75,6 @@ In order to protect the shell from consuming too many system resources, ``read``
 maximum of 100 MiB (104857600 bytes); if the terminator is not reached before this limit then VARIABLE
 is set to empty and the exit status is set to 122. This limit can be altered with the
 ``fish_read_limit`` variable. If set to 0 (zero), the limit is removed.
-
-Using another read history file
--------------------------------
-
-The ``read`` command supported the ``-m`` and ``--mode-name`` flags in fish versions prior to 2.7.0 to specify an alternative read history file. Those flags are now deprecated and ignored. Instead, set the ``fish_history`` variable to specify a history session ID. That will affect both the ``read`` history file and the fish command history file. You can set it to an empty string to specify that no history should be read or written. This is useful for presentations where you do not want possibly private or sensitive history to be exposed to the audience but do want history relevant to the presentation to be available.
 
 Example
 -------

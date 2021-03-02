@@ -38,6 +38,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "common.h"
 #include "env.h"
 #include "expand.h"
+#include "fds.h"
 #include "fish_version.h"
 #include "flog.h"
 #include "highlight.h"
@@ -46,6 +47,7 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "parse_constants.h"
 #include "parse_util.h"
 #include "print_help.h"
+#include "wcstringutil.h"
 #include "wutil.h"  // IWYU pragma: keep
 
 // The number of spaces per indent isn't supposed to be configurable.
@@ -86,17 +88,6 @@ namespace {
 /// From C++14.
 template <bool B, typename T = void>
 using enable_if_t = typename std::enable_if<B, T>::type;
-
-/// \return the number of escaping backslashes before a character.
-/// \p idx may be "one past the end."
-size_t count_preceding_backslashes(const wcstring &text, size_t idx) {
-    assert(idx <= text.size() && "Out of bounds");
-    size_t backslashes = 0;
-    while (backslashes < idx && text.at(idx - backslashes - 1) == L'\\') {
-        backslashes++;
-    }
-    return backslashes;
-}
 
 /// \return whether a character at a given index is escaped.
 /// A character is escaped if it has an odd number of backslashes.
@@ -285,11 +276,13 @@ struct pretty_printer_t {
     // Return sorted list of semi-preferring semi_nl nodes.
     std::vector<uint32_t> compute_preferred_semi_locations() const {
         std::vector<uint32_t> result;
-        auto mark_as_semi = [&result](const optional_t<semi_nl_t> &n) {
-            if (n && n->has_source()) result.push_back(n->range.start);
+        auto mark_semi_from_input = [&](const optional_t<semi_nl_t> &n) {
+            if (n && n->has_source() && substr(n->range) == L";") {
+                result.push_back(n->range.start);
+            }
         };
 
-        // andor_job_lists get semis if they are short enough.
+        // andor_job_lists get semis if the input uses semis.
         for (const auto &node : ast) {
             // See if we have a condition and an andor_job_list.
             const optional_t<semi_nl_t> *condition = nullptr;
@@ -302,20 +295,12 @@ struct pretty_printer_t {
                 andors = &wc->andor_tail;
             }
 
-            // This describes the heuristic of when to place and_or job lists on separate lines.
-            // That is, do we want:
-            //    if true; and false
-            //  or do we want:
-            //    if true
-            //        and false
-            // Lists with two or fewer get semis.
-            // Note the effective count is then three, because this list does not include the main
-            // condition.
-            if (andors && andors->count() > 0 && andors->count() <= 2) {
-                if (condition) mark_as_semi(*condition);
+            // If there is no and-or tail then we always use a newline.
+            if (andors && andors->count() > 0) {
+                if (condition) mark_semi_from_input(*condition);
                 // Mark all but last of the andor list.
                 for (uint32_t i = 0; i + 1 < andors->count(); i++) {
-                    mark_as_semi(andors->at(i)->job.semi_nl);
+                    mark_semi_from_input(andors->at(i)->job.semi_nl);
                 }
             }
         }
@@ -382,9 +367,10 @@ struct pretty_printer_t {
     //   begin | stuff
     //
     //  We do not handle errors here - instead our caller does.
-    void emit_gap_text(const wcstring &gap_text, gap_flags_t flags) {
+    bool emit_gap_text(source_range_t range, gap_flags_t flags) {
+        wcstring gap_text = substr(range);
         // Common case: if we are only spaces, do nothing.
-        if (gap_text.find_first_not_of(L' ') == wcstring::npos) return;
+        if (gap_text.find_first_not_of(L' ') == wcstring::npos) return false;
 
         // Look to see if there is an escaped newline.
         // Emit it if either we allow it, or it comes before the first comment.
@@ -400,6 +386,10 @@ struct pretty_printer_t {
                     output.append(L" ");
                 }
                 output.append(L"\\\n");
+                // Indent the continuation line and any leading comments (#7252).
+                // Use the indentation level of the next newline.
+                current_indent = indents.at(range.start + escaped_nl + 1);
+                emit_space_or_indent();
             }
         }
 
@@ -441,6 +431,7 @@ struct pretty_printer_t {
             }
         }
         if (needs_nl) emit_newline();
+        return needs_nl;
     }
 
     /// \return the gap text ending at a given index into the string, or empty if none.
@@ -468,25 +459,35 @@ struct pretty_printer_t {
     }
 
     // Emit the gap text before a source range.
-    void emit_gap_text_before(source_range_t r, gap_flags_t flags) {
+    bool emit_gap_text_before(source_range_t r, gap_flags_t flags) {
         assert(r.start <= source.size() && "source out of bounds");
-        uint32_t start = r.start;
-        if (start < indents.size()) current_indent = indents.at(start);
+        bool added_newline = false;
 
         // Find the gap text which ends at start.
-        source_range_t range = gap_text_to(start);
+        source_range_t range = gap_text_to(r.start);
         if (range.length > 0) {
+            // Set the indent from the beginning of this gap text.
+            // For example:
+            // begin
+            //    cmd
+            //    # comment
+            // end
+            // Here the comment is the gap text before the end, but we want the indent from the
+            // command.
+            if (range.start < indents.size()) current_indent = indents.at(range.start);
+
             // If this range contained an error, append the gap text without modification.
             // For example in: echo foo "
             // We don't want to mess with the quote.
             if (range_contained_error(range)) {
                 output.append(substr(range));
             } else {
-                emit_gap_text(substr(range), flags);
+                added_newline = emit_gap_text(range, flags);
             }
         }
         // Always clear gap_text_mask_newline after emitting even empty gap text.
         gap_text_mask_newline = false;
+        return added_newline;
     }
 
     /// Given a string \p input, remove unnecessary quotes, etc.
@@ -594,9 +595,12 @@ struct pretty_printer_t {
         if (node.range.length > 0) {
             auto flags = gap_text_flags_before_node(node);
             current_indent = indents.at(node.range.start);
-            emit_gap_text_before(node.range, flags);
-            wcstring text = source.substr(node.range.start, node.range.length);
-            emit_gap_text(text, flags);
+            bool added_newline = emit_gap_text_before(node.range, flags);
+            source_range_t gap_range = node.range;
+            if (added_newline && gap_range.length > 0 && source.at(gap_range.start) == L'\n') {
+                gap_range.start++;
+            }
+            emit_gap_text(gap_range, flags);
         }
     }
 
@@ -624,6 +628,7 @@ static const char *highlight_role_to_string(highlight_role_t role) {
         TEST_ROLE(normal)
         TEST_ROLE(error)
         TEST_ROLE(command)
+        TEST_ROLE(keyword)
         TEST_ROLE(statement_terminator)
         TEST_ROLE(param)
         TEST_ROLE(comment)
@@ -662,7 +667,7 @@ static const char *highlight_role_to_string(highlight_role_t role) {
 static std::string make_pygments_csv(const wcstring &src) {
     const size_t len = src.size();
     std::vector<highlight_spec_t> colors;
-    highlight_shell(src, colors, src.size(), operation_context_t::globals());
+    highlight_shell(src, colors, operation_context_t::globals());
     assert(colors.size() == len && "Colors and src should have same size");
 
     struct token_range_t {
@@ -836,13 +841,17 @@ int main(int argc, char *argv[]) {
         output_type_file,
         output_type_ansi,
         output_type_pygments_csv,
+        output_type_check,
         output_type_html
     } output_type = output_type_plain_text;
     const char *output_location = "";
     bool do_indent = true;
+    // File path for debug output.
+    std::string debug_output;
 
-    const char *short_opts = "+d:hvwiD:";
-    const struct option long_opts[] = {{"debug-level", required_argument, nullptr, 'd'},
+    const char *short_opts = "+d:hvwicD:";
+    const struct option long_opts[] = {{"debug", required_argument, nullptr, 'd'},
+                                       {"debug-output", required_argument, nullptr, 'o'},
                                        {"debug-stack-frames", required_argument, nullptr, 'D'},
                                        {"dump-parse-tree", no_argument, nullptr, 'P'},
                                        {"no-indent", no_argument, nullptr, 'i'},
@@ -852,6 +861,7 @@ int main(int argc, char *argv[]) {
                                        {"html", no_argument, nullptr, 1},
                                        {"ansi", no_argument, nullptr, 2},
                                        {"pygments", no_argument, nullptr, 3},
+                                       {"check", no_argument, nullptr, 'c'},
                                        {nullptr, 0, nullptr, 0}};
 
     int opt;
@@ -889,6 +899,10 @@ int main(int argc, char *argv[]) {
                 output_type = output_type_pygments_csv;
                 break;
             }
+            case 'c': {
+                output_type = output_type_check;
+                break;
+            }
             case 'd': {
                 char *end;
                 long tmp;
@@ -899,25 +913,22 @@ int main(int argc, char *argv[]) {
                 if (tmp >= 0 && tmp <= 10 && !*end && !errno) {
                     debug_level = static_cast<int>(tmp);
                 } else {
-                    std::fwprintf(stderr, _(L"Invalid value '%s' for debug-level flag"), optarg);
-                    exit(1);
+                    activate_flog_categories_by_pattern(str2wcstring(optarg));
+                }
+                for (auto cat : get_flog_categories()) {
+                    if (cat->enabled) {
+                        printf("Debug enabled for category: %ls\n", cat->name);
+                    }
                 }
                 break;
             }
             case 'D': {
-                char *end;
-                long tmp;
-
-                errno = 0;
-                tmp = strtol(optarg, &end, 10);
-
-                if (tmp > 0 && tmp <= 128 && !*end && !errno) {
-                    set_debug_stack_frames(static_cast<int>(tmp));
-                } else {
-                    std::fwprintf(stderr, _(L"Invalid value '%s' for debug-stack-frames flag"),
-                                  optarg);
-                    exit(1);
-                }
+                // TODO: Option is currently useless.
+                // Either remove it or make it work with FLOG.
+                break;
+            }
+            case 'o': {
+                debug_output = optarg;
                 break;
             }
             default: {
@@ -929,6 +940,22 @@ int main(int argc, char *argv[]) {
 
     argc -= optind;
     argv += optind;
+
+    // Direct any debug output right away.
+    FILE *debug_output_file = nullptr;
+    if (!debug_output.empty()) {
+        debug_output_file = fopen(debug_output.c_str(), "w");
+        if (!debug_output_file) {
+            fprintf(stderr, "Could not open file %s\n", debug_output.c_str());
+            perror("fopen");
+            exit(-1);
+        }
+        set_cloexec(fileno(debug_output_file));
+        setlinebuf(debug_output_file);
+        set_flog_output_file(debug_output_file);
+    }
+
+    int retval = 0;
 
     wcstring src;
     for (int i = 0; i < argc || (argc == 0 && i == 0); i++) {
@@ -964,8 +991,7 @@ int main(int argc, char *argv[]) {
         // Maybe colorize.
         std::vector<highlight_spec_t> colors;
         if (output_type != output_type_plain_text) {
-            highlight_shell(output_wtext, colors, output_wtext.size(),
-                            operation_context_t::globals());
+            highlight_shell(output_wtext, colors, operation_context_t::globals());
         }
 
         std::string colored_output;
@@ -997,9 +1023,18 @@ int main(int argc, char *argv[]) {
             case output_type_pygments_csv: {
                 DIE("pygments_csv should have been handled above");
             }
+            case output_type_check: {
+                if (output_wtext != src) {
+                    if (argc) {
+                        std::fwprintf(stderr, _(L"%s\n"), argv[i]);
+                    }
+                    retval++;
+                }
+                break;
+            }
         }
 
         std::fputws(str2wcstring(colored_output).c_str(), stdout);
     }
-    return 0;
+    return retval;
 }

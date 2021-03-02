@@ -31,6 +31,10 @@ struct edit_t {
     /// The strings that are removed and added by this edit, respectively.
     wcstring old, replacement;
 
+    /// edit_t is only for contiguous changes, so to restore a group of arbitrary changes to the
+    /// command line we need to have a group id as forcibly coalescing changes is not enough.
+    maybe_t<int> group_id;
+
     explicit edit_t(size_t offset, size_t length, wcstring replacement)
         : offset(offset), length(length), replacement(std::move(replacement)) {}
 
@@ -61,6 +65,11 @@ struct undo_history_t {
     /// last one.
     bool may_coalesce = false;
 
+    /// Whether to be more aggressive in coalescing edits. Ideally, it would be "force coalesce"
+    /// with guaranteed atomicity but as `edit_t` is strictly for contiguous changes, that guarantee
+    /// can't be made at this time.
+    bool try_coalesce = false;
+
     /// Empty the history.
     void clear();
 };
@@ -71,6 +80,12 @@ class editable_line_t {
     wcstring text_;
     /// The current position of the cursor in the command line.
     size_t position_ = 0;
+
+    /// The nesting level for atomic edits, so that recursive invocations of start_edit_group()
+    /// are not ended by one end_edit_group() call.
+    int32_t edit_group_level_ = -1;
+    /// Monotonically increasing edit group, ignored when edit_group_level_ is -1. Allowed to wrap.
+    uint32_t edit_group_id_ = -1;
 
    public:
     undo_history_t undo_history;
@@ -97,38 +112,32 @@ class editable_line_t {
     }
 
     /// Modify the commandline according to @edit. Most modifications to the
-    /// text should pass through this function. You can use one of the wrappers below.
+    /// text should pass through this function.
     void push_edit(edit_t &&edit);
 
-    /// Erase @length characters starting at @offset.
-    void erase_substring(size_t offset, size_t length);
-    /// Replace the text of length @length at @offset by @replacement.
-    void replace_substring(size_t offset, size_t length, wcstring &&replacement);
-    /// Inserts a substring of str given by start, len at the cursor position.
-    void insert_string(const wcstring &str, size_t start = 0, size_t len = wcstring::npos);
+    /// Modify the commandline by inserting a string at the cursor.
+    /// Does not create a new undo point, but adds to the last edit which
+    /// must be an insertion, too.
+    void insert_coalesce(const wcstring &str);
 
     /// Undo the most recent edit that was not yet undone. Returns true on success.
     bool undo();
 
     /// Redo the most recent undo. Returns true on success.
     bool redo();
+
+    /// Start a logical grouping of command line edits that should be undone/redone together.
+    void begin_edit_group();
+    /// End a logical grouping of command line edits that should be undone/redone together.
+    void end_edit_group();
 };
 
 /// Read commands from \c fd until encountering EOF.
 /// The fd is not closed.
 int reader_read(parser_t &parser, int fd, const io_chain_t &io);
 
-/// Tell the shell whether it should exit after the currently running command finishes.
-void reader_set_end_loop(bool flag);
-
 /// Mark that we encountered SIGHUP and must (soon) exit. This is invoked from a signal handler.
 void reader_sighup();
-
-/// Mark that the reader should forcibly exit. This may be invoked from a signal handler.
-void reader_force_exit();
-
-/// Check that the reader is in a sane state.
-void reader_sanity_check();
 
 /// Initialize the reader.
 void reader_init();
@@ -147,30 +156,20 @@ void reader_change_history(const wcstring &name);
 /// \param reset_cursor_position If set, issue a \r so the line driver knows where we are
 void reader_write_title(const wcstring &cmd, parser_t &parser, bool reset_cursor_position = true);
 
-/// Call this function to tell the reader that a repaint is needed, and should be performed when
-/// possible.
-void reader_repaint_needed();
-
-/// Call this function to tell the reader that some color has changed.
-void reader_react_to_color_change();
-
-/// Repaint immediately if needed.
-void reader_repaint_if_needed();
+/// Tell the reader that it needs to re-exec the prompt and repaint.
+/// This may be called in response to e.g. a color variable change.
+void reader_schedule_prompt_repaint();
 
 /// Enqueue an event to the back of the reader's input queue.
 class char_event_t;
 void reader_queue_ch(const char_event_t &ch);
-
-/// Run the specified command with the correct terminal modes, and while taking care to perform job
-/// notification, set the title, etc.
-void reader_run_command(const wcstring &buff);
 
 /// Get the string of character currently entered into the command buffer, or 0 if interactive mode
 /// is uninitialized.
 const wchar_t *reader_get_buffer();
 
 /// Returns the current reader's history.
-history_t *reader_get_history();
+std::shared_ptr<history_t> reader_get_history();
 
 /// Set the string of characters in the command buffer, as well as the cursor position.
 ///
@@ -235,6 +234,9 @@ struct reader_config_t {
 
     /// If set, do not show what is typed.
     bool in_silent_mode{false};
+
+    /// The fd for stdin, default to actual stdin.
+    int in{0};
 };
 
 /// Push a new reader environment controlled by \p conf.
@@ -244,14 +246,12 @@ void reader_push(parser_t &parser, const wcstring &history_name, reader_config_t
 /// Return to previous reader environment.
 void reader_pop();
 
-/// Returns true if the shell is exiting, 0 otherwise.
-bool shell_is_exiting();
-
 /// The readers interrupt signal handler. Cancels all currently running blocks.
 void reader_handle_sigint();
 
-/// This function returns true if fish is exiting by force, i.e. because stdin died.
-bool reader_exit_forced();
+/// \return whether we should cancel fish script due to fish itself receiving a signal.
+/// TODO: this doesn't belong in reader.
+bool check_cancel_from_fish_signal();
 
 /// Test whether the interactive reader is in search mode.
 bool reader_is_in_search_mode();

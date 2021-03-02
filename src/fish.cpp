@@ -67,6 +67,7 @@ class fish_cmd_opts_t {
     std::string debug_output;
     // File path for profiling output, or empty for none.
     std::string profile_output;
+    std::string profile_startup_output;
     // Commands to be executed in place of interactive shell.
     std::vector<std::string> batch_cmds;
     // Commands to execute after the shell's config has been read.
@@ -84,7 +85,7 @@ class fish_cmd_opts_t {
 };
 
 /// \return a timeval converted to milliseconds.
-long long tv_to_msec(const struct timeval &tv) {
+static long long tv_to_msec(const struct timeval &tv) {
     long long msec = static_cast<long long>(tv.tv_sec) * 1000;  // milliseconds per second
     msec += tv.tv_usec / 1000;                                  // microseconds per millisecond
     return msec;
@@ -248,7 +249,8 @@ static void read_init(parser_t &parser, const struct config_paths_t &paths) {
     }
 }
 
-int run_command_list(parser_t &parser, std::vector<std::string> *cmds, const io_chain_t &io) {
+static int run_command_list(parser_t &parser, std::vector<std::string> *cmds,
+                            const io_chain_t &io) {
     for (const auto &cmd : *cmds) {
         wcstring cmd_wcs = str2wcstring(cmd);
         parser.eval(cmd_wcs, io);
@@ -259,7 +261,7 @@ int run_command_list(parser_t &parser, std::vector<std::string> *cmds, const io_
 
 /// Parse the argument list, return the index of the first non-flag arguments.
 static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
-    static const char *const short_opts = "+hPilnvc:C:p:d:f:D:";
+    static const char *const short_opts = "+hPilnvc:C:p:d:f:D:o:";
     static const struct option long_opts[] = {
         {"command", required_argument, nullptr, 'c'},
         {"init-command", required_argument, nullptr, 'C'},
@@ -273,6 +275,7 @@ static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
         {"print-rusage-self", no_argument, nullptr, 1},
         {"print-debug-categories", no_argument, nullptr, 2},
         {"profile", required_argument, nullptr, 'p'},
+        {"profile-startup", required_argument, nullptr, 3},
         {"private", no_argument, nullptr, 'P'},
         {"help", no_argument, nullptr, 'h'},
         {"version", no_argument, nullptr, 'v'},
@@ -352,7 +355,14 @@ static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
                 exit(0);
             }
             case 'p': {
+                // "--profile" - this does not activate profiling right away,
+                // rather it's done after startup is finished.
                 opts->profile_output = optarg;
+                break;
+            }
+            case 3: {
+                // With "--profile-startup" we immediately turn profiling on.
+                opts->profile_startup_output = optarg;
                 g_profiling_active = true;
                 break;
             }
@@ -365,19 +375,8 @@ static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
                 exit(0);
             }
             case 'D': {
-                char *end;
-                long tmp;
-
-                errno = 0;
-                tmp = strtol(optarg, &end, 10);
-
-                if (tmp > 0 && tmp <= 128 && !*end && !errno) {
-                    set_debug_stack_frames(static_cast<int>(tmp));
-                } else {
-                    std::fwprintf(stderr, _(L"Invalid value '%s' for debug-stack-frames flag"),
-                                  optarg);
-                    exit(1);
-                }
+                // TODO: Option is currently useless.
+                // Either remove it or make it work with FLOG.
                 break;
             }
             default: {
@@ -394,7 +393,7 @@ static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
     // command or file to execute and stdin is a tty. Note that the -i or
     // --interactive options also force interactive mode.
     if (opts->batch_cmds.empty() && optind == argc && isatty(STDIN_FILENO)) {
-        set_interactive_session(session_interactivity_t::implied);
+        set_interactive_session(true);
     }
 
     return optind;
@@ -403,7 +402,6 @@ static int fish_parse_opt(int argc, char **argv, fish_cmd_opts_t *opts) {
 int main(int argc, char **argv) {
     int res = 1;
     int my_optind = 0;
-    fish_wcwidth(0);
 
     program_name = L"fish";
     set_main_thread();
@@ -419,10 +417,23 @@ int main(int argc, char **argv) {
         argv = const_cast<char **>(dummy_argv);  //!OCLINT(parameter reassignment)
         argc = 1;                                //!OCLINT(parameter reassignment)
     }
+
+    // Enable debug categories set in FISH_DEBUG.
+    // This is in *addition* to the ones given via --debug.
+    if (const char *debug_categories = getenv("FISH_DEBUG")) {
+        activate_flog_categories_by_pattern(str2wcstring(debug_categories));
+    }
+
     fish_cmd_opts_t opts{};
     my_optind = fish_parse_opt(argc, argv, &opts);
 
     // Direct any debug output right away.
+    // --debug-output takes precedence, otherwise $FISH_DEBUG_OUTPUT is used.
+    if (opts.debug_output.empty()) {
+        const char *var = getenv("FISH_DEBUG_OUTPUT");
+        if (var) opts.debug_output = var;
+    }
+
     FILE *debug_output = nullptr;
     if (!opts.debug_output.empty()) {
         debug_output = fopen(opts.debug_output.c_str(), "w");
@@ -445,17 +456,21 @@ int main(int argc, char **argv) {
     // Apply our options.
     if (opts.is_login) mark_login();
     if (opts.no_exec) mark_no_exec();
-    if (opts.is_interactive_session) set_interactive_session(session_interactivity_t::explicit_);
+    if (opts.is_interactive_session) set_interactive_session(true);
     if (opts.enable_private_mode) start_private_mode(env_stack_t::globals());
 
     // Only save (and therefore restore) the fg process group if we are interactive. See issues
     // #197 and #1002.
-    if (session_interactivity() != session_interactivity_t::not_interactive) {
+    if (is_interactive_session()) {
         save_term_foreground_process_group();
     }
 
-    const struct config_paths_t paths = determine_config_directory_paths(argv[0]);
-    env_init(&paths);
+    struct config_paths_t paths;
+    // If we're not executing, there's no need to find the config.
+    if (!opts.no_exec) {
+        paths = determine_config_directory_paths(argv[0]);
+        env_init(&paths);
+    }
 
     // Set features early in case other initialization depends on them.
     // Start with the ones set in the environment, then those set on the command line (so the
@@ -473,9 +488,23 @@ int main(int argc, char **argv) {
 
     parser_t &parser = parser_t::principal_parser();
 
-    read_init(parser, paths);
+    if (!opts.no_exec) {
+        read_init(parser, paths);
+    }
     // Stomp the exit status of any initialization commands (issue #635).
     parser.set_last_statuses(statuses_t::just(STATUS_CMD_OK));
+
+    // If we're profiling startup to a separate file, write it now.
+    if (!opts.profile_startup_output.empty()
+        && opts.profile_startup_output != opts.profile_output) {
+        parser.emit_profiling(opts.profile_startup_output.c_str());
+
+        // If we are profiling both, ensure the startup data only
+        // ends up in the startup file.
+        parser.clear_profiling();
+    }
+
+    g_profiling_active = !opts.profile_output.empty();
 
     // Run post-config commands specified as arguments, if any.
     if (!opts.postconfig_cmds.empty()) {
@@ -489,10 +518,22 @@ int main(int argc, char **argv) {
             fish_xdm_login_hack_hack_hack_hack(&opts.batch_cmds, argc - my_optind,
                                                argv + my_optind);
         }
+
+        // Pass additional args as $argv.
+        // Note that we *don't* support setting argv[0]/$0, unlike e.g. bash.
+        wcstring_list_t list;
+        for (char **ptr = argv + my_optind; *ptr; ptr++) {
+            list.push_back(str2wcstring(*ptr));
+        }
+        parser.vars().set(L"argv", ENV_DEFAULT, std::move(list));
         res = run_command_list(parser, &opts.batch_cmds, {});
-        reader_set_end_loop(false);
+        parser.libdata().exit_current_script = false;
     } else if (my_optind == argc) {
         // Implicitly interactive mode.
+        if (opts.no_exec && isatty(STDIN_FILENO)) {
+            FLOGF(error, L"no-execute mode enabled and no script given. Exiting");
+            return EXIT_FAILURE;  // above line should always exit
+        }
         res = reader_read(parser, STDIN_FILENO, {});
     } else {
         const char *file = *(argv + (my_optind++));
@@ -530,7 +571,7 @@ int main(int argc, char **argv) {
     restore_term_mode();
     restore_term_foreground_process_group_for_exit();
 
-    if (g_profiling_active) {
+    if (!opts.profile_output.empty()) {
         parser.emit_profiling(opts.profile_output.c_str());
     }
 

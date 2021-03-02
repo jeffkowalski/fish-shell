@@ -47,8 +47,12 @@ void job_group_t::set_pgid(pid_t pgid) {
 
 maybe_t<pid_t> job_group_t::get_pgid() const { return pgid_; }
 
-void job_group_t::populate_group_for_job(job_t *job, const job_group_ref_t &proposed) {
-    assert(!job->group && "Job already has a group");
+// static
+job_group_ref_t job_group_t::resolve_group_for_job(const job_t &job,
+                                                   const cancellation_group_ref_t &cancel_group,
+                                                   const job_group_ref_t &proposed) {
+    assert(!job.group && "Job already has a group");
+    assert(cancel_group && "Null cancel group");
     // Note there's three cases to consider:
     //  nullptr         -> this is a root job, there is no inherited job group
     //  internal        -> the parent is running as part of a simple function execution
@@ -56,10 +60,10 @@ void job_group_t::populate_group_for_job(job_t *job, const job_group_ref_t &prop
     //  non-internal    -> we are running as part of a real pipeline
     // Decide if this job can use an internal group.
     // This is true if it's a simple foreground execution of an internal proc.
-    bool initial_bg = job->is_initially_background();
-    bool first_proc_internal = job->processes.front()->is_internal();
+    bool initial_bg = job.is_initially_background();
+    bool first_proc_internal = job.processes.front()->is_internal();
     bool can_use_internal =
-        !initial_bg && job->processes.size() == 1 && job->processes.front()->is_internal();
+        !initial_bg && job.processes.size() == 1 && job.processes.front()->is_internal();
 
     bool needs_new_group = false;
     if (!proposed) {
@@ -73,27 +77,31 @@ void job_group_t::populate_group_for_job(job_t *job, const job_group_ref_t &prop
         needs_new_group = true;
     }
 
-    job->mut_flags().is_group_root = needs_new_group;
+    if (!needs_new_group) return proposed;
 
-    if (!needs_new_group) {
-        job->group = proposed;
-    } else {
-        properties_t props{};
-        props.job_control = job->wants_job_control();
-        props.wants_terminal = job->wants_job_control() && !job->from_event_handler();
-        props.is_internal = can_use_internal;
-        props.job_id = can_use_internal ? -1 : acquire_job_id();
-        job->group.reset(new job_group_t(props, job->command()));
+    // We share a cancel group unless we are a background job.
+    // For example, if we write "begin ; true ; sleep 1 &; end" the `begin` and `true` should cancel
+    // together, but the `sleep` should not.
+    cancellation_group_ref_t resolved_cg =
+        initial_bg ? cancellation_group_t::create() : cancel_group;
 
-        // Mark if it's foreground.
-        job->group->set_is_foreground(!initial_bg);
+    properties_t props{};
+    props.job_control = job.wants_job_control();
+    props.wants_terminal = job.wants_job_control() && !job.from_event_handler();
+    props.is_internal = can_use_internal;
+    props.job_id = can_use_internal ? -1 : acquire_job_id();
 
-        // Perhaps this job should immediately live in fish's pgroup.
-        // There's two reasons why it may be so:
-        //  1. The job doesn't need job control.
-        //  2. The first process in the job is internal to fish; this needs to own the tty.
-        if (!can_use_internal && (!props.job_control || first_proc_internal)) {
-            job->group->set_pgid(getpgrp());
-        }
+    job_group_ref_t result{new job_group_t(props, resolved_cg, job.command())};
+
+    // Mark if it's foreground.
+    result->set_is_foreground(!initial_bg);
+
+    // Perhaps this job should immediately live in fish's pgroup.
+    // There's two reasons why it may be so:
+    //  1. The job doesn't need job control.
+    //  2. The first process in the job is internal to fish; this needs to own the tty.
+    if (!can_use_internal && (!props.job_control || first_proc_internal)) {
+        result->set_pgid(getpgrp());
     }
+    return result;
 }

@@ -316,10 +316,10 @@ maybe_t<pipe_or_redir_t> pipe_or_redir_t::from_string(const wchar_t *buff) {
         cmd >? file      noclobber redirection
         cmd >>? file     appending noclobber redirection
         cmd 2> file      file redirection with explicit fd
-        cmd >&2 file     fd redirection with no explicit src fd (stdout is used)
-        cmd 1>&2 file    fd redirection with an explicit src fd
-        cmd <&2 file     fd redirection with no explicit src fd (stdin is used)
-        cmd 3<&0 file    fd redirection with an explicit src fd
+        cmd >&2          fd redirection with no explicit src fd (stdout is used)
+        cmd 1>&2         fd redirection with an explicit src fd
+        cmd <&2          fd redirection with no explicit src fd (stdin is used)
+        cmd 3<&0         fd redirection with an explicit src fd
         cmd &> file      redirection with stderr merge
         cmd ^ file       caret (stderr) redirection, perhaps disabled via feature flags
         cmd ^^ file      caret (stderr) redirection, perhaps disabled via feature flags
@@ -687,8 +687,11 @@ bool move_word_state_machine_t::consume_char_punctuation(wchar_t c) {
                 consumed = true;
                 if (iswspace(c)) {
                     state = s_whitespace;
+                } else if (iswalnum(c)) {
+                    state = s_alphanumeric;
                 } else {
-                    // Don't allow switching type (ws->nonws) after non-whitespace.
+                    // Don't allow switching type (ws->nonws) after non-whitespace and
+                    // non-alphanumeric.
                     state = s_rest;
                 }
                 break;
@@ -807,6 +810,7 @@ bool move_word_state_machine_t::consume_char_path_components(wchar_t c) {
 }
 
 bool move_word_state_machine_t::consume_char_whitespace(wchar_t c) {
+    // Consume a "word" of printable characters plus any leading whitespace.
     enum { s_always_one = 0, s_blank, s_graph, s_end };
 
     bool consumed = false;
@@ -814,11 +818,17 @@ bool move_word_state_machine_t::consume_char_whitespace(wchar_t c) {
         switch (state) {
             case s_always_one: {
                 consumed = true;  // always consume the first character
-                state = s_blank;
+                // If it's not whitespace, only consume those from here.
+                if (!iswspace(c)) {
+                    state = s_graph;
+                } else {
+                    // If it's whitespace, keep consuming whitespace until the graphs.
+                    state = s_blank;
+                }
                 break;
             }
             case s_blank: {
-                if (iswblank(c)) {
+                if (iswspace(c)) {
                     consumed = true;  // consumed whitespace
                 } else {
                     state = s_graph;
@@ -826,7 +836,7 @@ bool move_word_state_machine_t::consume_char_whitespace(wchar_t c) {
                 break;
             }
             case s_graph: {
-                if (iswgraph(c)) {
+                if (!iswspace(c)) {
                     consumed = true;  // consumed printable non-space
                 } else {
                     state = s_end;

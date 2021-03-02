@@ -42,7 +42,8 @@
 static char *get_interpreter(const char *command, char *buffer, size_t buff_size);
 
 /// Report the error code \p err for a failed setpgid call.
-void report_setpgid_error(int err, pid_t desired_pgid, const job_t *j, const process_t *p) {
+void report_setpgid_error(int err, bool is_parent, pid_t desired_pgid, const job_t *j,
+                          const process_t *p) {
     char pid_buff[128];
     char job_id_buff[128];
     char getpgid_buff[128];
@@ -57,8 +58,9 @@ void report_setpgid_error(int err, pid_t desired_pgid, const job_t *j, const pro
     narrow_string_safe(argv0, p->argv0());
     narrow_string_safe(command, j->command_wcstr());
 
-    debug_safe(1, "Could not send own process %s, '%s' in job %s, '%s' from group %s to group %s",
-               pid_buff, argv0, job_id_buff, command, getpgid_buff, job_pgid_buff);
+    debug_safe(1, "Could not send %s %s, '%s' in job %s, '%s' from group %s to group %s",
+               is_parent ? "child" : "self", pid_buff, argv0, job_id_buff, command, getpgid_buff,
+               job_pgid_buff);
 
     if (is_windows_subsystem_for_linux() && errno == EPERM) {
         debug_safe(1,
@@ -94,6 +96,20 @@ int execute_setpgid(pid_t pid, pid_t pgroup, bool is_parent) {
             debug_safe(2, "setpgid(2) returned EPERM. Retrying");
             continue;
         }
+#ifdef __BSD__
+        // POSIX.1 doesn't specify that zombie processes are required to be considered extant and/or
+        // children of the parent for purposes of setpgid(2). In particular, FreeBSD (at least up to
+        // 12.2) does not consider a child that has already forked, exec'd, and exited to "exist"
+        // and returns ESRCH (process not found) instead of EACCES (child has called exec).
+        // See https://bugs.freebsd.org/bugzilla/show_bug.cgi?id=251227
+        else if (err == ESRCH && is_parent) {
+            // Handle this just like we would EACCES above, as we're virtually certain that
+            // setpgid(2) was called against a process that was at least at one point in time a
+            // valid child.
+            return 0;
+        }
+#endif
+
         return err;
     }
 }
@@ -360,10 +376,18 @@ void safe_report_exec_error(int err, const char *actual_cmd, const char *const *
             const char *interpreter =
                 get_interpreter(actual_cmd, interpreter_buff, sizeof interpreter_buff);
             if (interpreter && 0 != access(interpreter, X_OK)) {
-                debug_safe(0,
-                           "The file '%s' specified the interpreter '%s', which is not an "
-                           "executable command.",
-                           actual_cmd, interpreter);
+                // Detect windows line endings and complain specifically about them.
+                auto len = strlen(interpreter);
+                if (len && interpreter[len - 1] == '\r') {
+                    debug_safe(0,
+                               "The file uses windows line endings (\\r\\n). Run dos2unix or "
+                               "similar to fix it.");
+                } else {
+                    debug_safe(0,
+                               "The file '%s' specified the interpreter '%s', which is not an "
+                               "executable command.",
+                               actual_cmd, interpreter);
+                }
             } else {
                 debug_safe(0, "The file '%s' does not exist or could not be executed.", actual_cmd);
             }
@@ -401,9 +425,9 @@ static char *get_interpreter(const char *command, char *buffer, size_t buff_size
         close(fd);
     }
 
-    if (std::strncmp(buffer, "#! /", 4) == 0) {
+    if (std::strncmp(buffer, "#! /", const_strlen("#! /")) == 0) {
         return buffer + 3;
-    } else if (std::strncmp(buffer, "#!/", 3) == 0) {
+    } else if (std::strncmp(buffer, "#!/", const_strlen("#!/")) == 0) {
         return buffer + 2;
     }
     return nullptr;

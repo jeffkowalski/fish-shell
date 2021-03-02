@@ -50,14 +50,14 @@ complete -c 'complete test beta2' -r -d 'desc \' desc2 [' -a 'foo bar'
 complete -c complete_test_beta2 -x -n false -A -o test
 complete
 
-# CHECK: complete --no-files -c complete_test_alpha1 -a '(commandline)'
-# CHECK: complete --no-files -c complete_test_alpha2
-# CHECK: complete --no-files -c complete_test_alpha3
-# CHECK: complete --force-files -c t -l fileoption
-# CHECK: complete --no-files -c t -a '(t)'
+# CHECK: complete --no-files complete_test_alpha1 -a '(commandline)'
+# CHECK: complete --no-files complete_test_alpha2
+# CHECK: complete --no-files complete_test_alpha3
+# CHECK: complete --force-files t -l fileoption
+# CHECK: complete --no-files t -a '(t)'
 # CHECK: complete -p '/complete test/beta1' -s Z -d 'desc, desc'
-# CHECK: complete --requires-param -c 'complete test beta2' -d desc\ \'\ desc2\ \[ -a 'foo bar'
-# CHECK: complete --exclusive -c complete_test_beta2 -o test -n false
+# CHECK: complete --requires-param 'complete test beta2' -d desc\ \'\ desc2\ \[ -a 'foo bar'
+# CHECK: complete --exclusive complete_test_beta2 -o test -n false
 # CHECK: complete {{.*}}
 # CHECK: complete {{.*}}
 # CHECK: complete {{.*}}
@@ -65,7 +65,7 @@ complete
 
 # Recursive calls to complete (see #3474)
 complete -c complete_test_recurse1 -xa '(echo recursing 1>&2; complete -C"complete_test_recurse1 ")'
-complete -C'complete_test_recurse1 '
+LANG=C complete -C'complete_test_recurse1 '
 # CHECKERR: recursing
 # CHECKERR: recursing
 # CHECKERR: recursing
@@ -90,7 +90,7 @@ complete -C'complete_test_recurse1 '
 # CHECKERR: recursing
 # CHECKERR: recursing
 # CHECKERR: recursing
-# CHECKERR: complete: maximum recursion depth reached
+# CHECKERR: error: completion reached maximum recursion depth, possible cycle?
 
 # short options
 complete -c foo -f -a non-option-argument
@@ -353,3 +353,37 @@ begin
 
     rm -rf $parened_path
 end
+
+# This should only list the completions for `banana`
+complete -c banana -a '1 2 3'
+complete -c banana
+#CHECK: complete banana -a '1 2 3'
+
+# "-c" is optional
+complete banana -a bar
+complete banana
+#CHECK: complete banana -a bar
+#CHECK: complete banana -a '1 2 3'
+
+# "-a" ain't
+complete banana bar
+#CHECKERR: complete: Too many arguments
+#CHECKERR:
+#CHECKERR: {{.*}}checks/complete.fish (line {{\d+}}):
+#CHECKERR: complete banana bar
+#CHECKERR: ^
+#CHECKERR:
+#CHECKERR: (Type 'help complete' for related documentation)
+
+# Multiple commands can be specified, in that case "-c" (or "-p") is mandatory.
+complete -c kapstachelbeere -c physalis -a arg
+complete -c kapstachelbeere -c physalis
+# CHECK: complete kapstachelbeere -a arg
+# CHECK: complete physalis -a arg
+
+set -l dir (mktemp -d)
+echo >$dir/target
+complete -C ': $dir/'
+# CHECK: $dir/target
+rm $dir/target
+rmdir $dir

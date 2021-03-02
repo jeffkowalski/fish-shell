@@ -221,26 +221,6 @@ const wchar_t *parser_t::get_block_desc(block_type_t block) {
     return _(UNKNOWN_BLOCK);
 }
 
-#if 0
-// TODO: Lint says this isn't used (which is true). Should this be removed?
-wcstring parser_t::block_stack_description() const {
-    wcstring result;
-    size_t idx = this->block_count();
-    size_t spaces = 0;
-    while (idx--) {
-        if (spaces > 0) {
-            result.push_back(L'\n');
-        }
-        for (size_t j = 0; j < spaces; j++) {
-            result.push_back(L' ');
-        }
-        result.append(this->block_at_index(idx)->description());
-        spaces++;
-    }
-    return result;
-}
-#endif
-
 const block_t *parser_t::block_at_index(size_t idx) const {
     return idx < block_list.size() ? &block_list[idx] : nullptr;
 }
@@ -290,6 +270,10 @@ static void print_profile(const std::deque<profile_item_t> &items, FILE *out) {
             return;
         }
     }
+}
+
+void parser_t::clear_profiling() {
+    profile_items.clear();
 }
 
 void parser_t::emit_profiling(const char *path) const {
@@ -679,6 +663,10 @@ eval_res_t parser_t::eval_node(const parsed_source_ref_t &ps, const T &node,
         }
     }
 
+    // If we are provided a cancellation group, use it; otherwise create one.
+    cancellation_group_ref_t cancel_group =
+        job_group ? job_group->cancel_group : cancellation_group_t::create();
+
     // A helper to detect if we got a signal.
     // This includes both signals sent to fish (user hit control-C while fish is foreground) and
     // signals from the job group (e.g. some external job terminated with SIGQUIT).
@@ -686,7 +674,7 @@ eval_res_t parser_t::eval_node(const parsed_source_ref_t &ps, const T &node,
         // Did fish itself get a signal?
         int sig = signal_check_cancel();
         // Has this job group been cancelled?
-        if (!sig && job_group) sig = job_group->get_cancel_signal();
+        if (!sig) sig = cancel_group->get_cancel_signal();
         return sig;
     };
 
@@ -709,8 +697,8 @@ eval_res_t parser_t::eval_node(const parsed_source_ref_t &ps, const T &node,
 
     // Create and set a new execution context.
     using exc_ctx_ref_t = std::unique_ptr<parse_execution_context_t>;
-    scoped_push<exc_ctx_ref_t> exc(&execution_context,
-                                   make_unique<parse_execution_context_t>(ps, op_ctx, block_io));
+    scoped_push<exc_ctx_ref_t> exc(&execution_context, make_unique<parse_execution_context_t>(
+                                                           ps, op_ctx, cancel_group, block_io));
 
     // Check the exec count so we know if anything got executed.
     const size_t prev_exec_count = libdata().exec_count;
@@ -725,7 +713,6 @@ eval_res_t parser_t::eval_node(const parsed_source_ref_t &ps, const T &node,
     job_reap(*this, false);  // reap again
 
     if (int sig = check_cancel_signal()) {
-        // We were signalled.
         return proc_status_t::from_signal(sig);
     } else {
         auto status = proc_status_t::from_exit_code(this->get_last_status());

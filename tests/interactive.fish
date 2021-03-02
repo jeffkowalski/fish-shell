@@ -4,11 +4,6 @@
 # should be running it via `make test` to ensure the environment is properly
 # setup.
 
-if test "$TRAVIS_OS_NAME" = osx
-    echo "Skipping interactive tests on macOS on Travis"
-    exit 0
-end
-
 # Set this var to modify behavior of the code being tests. Such as avoiding running
 # `fish_update_completions` when running tests.
 set -gx FISH_UNIT_TESTS_RUNNING 1
@@ -25,6 +20,8 @@ set -e ITERM_PROFILE
 # Test files specified on commandline, or all pexpect files.
 if set -q argv[1]
     set pexpect_files_to_test pexpects/$argv.py
+else if set -q FISH_PEXPECT_FILES
+    set pexpect_files_to_test (string replace -r '^.*/(?=pexpects/)' '' -- $FISH_PEXPECT_FILES)
 else
     set pexpect_files_to_test pexpects/*.py
 end
@@ -68,7 +65,10 @@ if not python3 -c 'import pexpect'
 end
 for i in $pexpect_files_to_test
     if not test_pexpect_file $i
-        set failed $failed $i
+        say yellow "Trying $i for a second time"
+        if not test_pexpect_file $i
+            set failed $failed $i
+        end
     end
 end
 

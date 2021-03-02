@@ -3,63 +3,29 @@ Guidelines For Developers
 
 This document provides guidelines for making changes to the fish-shell
 project. This includes rules for how to format the code, naming
-conventions, et cetera. Generally known as the style of the code. It
-also includes recommended best practices such as creating a Travis CI
-account so you can verify that your changes pass all the tests before
-making a pull request.
+conventions, et cetera.
 
-See the bottom of this document for help on installing the linting and
-style reformatting tools discussed in the following sections.
+In short:
 
-Fish source should limit the C++ features it uses to those available in
-C++11. It should not use exceptions.
+- Be conservative in what you need (``C++11``, few dependencies)
+- Use automated tools to help you (including ``make test``, ``build_tools/style.fish`` and ``make lint``)
 
-Before introducing a new dependency, please make it optional with
-graceful failure if possible. Add any new dependencies to the README.rst
-under the *Running* and/or *Building* sections.
+General
+-------
 
-Versioning
-----------
+Fish uses C++11. Newer C++ features should not be used to make it possible to use on older systems.
 
-The fish version is constructed by the *build_tools/git_version_gen.sh*
-script. For developers the version is the branch name plus the output of
-``git describe --always --dirty``. Normally the main part of the version
-will be the closest annotated tag. Which itself is usually the most
-recent release number (e.g., ``2.6.0``).
+It does not use exceptions, they are disabled at build time with ``-fno-exceptions``.
 
-Include What You Use
---------------------
+Don't introduce new dependencies unless absolutely necessary, and if you do,
+please make it optional with graceful failure if possible.
+Add any new dependencies to the README.rst under the *Running* and/or *Building* sections.
 
-You should not depend on symbols being visible to a ``*.cpp`` module
-from ``#include`` statements inside another header file. In other words
-if your module does ``#include "common.h"`` and that header does
-``#include "signal.h"`` your module should not assume the sub-include is
-present. It should instead directly ``#include "signal.h"`` if it needs
-any symbol from that header. That makes the actual dependencies much
-clearer. It also makes it easy to modify the headers included by a
-specific header file without having to worry that will break any module
-(or header) that includes a particular header.
+This also goes for completion scripts and functions - if at all possible, they should only use
+POSIX-compatible invocations of any tools, and no superfluous dependencies.
 
-To help enforce this rule the ``make lint`` (and ``make lint-all``)
-command will run the
-`include-what-you-use <https://include-what-you-use.org/>`__ tool. You
-can find the IWYU project on
-`github <https://github.com/include-what-you-use/include-what-you-use>`__.
-
-To install the tool on OS X you’ll need to add a
-`formula <https://github.com/jasonmp85/homebrew-iwyu>`__ then install
-it:
-
-::
-
-   brew tap jasonmp85/iwyu
-   brew install iwyu
-
-On Ubuntu you can install it via ``apt-get``:
-
-::
-
-   sudo apt-get install iwyu
+E.g. some completions deal with JSON data. In those it's preferable to use python to handle it,
+as opposed to ``jq``, because fish already optionally uses python elsewhere. (It also happens to be quite a bit *faster*)
 
 Lint Free Code
 --------------
@@ -68,10 +34,6 @@ Automated analysis tools like cppcheck and oclint can point out
 potential bugs or code that is extremely hard to understand. They also
 help ensure the code has a consistent style and that it avoids patterns
 that tend to confuse people.
-
-Ultimately we want lint free code. However, at the moment a lot of
-cleanup is required to reach that goal. For now simply try to avoid
-introducing new lint.
 
 To make linting the code easy there are two make targets: ``lint`` and
 ``lint-all``. The latter does exactly what the name implies. The former
@@ -82,8 +44,6 @@ Fish has custom cppcheck rules in the file ``.cppcheck.rule``. These
 help catch mistakes such as using ``wcwidth()`` rather than
 ``fish_wcwidth()``. Please add a new rule if you find similar mistakes
 being made.
-
-Fish also depends on ``diff`` and ``expect`` for its tests.
 
 Dealing With Lint Warnings
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -151,10 +111,10 @@ changes.
 Configuring Your Editor for Fish C++ Code
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-ViM
+Vim
 ^^^
 
-As of ViM 7.4 it does not recognize triple-slash comments as used by
+As of Vim 7.4 it does not recognize triple-slash comments as used by
 Doxygen and the OS X Xcode IDE to flag comments that explain the
 following C symbol. This means the ``gq`` key binding to reformat such
 comments doesn’t behave as expected. You can fix that by adding the
@@ -164,14 +124,9 @@ following to your vimrc:
 
    autocmd Filetype c,cpp setlocal comments^=:///
 
-If you use ViM I recommend the `vim-clang-format
+If you use Vim I recommend the `vim-clang-format
 plugin <https://github.com/rhysd/vim-clang-format>`__ by
 [@rhysd](https://github.com/rhysd).
-
-You can also get ViM to provide reasonably correct behavior by
-installing
-
-http://www.vim.org/scripts/script.php?script_id=2636
 
 Emacs
 ^^^^^
@@ -181,7 +136,7 @@ If you use Emacs: TBD
 Configuring Your Editor for Fish Scripts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you use ViM: Install `vim-fish <https://github.com/dag/vim-fish>`__,
+If you use Vim: Install `vim-fish <https://github.com/dag/vim-fish>`__,
 make sure you have syntax and filetype functionality in ``~/.vimrc``:
 
 ::
@@ -217,18 +172,14 @@ made to run fish_indent via e.g.
 Suppressing Reformatting of C++ Code
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-If you have a good reason for doing so you can tell ``clang-format`` to
-not reformat a block of code by enclosing it in comments like this:
+You can tell ``clang-format`` to not reformat a block by enclosing it in
+comments like this:
 
 ::
 
    // clang-format off
    code to ignore
    // clang-format on
-
-However, as I write this there are no places in the code where we use
-this and I can’t think of any legitimate reasons for exempting blocks of
-code from clang-format.
 
 Fish Script Style Guide
 -----------------------
@@ -291,15 +242,26 @@ Testing
 -------
 
 The source code for fish includes a large collection of tests. If you
-are making any changes to fish, running these tests is mandatory to make
+are making any changes to fish, running these tests is a good way to make
 sure the behaviour remains consistent and regressions are not
 introduced. Even if you don’t run the tests on your machine, they will
-still be run via the `Travis
-CI <https://travis-ci.org/fish-shell/fish-shell>`__ service.
+still be run via Github Actions.
 
 You are strongly encouraged to add tests when changing the functionality
 of fish, especially if you are fixing a bug to help ensure there are no
 regressions in the future (i.e., we don’t reintroduce the bug).
+
+The tests can be found in three places:
+
+- src/fish_tests.cpp for tests to the core C++ code
+- tests/checks for script tests, run by `littlecheck <https://github.com/ridiculousfish/littlecheck>`__
+- tests/pexpects for interactive tests using `pexpect <https://pexpect.readthedocs.io/en/stable/>`__
+
+When in doubt, the bulk of the tests should be added as a littlecheck test in tests/checks, as they are the easiest to modify and run, and much faster and more dependable than pexpect tests. The syntax is fairly self-explanatory. It's a fish script with the expected output in ``# CHECK:`` or ``# CHECKERR:`` (for stderr) comments.
+
+fish_tests.cpp is mostly useful for unit tests - if you wish to test that a function does the correct thing for given input, use it.
+
+The pexpects are written in python and can simulate input and output to/from a terminal, so they are needed for anything that needs actual interactivity. The runner is in build_tools/pexpect_helper.py, in case you need to modify something there.
 
 Local testing
 ~~~~~~~~~~~~~
@@ -310,32 +272,6 @@ The tests can be run on your local computer on all operating systems.
 
    cmake path/to/fish-shell
    make test
-
-Travis CI Build and Test
-~~~~~~~~~~~~~~~~~~~~~~~~
-
-The Travis Continuous Integration services can be used to test your
-changes using multiple configurations. This is the same service that the
-fish-shell project uses to ensure new changes haven’t broken anything.
-Thus it is a really good idea that you leverage Travis CI before making
-a pull request to avoid potential embarrassment at breaking the build.
-
-You will need to `fork the fish-shell repository on
-GitHub <https://help.github.com/articles/fork-a-repo/>`__, then setup
-Travis to test your changes before making a pull request.
-
-1. `Sign in to Travis CI <https://travis-ci.org/auth>`__ with your
-   GitHub account, accepting the GitHub access permissions confirmation.
-2. Once you’re signed in and your repositories are synchronized, go to
-   your `profile page <https://travis-ci.org/profile>`__ and enable the
-   fish-shell repository.
-3. Push your changes to GitHub.
-
-You’ll receive an email when the tests are complete telling you whether
-or not any tests failed.
-
-You’ll find the configuration used to control Travis in the
-``.travis.yml`` file.
 
 Git hooks
 ~~~~~~~~~
@@ -413,7 +349,7 @@ To install the lint checkers on Debian-based Linux distributions:
    sudo apt-get install oclint
    sudo apt-get install cppcheck
 
-Installing the Reformatting Tools
+Installing the Formatting Tools
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Mac OS X:
@@ -426,15 +362,7 @@ Debian-based:
 
 ::
 
-   apt-cache search clang-format
-
-Above will list all the versions available. Pick the newest one
-available (3.9 for Ubuntu 16.10 as I write this) and install it:
-
-::
-
-   sudo apt-get install clang-format-3.9
-   sudo ln -s /usr/bin/clang-format-3.9 /usr/bin/clang-format
+   sudo apt-get install clang-format
 
 Message Translations
 --------------------
@@ -476,14 +404,19 @@ stored in the ``po`` directory, named ``LANG.po``, where ``LANG`` is the
 two letter ISO 639-1 language code of the target language (eg ``de`` for
 German).
 
-To create a new translation, for example for German: \* generate a
-``messages.pot`` file by running ``build_tools/fish_xgettext.fish`` from
-the source tree \* copy ``messages.pot`` to ``po/LANG.po`` ()
+To create a new translation, for example for German:
 
-To update a translation: \* generate a ``messages.pot`` file by running
-``build_tools/fish_xgettext.fish`` from the source tree \* update the
-existing translation by running
-``msgmerge --update --no-fuzzy-matching po/LANG.po messages.pot``
+* generate a ``messages.pot`` file by running ``build_tools/fish_xgettext.fish`` from
+  the source tree
+* copy ``messages.pot`` to ``po/LANG.po``
+
+To update a translation:
+
+* generate a ``messages.pot`` file by running
+  ``build_tools/fish_xgettext.fish`` from the source tree
+
+* update the existing translation by running
+  ``msgmerge --update --no-fuzzy-matching po/LANG.po messages.pot``
 
 Many tools are available for editing translation files, including
 command-line and graphical user interface programs.
@@ -497,3 +430,46 @@ recommended deletions.
 Read the `translations
 wiki <https://github.com/fish-shell/fish-shell/wiki/Translations>`__ for
 more information.
+
+Versioning
+----------
+
+The fish version is constructed by the *build_tools/git_version_gen.sh*
+script. For developers the version is the branch name plus the output of
+``git describe --always --dirty``. Normally the main part of the version
+will be the closest annotated tag. Which itself is usually the most
+recent release number (e.g., ``2.6.0``).
+
+Include What You Use
+--------------------
+
+You should not depend on symbols being visible to a ``*.cpp`` module
+from ``#include`` statements inside another header file. In other words
+if your module does ``#include "common.h"`` and that header does
+``#include "signal.h"`` your module should not assume the sub-include is
+present. It should instead directly ``#include "signal.h"`` if it needs
+any symbol from that header. That makes the actual dependencies much
+clearer. It also makes it easy to modify the headers included by a
+specific header file without having to worry that will break any module
+(or header) that includes a particular header.
+
+To help enforce this rule the ``make lint`` (and ``make lint-all``)
+command will run the
+`include-what-you-use <https://include-what-you-use.org/>`__ tool. You
+can find the IWYU project on
+`github <https://github.com/include-what-you-use/include-what-you-use>`__.
+
+To install the tool on OS X you’ll need to add a
+`formula <https://github.com/jasonmp85/homebrew-iwyu>`__ then install
+it:
+
+::
+
+   brew tap jasonmp85/iwyu
+   brew install iwyu
+
+On Ubuntu you can install it via ``apt-get``:
+
+::
+
+   sudo apt-get install iwyu

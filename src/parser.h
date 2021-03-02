@@ -148,8 +148,12 @@ struct library_data_t {
     /// Last reader run count.
     uint64_t last_exec_run_counter{UINT64_MAX};
 
-    /// Number of recursive calls to builtin_complete().
-    uint32_t builtin_complete_recursion_level{0};
+    /// Number of recursive calls to the internal completion function.
+    uint32_t complete_recursion_level{0};
+
+    /// If we're currently repainting the commandline.
+    /// Useful to stop infinite loops.
+    bool is_repaint{false};
 
     /// Whether we called builtin_complete -C without parameter.
     bool builtin_complete_current_commandline{false};
@@ -182,10 +186,18 @@ struct library_data_t {
     bool suppress_fish_trace{false};
 
     /// Whether we should break or continue the current loop.
+    /// This is set by the 'break' and 'continue' commands.
     enum loop_status_t loop_status { loop_status_t::normals };
 
     /// Whether we should return from the current function.
+    /// This is set by the 'return' command.
     bool returning{false};
+
+    /// Whether we should stop executing.
+    /// This is set by the 'exit' command, and unset after 'reader_read'.
+    /// Note this only exits up to the "current script boundary." That is, a call to exit within a
+    /// 'source' or 'read' command will only exit up to that command.
+    bool exit_current_script{false};
 
     /// The read limit to apply to captured subshell output, or 0 for none.
     size_t read_limit{0};
@@ -387,6 +399,9 @@ class parser_t : public std::enable_shared_from_this<parser_t> {
     /// The parser_t will deallocate it.
     /// If profiling is not active, this returns nullptr.
     profile_item_t *create_profile_item();
+
+    /// Remove the profiling items.
+    void clear_profiling();
 
     /// Output profiling data to the given filename.
     void emit_profiling(const char *path) const;

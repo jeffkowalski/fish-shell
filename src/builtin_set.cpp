@@ -268,9 +268,9 @@ static bool validate_path_warning_on_colons(const wchar_t *cmd,
     // where we are temporarily shadowing a variable, we want to compare against the shadowed value,
     // not the (missing) local value. Also don't bother to complain about relative paths, which
     // don't start with /.
-    wcstring_list_t existing_values;
     const auto existing_variable = vars.get(key, ENV_DEFAULT);
-    if (!existing_variable.missing_or_empty()) existing_variable->to_list(existing_values);
+    const wcstring_list_t &existing_values =
+        existing_variable ? existing_variable->as_list() : wcstring_list_t{};
 
     for (const wcstring &dir : list) {
         if (!string_prefixes_string(L"/", dir) || contains(existing_values, dir)) {
@@ -342,13 +342,13 @@ static void handle_env_return(int retval, const wchar_t *cmd, const wchar_t *key
 /// Call vars.set. If this is a path variable, e.g. PATH, validate the elements. On error, print a
 /// description of the problem to stderr.
 static int env_set_reporting_errors(const wchar_t *cmd, const wchar_t *key, int scope,
-                                    const wcstring_list_t &list, io_streams_t &streams,
-                                    env_stack_t &vars, std::vector<event_t> *evts) {
+                                    wcstring_list_t list, io_streams_t &streams, env_stack_t &vars,
+                                    std::vector<event_t> *evts) {
     if (is_path_variable(key) && !validate_path_warning_on_colons(cmd, key, list, streams, vars)) {
         return STATUS_CMD_ERROR;
     }
 
-    int retval = vars.set(key, scope | ENV_USER, list, evts);
+    int retval = vars.set(key, scope | ENV_USER, std::move(list), evts);
     handle_env_return(retval, cmd, key, streams);
 
     return retval;
@@ -371,33 +371,48 @@ static int parse_index(std::vector<long> &indexes, wchar_t *src, int scope, io_s
     p++;
 
     auto var_str = vars.get(src, scope);
-    wcstring_list_t var;
-    if (var_str) var_str->to_list(var);
+    size_t varsize = 0;
+    if (var_str) varsize = var_str->as_list().size();
 
     int count = 0;
 
     while (*p != L']') {
         const wchar_t *end;
-        long l_ind = fish_wcstol(p, &end);
-        if (errno > 0) {  // ignore errno == -1 meaning the int did not end with a '\0'
-            streams.err.append_format(_(L"%ls: Invalid index starting at '%ls'\n"), L"set", src);
-            return -1;
-        }
-        p = const_cast<wchar_t *>(end);
-
-        // Convert negative index to a positive index.
-        if (l_ind < 0) l_ind = var.size() + l_ind + 1;
-
-        if (*p == L'.' && *(p + 1) == L'.') {
-            p += 2;
-            long l_ind2 = fish_wcstol(p, &end);
+        long l_ind;
+        if (indexes.empty() && *p == L'.' && p[1] == L'.') {
+            // If we are at the first index expression, a missing start-index means the range starts
+            // at the first item.
+            l_ind = 1;  // first index
+        } else {
+            l_ind = fish_wcstol(p, &end);
             if (errno > 0) {  // ignore errno == -1 meaning the int did not end with a '\0'
+                streams.err.append_format(_(L"%ls: Invalid index starting at '%ls'\n"), L"set",
+                                          src);
                 return -1;
             }
             p = const_cast<wchar_t *>(end);
+        }
+
+        // Convert negative index to a positive index.
+        if (l_ind < 0) l_ind = varsize + l_ind + 1;
+
+        if (*p == L'.' && *(p + 1) == L'.') {
+            p += 2;
+            long l_ind2;
+            // If we are at the last index range expression, a missing end-index means the range
+            // spans until the last item.
+            if (indexes.empty() && *p == L']') {
+                l_ind2 = -1;
+            } else {
+                l_ind2 = fish_wcstol(p, &end);
+                if (errno > 0) {  // ignore errno == -1 meaning the int did not end with a '\0'
+                    return -1;
+                }
+                p = const_cast<wchar_t *>(end);
+            }
 
             // Convert negative index to a positive index.
-            if (l_ind2 < 0) l_ind2 = var.size() + l_ind2 + 1;
+            if (l_ind2 < 0) l_ind2 = varsize + l_ind2 + 1;
 
             int direction = l_ind2 < l_ind ? -1 : 1;
             for (long jjj = l_ind; jjj * direction <= l_ind2 * direction; jjj += direction) {
@@ -484,8 +499,8 @@ static int builtin_set_list(const wchar_t *cmd, set_cmd_opts_t &opts, int argc, 
         if (!names_only) {
             wcstring val;
             if (opts.shorten_ok && key == L"history") {
-                history_t *history =
-                    &history_t::history_with_name(history_session_id(parser.vars()));
+                std::shared_ptr<history_t> history =
+                    history_t::with_name(history_session_id(parser.vars()));
                 for (size_t i = 1; i < history->size() && val.size() < 64; i++) {
                     if (i > 1) val += L' ';
                     val += expand_escape_string(history->item_at_index(i).str());
@@ -536,11 +551,12 @@ static int builtin_set_query(const wchar_t *cmd, set_cmd_opts_t &opts, int argc,
 
         if (idx_count) {
             wcstring_list_t result;
+            size_t varsize = 0;
             auto dest_str = parser.vars().get(dest, scope);
-            if (dest_str) dest_str->to_list(result);
+            if (dest_str) varsize = dest_str->as_list().size();
 
             for (auto idx : indexes) {
-                if (idx < 1 || static_cast<size_t>(idx) > result.size()) retval++;
+                if (idx < 1 || static_cast<size_t>(idx) > varsize) retval++;
             }
         } else {
             if (!parser.vars().get(arg, scope)) retval++;
@@ -641,54 +657,60 @@ static int builtin_set_show(const wchar_t *cmd, const set_cmd_opts_t &opts, int 
 /// Erase a variable.
 static int builtin_set_erase(const wchar_t *cmd, set_cmd_opts_t &opts, int argc, wchar_t **argv,
                              parser_t &parser, io_streams_t &streams) {
-    if (argc != 1) {
-        streams.err.append_format(BUILTIN_ERR_ARG_COUNT2, cmd, L"--erase", 1, argc);
-        builtin_print_error_trailer(parser, streams.err, cmd);
-        return STATUS_CMD_ERROR;
-    }
+    int ret = STATUS_CMD_OK;
+    for (int i = 0; i < argc; i++) {
+        int scope =
+            compute_scope(opts);  // calculate the variable scope based on the provided options
+        wchar_t *dest = argv[i];
 
-    int scope = compute_scope(opts);  // calculate the variable scope based on the provided options
-    wchar_t *dest = argv[0];
-
-    std::vector<long> indexes;
-    int idx_count = parse_index(indexes, dest, scope, streams, parser.vars());
-    if (idx_count == -1) {
-        builtin_print_error_trailer(parser, streams.err, cmd);
-        return STATUS_CMD_ERROR;
-    }
-
-    int retval;
-    if (!valid_var_name(dest)) {
-        streams.err.append_format(BUILTIN_ERR_VARNAME, cmd, dest);
-        builtin_print_error_trailer(parser, streams.err, cmd);
-        return STATUS_INVALID_ARGS;
-    }
-
-    std::vector<event_t> evts;
-    if (idx_count == 0) {  // unset the var
-        retval = parser.vars().remove(dest, scope, &evts);
-        // When a non-existent-variable is unset, return ENV_NOT_FOUND as $status
-        // but do not emit any errors at the console as a compromise between user
-        // friendliness and correctness.
-        if (retval != ENV_NOT_FOUND) {
-            handle_env_return(retval, cmd, dest, streams);
+        std::vector<long> indexes;
+        int idx_count = parse_index(indexes, dest, scope, streams, parser.vars());
+        if (idx_count == -1) {
+            builtin_print_error_trailer(parser, streams.err, cmd);
+            return STATUS_CMD_ERROR;
         }
-    } else {  // remove just the specified indexes of the var
-        const auto dest_var = parser.vars().get(dest, scope);
-        if (!dest_var) return STATUS_CMD_ERROR;
-        wcstring_list_t result;
-        dest_var->to_list(result);
-        erase_values(result, indexes);
-        retval = env_set_reporting_errors(cmd, dest, scope, result, streams, parser.vars(), &evts);
-    }
 
-    // Fire any events.
-    for (const auto &evt : evts) {
-        event_fire(parser, evt);
-    }
+        int retval;
+        if (!valid_var_name(dest)) {
+            streams.err.append_format(BUILTIN_ERR_VARNAME, cmd, dest);
+            builtin_print_error_trailer(parser, streams.err, cmd);
+            return STATUS_INVALID_ARGS;
+        }
 
-    if (retval != STATUS_CMD_OK) return retval;
-    return check_global_scope_exists(cmd, opts, dest, streams, parser);
+        std::vector<event_t> evts;
+        if (idx_count == 0) {  // unset the var
+            retval = parser.vars().remove(dest, scope, &evts);
+            // When a non-existent-variable is unset, return ENV_NOT_FOUND as $status
+            // but do not emit any errors at the console as a compromise between user
+            // friendliness and correctness.
+            if (retval != ENV_NOT_FOUND) {
+                handle_env_return(retval, cmd, dest, streams);
+            }
+        } else {  // remove just the specified indexes of the var
+            const auto dest_var = parser.vars().get(dest, scope);
+            if (!dest_var) return STATUS_CMD_ERROR;
+            wcstring_list_t result;
+            dest_var->to_list(result);
+            erase_values(result, indexes);
+            retval = env_set_reporting_errors(cmd, dest, scope, std::move(result), streams,
+                                              parser.vars(), &evts);
+        }
+
+        // Fire any events.
+        for (const auto &evt : evts) {
+            event_fire(parser, evt);
+        }
+
+        // Set $status to the last error value.
+        // This is cheesy, but I don't expect this to be checked often.
+        if (retval != STATUS_CMD_OK) {
+            ret = retval;
+        } else {
+            retval = check_global_scope_exists(cmd, opts, dest, streams, parser);
+            if (retval != STATUS_CMD_OK) ret = retval;
+        }
+    }
+    return ret;
 }
 
 /// This handles the common case of setting the entire var to a set of values.
@@ -702,10 +724,12 @@ static int set_var_array(const wchar_t *cmd, const set_cmd_opts_t &opts, const w
         if (opts.prepend) {
             for (int i = 0; i < argc; i++) new_values.push_back(argv[i]);
         }
+
         auto var_str = parser.vars().get(varname, ENV_DEFAULT);
-        wcstring_list_t var_array;
-        if (var_str) var_str->to_list(var_array);
-        new_values.insert(new_values.end(), var_array.begin(), var_array.end());
+        if (var_str) {
+            const auto &var_array = var_str->as_list();
+            new_values.insert(new_values.end(), var_array.begin(), var_array.end());
+        }
 
         if (opts.append) {
             for (int i = 0; i < argc; i++) new_values.push_back(argv[i]);
@@ -792,8 +816,8 @@ static int builtin_set_set(const wchar_t *cmd, set_cmd_opts_t &opts, int argc, w
     if (retval != STATUS_CMD_OK) return retval;
 
     std::vector<event_t> evts;
-    retval =
-        env_set_reporting_errors(cmd, varname, scope, new_values, streams, parser.vars(), &evts);
+    retval = env_set_reporting_errors(cmd, varname, scope, std::move(new_values), streams,
+                                      parser.vars(), &evts);
     // Fire any events.
     for (const auto &evt : evts) {
         event_fire(parser, evt);

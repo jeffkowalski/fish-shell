@@ -57,10 +57,9 @@
 /// The signals that signify crashes to us.
 static const int crashsignals[] = {SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGSEGV, SIGSYS};
 
-static relaxed_atomic_t<session_interactivity_t> s_is_interactive_session{
-    session_interactivity_t::not_interactive};
-session_interactivity_t session_interactivity() { return s_is_interactive_session; }
-void set_interactive_session(session_interactivity_t flag) { s_is_interactive_session = flag; }
+static relaxed_atomic_bool_t s_is_interactive_session{false};
+bool is_interactive_session() { return s_is_interactive_session; }
+void set_interactive_session(bool flag) { s_is_interactive_session = flag; }
 
 static relaxed_atomic_bool_t s_is_login{false};
 bool get_login() { return s_is_login; }
@@ -230,18 +229,7 @@ void print_exit_warning_for_jobs(const job_list_t &jobs) {
     fputws(L"\n", stdout);
     fputws(_(L"A second attempt to exit will terminate them.\n"), stdout);
     fputws(_(L"Use 'disown PID' to remove jobs from the list without terminating them.\n"), stdout);
-}
-
-void job_mark_process_as_failed(const std::shared_ptr<job_t> &job, const process_t *failed_proc) {
-    // The given process failed to even lift off (e.g. posix_spawn failed) and so doesn't have a
-    // valid pid. Mark it and everything after it as dead.
-    bool found = false;
-    for (process_ptr_t &p : job->processes) {
-        found = found || (p.get() == failed_proc);
-        if (found) {
-            p->completed = true;
-        }
-    }
+    reader_schedule_prompt_repaint();
 }
 
 /// Set the status of \p proc to \p status.
@@ -260,9 +248,9 @@ static void handle_child_status(const shared_ptr<job_t> &job, process_t *proc,
     if (status.signal_exited()) {
         int sig = status.signal_code();
         if (sig == SIGINT || sig == SIGQUIT) {
-            if (session_interactivity() != session_interactivity_t::not_interactive) {
+            if (is_interactive_session()) {
                 // Mark the job group as cancelled.
-                job->group->set_cancel_signal(sig);
+                job->group->cancel_with_signal(sig);
             } else {
                 // Deliver the SIGINT or SIGQUIT signal to ourself since we're not interactive.
                 struct sigaction act;
@@ -280,6 +268,11 @@ process_t::process_t() = default;
 
 void process_t::check_generations_before_launch() {
     gens_ = topic_monitor_t::principal().current_generations();
+}
+
+void process_t::mark_aborted_before_launch() {
+    completed = true;
+    status = proc_status_t::from_exit_code(EXIT_FAILURE);
 }
 
 bool process_t::is_internal() const {
@@ -387,82 +380,94 @@ static void process_mark_finished_children(parser_t &parser, bool block_ok) {
     // Get the exit and signal generations of all reapable processes.
     // The exit generation tells us if we have an exit; the signal generation allows for detecting
     // SIGHUP and SIGINT.
-    // Get the gen count of all reapable processes.
-    topic_set_t reaptopics{};
-    generation_list_t gens{};
-    gens.fill(invalid_generation);
+    // Go through each process and figure out if and how it wants to be reaped.
+    generation_list_t reapgens = generation_list_t::invalids();
     for (const auto &j : parser.jobs()) {
         for (const auto &proc : j->processes) {
-            if (auto mtopic = j->reap_topic_for_process(proc.get())) {
-                topic_t topic = *mtopic;
-                reaptopics.set(topic);
-                gens[topic] = std::min(gens[topic], proc->gens_[topic]);
+            if (!j->can_reap(proc)) continue;
 
-                reaptopics.set(topic_t::sighupint);
-                gens[topic_t::sighupint] =
-                    std::min(gens[topic_t::sighupint], proc->gens_[topic_t::sighupint]);
+            if (proc->pid > 0) {
+                // Reaps with a pid.
+                reapgens.set_min_from(topic_t::sigchld, proc->gens_);
+                reapgens.set_min_from(topic_t::sighupint, proc->gens_);
+            }
+            if (proc->internal_proc_) {
+                // Reaps with an internal process.
+                reapgens.set_min_from(topic_t::internal_exit, proc->gens_);
+                reapgens.set_min_from(topic_t::sighupint, proc->gens_);
             }
         }
     }
 
-    if (reaptopics.none()) {
-        // No reapable processes, nothing to wait for.
+    // Now check for changes, optionally waiting.
+    if (!topic_monitor_t::principal().check(&reapgens, block_ok)) {
+        // Nothing changed.
         return;
     }
 
-    // Now check for changes, optionally waiting.
-    auto changed_topics = topic_monitor_t::principal().check(&gens, reaptopics, block_ok);
-    if (changed_topics.none()) return;
-
     // We got some changes. Since we last checked we received SIGCHLD, and or HUP/INT.
     // Update the hup/int generations and reap any reapable processes.
-    for (auto &j : parser.jobs()) {
+    // We structure this as two loops for some simplicity.
+    // First reap all pids.
+    for (const auto &j : parser.jobs()) {
         for (const auto &proc : j->processes) {
-            if (auto mtopic = j->reap_topic_for_process(proc.get())) {
-                // Update the signal hup/int gen.
-                proc->gens_[topic_t::sighupint] = gens[topic_t::sighupint];
+            // Does this proc have a pid that is reapable?
+            if (proc->pid <= 0 || !j->can_reap(proc)) continue;
 
-                if (proc->gens_[*mtopic] < gens[*mtopic]) {
-                    // Potentially reapable. Update its gen count and try reaping it.
-                    proc->gens_[*mtopic] = gens[*mtopic];
-                    if (proc->internal_proc_) {
-                        // Try reaping an internal process.
-                        if (proc->internal_proc_->exited()) {
-                            handle_child_status(j, proc.get(), proc->internal_proc_->get_status());
-                            FLOGF(proc_reap_internal,
-                                  "Reaped internal process '%ls' (id %llu, status %d)",
-                                  proc->argv0(), proc->internal_proc_->get_id(),
-                                  proc->status.status_value());
-                        }
-                    } else if (proc->pid > 0) {
-                        // Try reaping an external process.
-                        int status = -1;
-                        auto pid = waitpid(proc->pid, &status, WNOHANG | WUNTRACED | WCONTINUED);
-                        if (pid > 0) {
-                            assert(pid == proc->pid && "Unexpcted waitpid() return");
-                            handle_child_status(j, proc.get(), proc_status_t::from_waitpid(status));
-                            if (proc->status.stopped()) {
-                                j->group->set_is_foreground(false);
-                            }
-                            if (proc->status.continued()) {
-                                j->mut_flags().notified = false;
-                            }
-                            if (proc->status.normal_exited() || proc->status.signal_exited()) {
-                                FLOGF(proc_reap_external,
-                                      "Reaped external process '%ls' (pid %d, status %d)",
-                                      proc->argv0(), pid, proc->status.status_value());
-                            } else {
-                                assert(proc->status.stopped() || proc->status.continued());
-                                FLOGF(proc_reap_external, "External process '%ls' (pid %d, %s)",
-                                      proc->argv0(), pid,
-                                      proc->status.stopped() ? "stopped" : "continued");
-                            }
-                        }
-                    } else {
-                        assert(0 && "Don't know how to reap this process");
-                    }
-                }
+            // Always update the signal hup/int gen.
+            proc->gens_.sighupint = reapgens.sighupint;
+
+            // Nothing to do if we did not get a new sigchld.
+            if (proc->gens_.sigchld == reapgens.sigchld) continue;
+            proc->gens_.sigchld = reapgens.sigchld;
+
+            // Ok, we are reapable. Run waitpid()!
+            int statusv = -1;
+            pid_t pid = waitpid(proc->pid, &statusv, WNOHANG | WUNTRACED | WCONTINUED);
+            assert((pid <= 0 || pid == proc->pid) && "Unexpcted waitpid() return");
+            if (pid <= 0) continue;
+
+            // The process has stopped or exited! Update its status.
+            proc_status_t status = proc_status_t::from_waitpid(statusv);
+            handle_child_status(j, proc.get(), status);
+            if (status.stopped()) {
+                j->group->set_is_foreground(false);
             }
+            if (status.continued()) {
+                j->mut_flags().notified = false;
+            }
+            if (status.normal_exited() || status.signal_exited()) {
+                FLOGF(proc_reap_external, "Reaped external process '%ls' (pid %d, status %d)",
+                      proc->argv0(), pid, proc->status.status_value());
+            } else {
+                assert(status.stopped() || status.continued());
+                FLOGF(proc_reap_external, "External process '%ls' (pid %d, %s)", proc->argv0(),
+                      proc->pid, proc->status.stopped() ? "stopped" : "continued");
+            }
+        }
+    }
+
+    // We are done reaping pids.
+    // Reap internal processes.
+    for (const auto &j : parser.jobs()) {
+        for (const auto &proc : j->processes) {
+            // Does this proc have an internal process that is reapable?
+            if (!proc->internal_proc_ || !j->can_reap(proc)) continue;
+
+            // Always update the signal hup/int gen.
+            proc->gens_.sighupint = reapgens.sighupint;
+
+            // Nothing to do if we did not get a new internal exit.
+            if (proc->gens_.internal_exit == reapgens.internal_exit) continue;
+            proc->gens_.internal_exit = reapgens.internal_exit;
+
+            // Has the process exited?
+            if (!proc->internal_proc_->exited()) continue;
+
+            // The process gets the status from its internal proc.
+            handle_child_status(j, proc.get(), proc->internal_proc_->get_status());
+            FLOGF(proc_reap_internal, "Reaped internal process '%ls' (id %llu, status %d)",
+                  proc->argv0(), proc->internal_proc_->get_id(), proc->status.status_value());
         }
     }
 
@@ -514,7 +519,7 @@ event_t proc_create_event(const wchar_t *msg, event_type_t type, pid_t pid, int 
 
 /// Remove all disowned jobs whose job chain is fully constructed (that is, do not erase disowned
 /// jobs that still have an in-flight parent job). Note we never print statuses for such jobs.
-void remove_disowned_jobs(job_list_t &jobs) {
+static void remove_disowned_jobs(job_list_t &jobs) {
     auto iter = jobs.begin();
     while (iter != jobs.end()) {
         const auto &j = *iter;
@@ -892,7 +897,7 @@ int terminal_maybe_give_to_job_group(const job_group_t *jg, bool continuing_from
 
 /// Returns control of the terminal to the shell, and saves the terminal attribute state to the job
 /// group, so that we can restore the terminal ownership to the job at a later time.
-static bool terminal_return_from_job_group(job_group_t *jg, bool restore_attrs) {
+static bool terminal_return_from_job_group(job_group_t *jg) {
     errno = 0;
     auto pgid = jg->get_pgid();
     if (!pgid.has_value()) {
@@ -918,19 +923,6 @@ static bool terminal_return_from_job_group(job_group_t *jg, bool restore_attrs) 
         return false;
     }
     jg->tmodes = tmodes;
-
-    // Need to restore the terminal's attributes or `bind \cF fg` will put the
-    // terminal into a broken state (until "enter" is pressed).
-    // See: https://github.com/fish-shell/fish-shell/issues/2114
-    if (restore_attrs) {
-        if (tcsetattr(STDIN_FILENO, TCSADRAIN, &shell_modes) == -1) {
-            if (errno == EIO) redirect_tty_output();
-            FLOGF(warning, _(L"Could not return shell to foreground"));
-            wperror(L"tcsetattr");
-            return false;
-        }
-    }
-
     return true;
 }
 
@@ -960,14 +952,8 @@ void job_t::continue_job(parser_t &parser, bool in_foreground) {
     bool term_transferred = false;
     cleanup_t take_term_back([&] {
         if (term_transferred) {
-            // Should we restore the terminal attributes?
-            // Historically we have done this conditionally only if we sent SIGCONT.
-            // TODO: rationalize what the right behavior here is.
-            bool restore_attrs = send_sigcont;
-            // Issues of interest:
-            // https://github.com/fish-shell/fish-shell/issues/121
-            // https://github.com/fish-shell/fish-shell/issues/2114
-            terminal_return_from_job_group(this->group.get(), restore_attrs);
+            // Issues of interest include #121 and #2114.
+            terminal_return_from_job_group(this->group.get());
         }
     });
 
@@ -999,7 +985,7 @@ void job_t::continue_job(parser_t &parser, bool in_foreground) {
 
         if (in_foreground) {
             // Wait for the status of our own job to change.
-            while (!reader_exit_forced() && !is_stopped() && !is_completed()) {
+            while (!check_cancel_from_fish_signal() && !is_stopped() && !is_completed()) {
                 process_mark_finished_children(parser, true);
             }
         }
@@ -1019,45 +1005,7 @@ void job_t::continue_job(parser_t &parser, bool in_foreground) {
     }
 }
 
-void proc_sanity_check(const parser_t &parser) {
-    const job_t *fg_job = nullptr;
-
-    for (const auto &j : parser.jobs()) {
-        if (!j->is_constructed()) continue;
-
-        // More than one foreground job?
-        if (j->is_foreground() && !(j->is_stopped() || j->is_completed())) {
-            if (fg_job) {
-                FLOGF(error, _(L"More than one job in foreground: job 1: '%ls' job 2: '%ls'"),
-                      fg_job->command_wcstr(), j->command_wcstr());
-                sanity_lose();
-            }
-            fg_job = j.get();
-        }
-
-        for (const process_ptr_t &p : j->processes) {
-            // Internal block nodes do not have argv - see issue #1545.
-            bool null_ok = (p->type == process_type_t::block_node);
-            validate_pointer(p->get_argv(), _(L"Process argument list"), null_ok);
-            validate_pointer(p->argv0(), _(L"Process name"), null_ok);
-
-            if ((p->stopped & (~0x00000001)) != 0) {
-                FLOGF(error, _(L"Job '%ls', process '%ls' has inconsistent state \'stopped\'=%d"),
-                      j->command_wcstr(), p->argv0(), p->stopped);
-                sanity_lose();
-            }
-
-            if ((p->completed & (~0x00000001)) != 0) {
-                FLOGF(error, _(L"Job '%ls', process '%ls' has inconsistent state \'completed\'=%d"),
-                      j->command_wcstr(), p->argv0(), p->completed);
-                sanity_lose();
-            }
-        }
-    }
-}
-
 void proc_wait_any(parser_t &parser) {
-    ASSERT_IS_MAIN_THREAD();
     process_mark_finished_children(parser, true /* block_ok */);
     process_clean_after_marking(parser, parser.libdata().is_interactive);
 }

@@ -23,7 +23,9 @@
  */
 
 // This version has been altered and ported to C++ for inclusion in fish.
+#include "fallback.h"  // IWYU pragma: keep
 #include "tinyexpr.h"
+#include "wutil.h"
 
 #include <ctype.h>
 #include <limits.h>
@@ -58,7 +60,7 @@ enum {
     TOK_INFIX
 };
 
-int get_arity(const int type) {
+static int get_arity(const int type) {
     if (type == TE_FUNCTION3) return 3;
     if (type == TE_FUNCTION2) return 2;
     if (type == TE_FUNCTION1) return 1;
@@ -75,7 +77,7 @@ typedef struct te_expr {
 } te_expr;
 
 using te_builtin = struct {
-    const char *name;
+    const wchar_t *name;
     const void *address;
     int type;
 };
@@ -85,15 +87,15 @@ using state = struct {
         double value;
         const void *function;
     };
-    const char *start;
-    const char *next;
+    const wchar_t *start;
+    const wchar_t *next;
     int type;
     te_error_type_t error;
 };
 
 /* Parses the input expression. */
 /* Returns NULL on error. */
-te_expr *te_compile(const char *expression, te_error_t *error);
+te_expr *te_compile(const wchar_t *expression, te_error_t *error);
 
 /* Evaluates the expression. */
 double te_eval(const te_expr *n);
@@ -120,7 +122,7 @@ static te_expr *new_expr(const int type, const te_expr *parameters[]) {
     return ret;
 }
 
-void te_free_parameters(te_expr *n) {
+static void te_free_parameters(te_expr *n) {
     if (!n) return;
     int arity = get_arity(n->type);
     // Free all parameters from the back to the front.
@@ -137,6 +139,7 @@ void te_free(te_expr *n) {
 }
 
 static constexpr double pi() { return M_PI; }
+static constexpr double tau() { return 2 * M_PI; }
 static constexpr double e() { return M_E; }
 
 static double fac(double a) { /* simplest version of fac */
@@ -167,44 +170,62 @@ static double ncr(double n, double r) {
 
 static double npr(double n, double r) { return ncr(n, r) * fac(r); }
 
+static constexpr double bit_and(double a, double b) {
+    return static_cast<double>(static_cast<long long>(a) & static_cast<long long>(b));
+}
+
+static constexpr double bit_or(double a, double b) {
+    return static_cast<double>(static_cast<long long>(a) | static_cast<long long>(b));
+}
+
+static constexpr double bit_xor(double a, double b) {
+    return static_cast<double>(static_cast<long long>(a) ^ static_cast<long long>(b));
+}
+
 static const te_builtin functions[] = {
     /* must be in alphabetical order */
-    {"abs", reinterpret_cast<const void *>(static_cast<te_fun1>(fabs)), TE_FUNCTION1},
-    {"acos", reinterpret_cast<const void *>(static_cast<te_fun1>(acos)), TE_FUNCTION1},
-    {"asin", reinterpret_cast<const void *>(static_cast<te_fun1>(asin)), TE_FUNCTION1},
-    {"atan", reinterpret_cast<const void *>(static_cast<te_fun1>(atan)), TE_FUNCTION1},
-    {"atan2", reinterpret_cast<const void *>(static_cast<te_fun2>(atan2)), TE_FUNCTION2},
-    {"ceil", reinterpret_cast<const void *>(static_cast<te_fun1>(ceil)), TE_FUNCTION1},
-    {"cos", reinterpret_cast<const void *>(static_cast<te_fun1>(cos)), TE_FUNCTION1},
-    {"cosh", reinterpret_cast<const void *>(static_cast<te_fun1>(cosh)), TE_FUNCTION1},
-    {"e", reinterpret_cast<const void *>(static_cast<te_fun0>(e)), TE_FUNCTION0},
-    {"exp", reinterpret_cast<const void *>(static_cast<te_fun1>(exp)), TE_FUNCTION1},
-    {"fac", reinterpret_cast<const void *>(static_cast<te_fun1>(fac)), TE_FUNCTION1},
-    {"floor", reinterpret_cast<const void *>(static_cast<te_fun1>(floor)), TE_FUNCTION1},
-    {"ln", reinterpret_cast<const void *>(static_cast<te_fun1>(log)), TE_FUNCTION1},
-    {"log", reinterpret_cast<const void *>(static_cast<te_fun1>(log10)), TE_FUNCTION1},
-    {"log10", reinterpret_cast<const void *>(static_cast<te_fun1>(log10)), TE_FUNCTION1},
-    {"ncr", reinterpret_cast<const void *>(static_cast<te_fun2>(ncr)), TE_FUNCTION2},
-    {"npr", reinterpret_cast<const void *>(static_cast<te_fun2>(npr)), TE_FUNCTION2},
-    {"pi", reinterpret_cast<const void *>(static_cast<te_fun0>(pi)), TE_FUNCTION0},
-    {"pow", reinterpret_cast<const void *>(static_cast<te_fun2>(pow)), TE_FUNCTION2},
-    {"round", reinterpret_cast<const void *>(static_cast<te_fun1>(round)), TE_FUNCTION1},
-    {"sin", reinterpret_cast<const void *>(static_cast<te_fun1>(sin)), TE_FUNCTION1},
-    {"sinh", reinterpret_cast<const void *>(static_cast<te_fun1>(sinh)), TE_FUNCTION1},
-    {"sqrt", reinterpret_cast<const void *>(static_cast<te_fun1>(sqrt)), TE_FUNCTION1},
-    {"tan", reinterpret_cast<const void *>(static_cast<te_fun1>(tan)), TE_FUNCTION1},
-    {"tanh", reinterpret_cast<const void *>(static_cast<te_fun1>(tanh)), TE_FUNCTION1}};
+    {L"abs", reinterpret_cast<const void *>(static_cast<te_fun1>(fabs)), TE_FUNCTION1},
+    {L"acos", reinterpret_cast<const void *>(static_cast<te_fun1>(acos)), TE_FUNCTION1},
+    {L"asin", reinterpret_cast<const void *>(static_cast<te_fun1>(asin)), TE_FUNCTION1},
+    {L"atan", reinterpret_cast<const void *>(static_cast<te_fun1>(atan)), TE_FUNCTION1},
+    {L"atan2", reinterpret_cast<const void *>(static_cast<te_fun2>(atan2)), TE_FUNCTION2},
+    {L"bitand", reinterpret_cast<const void *>(static_cast<te_fun2>(bit_and)), TE_FUNCTION2},
+    {L"bitor", reinterpret_cast<const void *>(static_cast<te_fun2>(bit_or)), TE_FUNCTION2},
+    {L"bitxor", reinterpret_cast<const void *>(static_cast<te_fun2>(bit_xor)), TE_FUNCTION2},
+    {L"ceil", reinterpret_cast<const void *>(static_cast<te_fun1>(ceil)), TE_FUNCTION1},
+    {L"cos", reinterpret_cast<const void *>(static_cast<te_fun1>(cos)), TE_FUNCTION1},
+    {L"cosh", reinterpret_cast<const void *>(static_cast<te_fun1>(cosh)), TE_FUNCTION1},
+    {L"e", reinterpret_cast<const void *>(static_cast<te_fun0>(e)), TE_FUNCTION0},
+    {L"exp", reinterpret_cast<const void *>(static_cast<te_fun1>(exp)), TE_FUNCTION1},
+    {L"fac", reinterpret_cast<const void *>(static_cast<te_fun1>(fac)), TE_FUNCTION1},
+    {L"floor", reinterpret_cast<const void *>(static_cast<te_fun1>(floor)), TE_FUNCTION1},
+    {L"ln", reinterpret_cast<const void *>(static_cast<te_fun1>(log)), TE_FUNCTION1},
+    {L"log", reinterpret_cast<const void *>(static_cast<te_fun1>(log10)), TE_FUNCTION1},
+    {L"log10", reinterpret_cast<const void *>(static_cast<te_fun1>(log10)), TE_FUNCTION1},
+    {L"ncr", reinterpret_cast<const void *>(static_cast<te_fun2>(ncr)), TE_FUNCTION2},
+    {L"npr", reinterpret_cast<const void *>(static_cast<te_fun2>(npr)), TE_FUNCTION2},
+    {L"pi", reinterpret_cast<const void *>(static_cast<te_fun0>(pi)), TE_FUNCTION0},
+    {L"pow", reinterpret_cast<const void *>(static_cast<te_fun2>(pow)), TE_FUNCTION2},
+    {L"round", reinterpret_cast<const void *>(static_cast<te_fun1>(round)), TE_FUNCTION1},
+    {L"sin", reinterpret_cast<const void *>(static_cast<te_fun1>(sin)), TE_FUNCTION1},
+    {L"sinh", reinterpret_cast<const void *>(static_cast<te_fun1>(sinh)), TE_FUNCTION1},
+    {L"sqrt", reinterpret_cast<const void *>(static_cast<te_fun1>(sqrt)), TE_FUNCTION1},
+    {L"tan", reinterpret_cast<const void *>(static_cast<te_fun1>(tan)), TE_FUNCTION1},
+    {L"tanh", reinterpret_cast<const void *>(static_cast<te_fun1>(tanh)), TE_FUNCTION1},
+    {L"tau", reinterpret_cast<const void *>(static_cast<te_fun0>(tau)), TE_FUNCTION0},
+};
 
-static const te_builtin *find_builtin(const char *name, int len) {
+static const te_builtin *find_builtin(const wchar_t *name, int len) {
     const auto end = std::end(functions);
     const te_builtin *found = std::lower_bound(std::begin(functions), end, name,
-                                               [len](const te_builtin &lhs, const char *rhs) {
+                                               [len](const te_builtin &lhs, const wchar_t *rhs) {
                                                    // The length is important because that's where
                                                    // the parens start
-                                                   return std::strncmp(lhs.name, rhs, len) < 0;
+                                                   return std::wcsncmp(lhs.name, rhs, len) < 0;
                                                });
     // We need to compare again because we might have gotten the first "larger" element.
-    if (found != end && std::strncmp(found->name, name, len) == 0) return found;
+    if (found != end && std::wcsncmp(found->name, name, len) == 0 && found->name[len] == 0)
+        return found;
     return nullptr;
 }
 
@@ -220,7 +241,7 @@ static constexpr double divide(double a, double b) {
 
 static constexpr double negate(double a) { return -a; }
 
-void next_token(state *s) {
+static void next_token(state *s) {
     s->type = TOK_NULL;
 
     do {
@@ -231,7 +252,7 @@ void next_token(state *s) {
 
         /* Try reading a number. */
         if ((s->next[0] >= '0' && s->next[0] <= '9') || s->next[0] == '.') {
-            s->value = strtod(s->next, const_cast<char **>(&s->next));
+            s->value = fish_wcstod(s->next, const_cast<wchar_t **>(&s->next));
             s->type = TOK_NUMBER;
         } else {
             /* Look for a function call. */
@@ -239,7 +260,7 @@ void next_token(state *s) {
             // - that's the alternative multiplication operator.
             if (s->next[0] >= 'a' && s->next[0] <= 'z' &&
                 !(s->next[0] == 'x' && isspace(s->next[1]))) {
-                const char *start;
+                const wchar_t *start;
                 start = s->next;
                 while ((s->next[0] >= 'a' && s->next[0] <= 'z') ||
                        (s->next[0] >= '0' && s->next[0] <= '9') || (s->next[0] == '_'))
@@ -377,8 +398,15 @@ static te_expr *base(state *s) {
                 if (s->type == TOK_CLOSE && i == arity - 1) {
                     next_token(s);
                 } else if (s->type != TOK_ERROR || s->error == TE_ERROR_UNEXPECTED_TOKEN) {
+                    // If we had the right number of arguments, we're missing a closing paren.
+                    if (i == arity - 1 && s->type != TOK_ERROR) {
+                        s->error = TE_ERROR_MISSING_CLOSING_PAREN;
+                    } else {
+                        // Otherwise we complain about the number of arguments *first*,
+                        // a closing parenthesis should be more obvious.
+                        s->error = i < arity ? TE_ERROR_TOO_FEW_ARGS : TE_ERROR_TOO_MANY_ARGS;
+                    }
                     s->type = TOK_ERROR;
-                    s->error = i < arity ? TE_ERROR_TOO_FEW_ARGS : TE_ERROR_TOO_MANY_ARGS;
                 }
             } else if (s->type != TOK_ERROR || s->error == TE_ERROR_UNKNOWN) {
                 s->type = TOK_ERROR;
@@ -411,8 +439,10 @@ static te_expr *base(state *s) {
             break;
         default:
             ret = new_expr(0, nullptr);
-            s->type = TOK_ERROR;
-            s->error = TE_ERROR_UNEXPECTED_TOKEN;
+            if (s->type != TOK_ERROR || s->error == TE_ERROR_UNKNOWN) {
+                s->type = TOK_ERROR;
+                s->error = TE_ERROR_UNEXPECTED_TOKEN;
+            }
             ret->value = NAN;
             break;
     }
@@ -543,7 +573,7 @@ static void optimize(te_expr *n) {
     }
 }
 
-te_expr *te_compile(const char *expression, te_error_t *error) {
+te_expr *te_compile(const wchar_t *expression, te_error_t *error) {
     state s;
     s.start = s.next = expression;
     s.error = TE_ERROR_NONE;
@@ -574,7 +604,7 @@ te_expr *te_compile(const char *expression, te_error_t *error) {
     }
 }
 
-double te_interp(const char *expression, te_error_t *error) {
+double te_interp(const wchar_t *expression, te_error_t *error) {
     te_expr *n = te_compile(expression, error);
     double ret;
     if (n) {

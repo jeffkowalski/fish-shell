@@ -403,7 +403,10 @@ function fish_git_prompt --description "Prompt function for Git"
                 and test "$dirty" != false
                 and test "$untracked" != false
             end
-            set informative_status "$space"(__fish_git_prompt_informative_status $git_dir)
+            set informative_status (__fish_git_prompt_informative_status $git_dir)
+            if test -n "$informative_status"
+                set informative_status "$space$informative_status"
+            end
         else
             # This has to be set explicitly.
             if test "$dirty" = true
@@ -533,7 +536,9 @@ function __fish_git_prompt_informative_status
     set -l state (math $dirtystate + $invalidstate + $stagedstate + $untrackedfiles + $stashstate 2>/dev/null)
     if test -z "$state"
         or test "$state" = 0
-        set info $___fish_git_prompt_color_cleanstate$___fish_git_prompt_char_cleanstate$___fish_git_prompt_color_cleanstate_done
+        if test -n "$___fish_git_prompt_char_cleanstate"
+            set info $___fish_git_prompt_color_cleanstate$___fish_git_prompt_char_cleanstate$___fish_git_prompt_color_cleanstate_done
+        end
     else
         for i in $___fish_git_prompt_status_order
             if [ $$i != 0 ]
@@ -575,7 +580,6 @@ function __fish_git_prompt_operation_branch_bare --description "fish_git_prompt 
     set -l bare
     set -l step
     set -l total
-    set -l os
 
     if test -d $git_dir/rebase-merge
         set branch (cat $git_dir/rebase-merge/head-name 2>/dev/null)
@@ -625,8 +629,8 @@ function __fish_git_prompt_operation_branch_bare --description "fish_git_prompt 
 							command git describe HEAD
 						case default '*'
 							command git describe --tags --exact-match HEAD
-						end 2>/dev/null; set os $status)
-            if test $os -ne 0
+						end 2>/dev/null)
+            if test $status -ne 0
                 # Shorten the sha ourselves to 8 characters - this should be good for most repositories,
                 # and even for large ones it should be good for most commits
                 if set -q sha
@@ -657,13 +661,10 @@ end
 function __fish_git_prompt_set_char
     set -l user_variable_name "$argv[1]"
     set -l char $argv[2]
-    set -l user_variable
-    if set -q $user_variable_name
-        set user_variable $$user_variable_name
-    end
 
     if set -q argv[3]
-        and begin set -q __fish_git_prompt_show_informative_status
+        and begin
+            set -q __fish_git_prompt_show_informative_status
             or set -q __fish_git_prompt_use_informative_chars
         end
         set char $argv[3]
@@ -673,7 +674,7 @@ function __fish_git_prompt_set_char
     set -l variable_done "$variable"_done
 
     if not set -q $variable
-        set -g $variable (set -q $user_variable_name; and echo $user_variable; or echo $char)
+        set -g $variable (set -q $user_variable_name; and echo $$user_variable_name; or echo $char)
     end
 end
 
@@ -696,11 +697,6 @@ end
 
 function __fish_git_prompt_set_color
     set -l user_variable_name "$argv[1]"
-    set -l user_variable
-    if set -q $user_variable_name
-        set user_variable $$user_variable_name
-    end
-    set -l user_variable_bright
 
     set -l default default_done
     switch (count $argv)
@@ -719,15 +715,14 @@ function __fish_git_prompt_set_color
     set -l variable_done "$variable"_done
 
     if not set -q $variable
-        if test -n "$user_variable"
-            set -g $variable (set_color $user_variable)
+        if test -n "$$user_variable_name"
+            set -g $variable (set_color $$user_variable_name)
             set -g $variable_done (set_color normal)
         else
             set -g $variable $default
             set -g $variable_done $default_done
         end
     end
-
 end
 
 

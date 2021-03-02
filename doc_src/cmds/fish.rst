@@ -8,7 +8,7 @@ Synopsis
 
 ::
 
-    fish [OPTIONS] [-c command] [FILE [ARGUMENTS...]]
+    fish [OPTIONS] [-c command] [FILE] [ARGUMENTS...]
 
 Description
 -----------
@@ -17,7 +17,7 @@ fish is a command-line shell written mainly with interactive use in mind. This p
 
 The following options are available:
 
-- ``-c`` or ``--command=COMMANDS`` evaluate the specified commands instead of reading from the commandline
+- ``-c`` or ``--command=COMMANDS`` evaluate the specified commands instead of reading from the commandline, passing any additional positional arguments via :ref:`$argv <variables-argv>`. Note that, unlike other shells, the first argument is *not* the name of the program (``$0``), but simply the first normal argument.
 
 - ``-C`` or ``--init-command=COMMANDS`` evaluate the specified commands after reading the configuration, before running the command specified by ``-c`` or reading interactive input
 
@@ -31,7 +31,9 @@ The following options are available:
 
 - ``-n`` or ``--no-execute`` do not execute any commands, only perform syntax checking
 
-- ``-p`` or ``--profile=PROFILE_FILE`` when fish exits, output timing information on all executed commands to the specified file
+- ``-p`` or ``--profile=PROFILE_FILE`` when fish exits, output timing information on all executed commands to the specified file. This excludes time spent starting up and reading the configuration.
+
+- ``--profile-startup=PROFILE_FILE`` will write timing information for fish's startup to the specified file. This is useful to profile your configuration.
 
 - ``-P`` or ``--private`` enables :ref:`private mode <private-mode>`, so fish will not access old or store new history.
 
@@ -40,8 +42,6 @@ The following options are available:
 - ``--print-debug-categories`` outputs the list of debug categories, and then exits.
 
 - ``-v`` or ``--version`` display version and exit
-
-- ``-D`` or ``--debug-stack-frames=DEBUG_LEVEL`` specify how many stack frames to display when debug messages are written. The default is zero. A value of 3 or 4 is usually sufficient to gain insight into how a given debug call was reached but you can specify a value up to 128.
 
 - ``-f`` or ``--features=FEATURES`` enables one or more :ref:`feature flags <featureflags>` (separated by a comma). These are how fish stages changes that might break scripts.
 
@@ -63,3 +63,7 @@ Available categories are listed by ``fish --print-debug-categories``. The ``--de
 Debug messages output to stderr by default. Note that if ``fish_trace`` is set, execution tracing also outputs to stderr by default. You can output to a file using the ``--debug-output`` option::
 
     > fish --debug='complete,*history*' --debug-output=/tmp/fish.log --init-command='set fish_trace on'
+
+These options can also be changed via the $FISH_DEBUG and $FISH_DEBUG_OUTPUT variables. The categories enabled via ``--debug`` are *added* to the ones enabled by $FISH_DEBUG, so they can be disabled by prefixing them with ``-`` (``reader-*,-ast*`` enables reader debugging and disables ast debugging).
+
+The file given in ``--debug-output`` takes precedence over the file in $FISH_DEBUG_OUTPUT.

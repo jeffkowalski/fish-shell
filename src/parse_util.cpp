@@ -83,7 +83,7 @@ size_t parse_util_get_offset_from_line(const wcstring &str, int line) {
         if (buff[i] == L'\n') {
             count++;
             if (count == line) {
-                return (i + 1) < str.size() ? i + 1 : i;
+                return i + 1;
             }
         }
     }
@@ -109,8 +109,8 @@ static int parse_util_locate_brackets_of_type(const wchar_t *in, wchar_t **begin
                                               wchar_t close_type) {
     // open_type is typically ( or [, and close type is the corresponding value.
     wchar_t *pos;
-    wchar_t prev = 0;
-    int syntax_error = 0;
+    bool escaped = false;
+    bool syntax_error = false;
     int paran_count = 0;
 
     wchar_t *paran_begin = nullptr, *paran_end = nullptr;
@@ -118,7 +118,7 @@ static int parse_util_locate_brackets_of_type(const wchar_t *in, wchar_t **begin
     assert(in && "null parameter");
 
     for (pos = const_cast<wchar_t *>(in); *pos; pos++) {
-        if (prev != '\\') {
+        if (!escaped) {
             if (std::wcschr(L"\'\"", *pos)) {
                 wchar_t *q_end = quote_end(pos);
                 if (q_end && *q_end) {
@@ -142,13 +142,17 @@ static int parse_util_locate_brackets_of_type(const wchar_t *in, wchar_t **begin
                     }
 
                     if (paran_count < 0) {
-                        syntax_error = 1;
+                        syntax_error = true;
                         break;
                     }
                 }
             }
         }
-        prev = *pos;
+        if (*pos == '\\') {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
     }
 
     syntax_error |= (paran_count < 0);
@@ -568,8 +572,6 @@ wcstring parse_util_escape_string_with_quote(const wcstring &cmd, wchar_t quote,
 std::vector<int> parse_util_compute_indents(const wcstring &src) {
     // Make a vector the same size as the input string, which contains the indents. Initialize them
     // to 0.
-    static wcstring ssss;
-    ssss = src;
     const size_t src_size = src.size();
     std::vector<int> indents(src_size, 0);
 
@@ -590,7 +592,8 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
     // Visit all of our nodes. When we get a job_list or case_item_list, increment indent while
     // visiting its children.
     struct indent_visitor_t {
-        explicit indent_visitor_t(std::vector<int> &indents) : indents(indents) {}
+        indent_visitor_t(const wcstring &src, std::vector<int> &indents)
+            : src(src), indents(indents) {}
 
         void visit(const node_t &node) {
             int inc = 0;
@@ -612,9 +615,25 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
                     }
                     break;
 
-                // Increment indents for piped remainders.
-                case type_t::job_continuation_list:
-                    if (node.as<job_continuation_list_t>()->count() > 0) {
+                // Increment indents for job_continuation_t if it contains a newline.
+                // This is a bit of a hack - it indents cases like:
+                //    cmd1 |
+                //    ....cmd2
+                // but avoids "double indenting" if there's no newline:
+                //   cmd1 | while cmd2
+                //   ....cmd3
+                //   end
+                // See #7252.
+                case type_t::job_continuation:
+                    if (has_newline(node.as<job_continuation_t>()->newlines)) {
+                        inc = 1;
+                        dec = 1;
+                    }
+                    break;
+
+                // Likewise for && and ||.
+                case type_t::job_conjunction_continuation:
+                    if (has_newline(node.as<job_conjunction_continuation_t>()->newlines)) {
                         inc = 1;
                         dec = 1;
                     }
@@ -641,10 +660,30 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
                     inc = 1;
                     dec = node.parent->as<switch_statement_t>()->end.unsourced ? 0 : 1;
                     break;
-
+                case type_t::token_base: {
+                    auto tok = node.as<token_base_t>();
+                    if (node.parent->type == type_t::begin_header &&
+                        tok->type == parse_token_type_t::end) {
+                        // The newline after "begin" is optional, so it is part of the header.
+                        // The header is not in the indented block, so indent the newline here.
+                        if (node.source(src) == L"\n") {
+                            inc = 1;
+                            dec = 1;
+                        }
+                    }
+                    break;
+                }
                 default:
                     break;
             }
+
+            auto range = node.source_range();
+            if (range.length > 0 && node.category == category_t::leaf) {
+                record_line_continuations_until(range.start);
+                std::fill(indents.begin() + last_leaf_end, indents.begin() + range.start,
+                          last_indent);
+            }
+
             indent += inc;
 
             // If we increased the indentation, apply it to the remainder of the string, even if the
@@ -655,24 +694,40 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
             //
             // we want to indent the newline.
             if (inc) {
-                std::fill(indents.begin() + last_leaf_end, indents.end(), indent);
                 last_indent = indent;
             }
 
             // If this is a leaf node, apply the current indentation.
-            if (node.category == category_t::leaf) {
-                auto range = node.source_range();
-                if (range.length > 0) {
-                    // Fill to the end.
-                    // Later nodes will come along and overwrite these.
-                    std::fill(indents.begin() + range.start, indents.end(), indent);
-                    last_leaf_end = range.start + range.length;
-                    last_indent = indent;
-                }
+            if (node.category == category_t::leaf && range.length > 0) {
+                std::fill(indents.begin() + range.start, indents.begin() + range.end(), indent);
+                last_leaf_end = range.start + range.length;
+                last_indent = indent;
             }
 
             node_visitor(*this).accept_children_of(&node);
             indent -= dec;
+        }
+
+        /// \return whether a maybe_newlines node contains at least one newline.
+        bool has_newline(const maybe_newlines_t &nls) const {
+            return nls.source(src).find(L'\n') != wcstring::npos;
+        }
+
+        void record_line_continuations_until(size_t offset) {
+            wcstring gap_text = src.substr(last_leaf_end, offset - last_leaf_end);
+            size_t escaped_nl = gap_text.find(L"\\\n");
+            if (escaped_nl == wcstring::npos) return;
+            auto line_end = gap_text.begin() + escaped_nl;
+            if (std::find(gap_text.begin(), line_end, L'#') != line_end) return;
+            auto end = src.begin() + offset;
+            auto newline = src.begin() + last_leaf_end + escaped_nl + 1;
+            // The gap text might contain multiple newlines if there are multiple lines that
+            // don't contain an AST node, for example, comment lines, or lines containing only
+            // the escaped newline.
+            do {
+                line_continuations.push_back(newline - src.begin());
+                newline = std::find(newline + 1, end, L'\n');
+            } while (newline != end);
         }
 
         // The one-past-the-last index of the most recently encountered leaf node.
@@ -682,16 +737,24 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
         // The last indent which we assigned.
         int last_indent{-1};
 
+        // The source we are indenting.
+        const wcstring &src;
+
         // List of indents, which we populate.
         std::vector<int> &indents;
 
         // Initialize our starting indent to -1, as our top-level node is a job list which
         // will immediately increment it.
         int indent{-1};
+
+        // List of locations of escaped newline characters.
+        std::vector<size_t> line_continuations;
     };
 
-    indent_visitor_t iv(indents);
+    indent_visitor_t iv(src, indents);
     node_visitor(iv).accept(ast.top());
+    iv.record_line_continuations_until(indents.size());
+    std::fill(indents.begin() + iv.last_leaf_end, indents.end(), iv.last_indent);
 
     // All newlines now get the *next* indent.
     // For example, in this code:
@@ -700,22 +763,25 @@ std::vector<int> parse_util_compute_indents(const wcstring &src) {
     // the newline "belongs" to the if statement as it ends its job.
     // But when rendered, it visually belongs to the job list.
 
-    // FIXME: if there's a middle newline, we will indent it wrongly.
-    // For example:
-    //    if true
-    //
-    //    end
-    // Here the middle newline should be indented by 1.
-
     size_t idx = src_size;
     int next_indent = iv.last_indent;
     while (idx--) {
         if (src.at(idx) == L'\n') {
-            indents.at(idx) = next_indent;
+            bool empty_middle_line = idx + 1 < src_size && src.at(idx + 1) == L'\n';
+            if (!empty_middle_line) {
+                indents.at(idx) = next_indent;
+            }
         } else {
             next_indent = indents.at(idx);
         }
     }
+    // Add an extra level of indentation to continuation lines.
+    for (size_t idx : iv.line_continuations) {
+        do {
+            indents.at(idx)++;
+        } while (++idx < src_size && src.at(idx) != L'\n');
+    }
+
     return indents;
 }
 
@@ -750,7 +816,7 @@ bool parse_util_argument_is_help(const wchar_t *s) {
 
 // \return a pointer to the first argument node of an argument_or_redirection_list_t, or nullptr if
 // there are no arguments.
-const ast::argument_t *get_first_arg(const ast::argument_or_redirection_list_t &list) {
+static const ast::argument_t *get_first_arg(const ast::argument_or_redirection_list_t &list) {
     for (const ast::argument_or_redirection_t &v : list) {
         if (v.is_argument()) return &v.argument();
     }
@@ -1113,7 +1179,8 @@ static bool detect_errors_in_decorated_statement(const wcstring &buff_src,
         wcstring command;
         // Check that we can expand the command.
         if (expand_to_command_and_args(unexp_command, operation_context_t::empty(), &command,
-                                       nullptr, parse_errors) == expand_result_t::error) {
+                                       nullptr, parse_errors,
+                                       true /* skip wildcards */) == expand_result_t::error) {
             errored = true;
             parse_error_offset_source_start(parse_errors, source_start);
         }
@@ -1215,6 +1282,10 @@ parser_test_error_bits_t parse_util_detect_errors(const ast::ast_t &ast, const w
     // detecting job_continuations that have source for pipes but not the statement.
     bool has_unclosed_pipe = false;
 
+    // Whether we encounter a missing job, i.e. a newline after && or ||. This is found by
+    // detecting job_conjunction_continuations that have source for && or || but not the job.
+    bool has_unclosed_conjunction = false;
+
     // Expand all commands.
     // Verify 'or' and 'and' not used inside pipelines.
     // Verify pipes via parser_is_pipe_forbidden.
@@ -1228,6 +1299,12 @@ parser_test_error_bits_t parse_util_detect_errors(const ast::ast_t &ast, const w
             // See if our pipe has source but our statement does not.
             if (!jc->pipe.unsourced && !jc->statement.try_source_range().has_value()) {
                 has_unclosed_pipe = true;
+            }
+        } else if (const auto *jcc = node.try_as<job_conjunction_continuation_t>()) {
+            // Somewhat clumsy way of checking for a job without source in a conjunction.
+            // See if our conjunction operator (&& or ||) has source but our job does not.
+            if (!jcc->conjunction.unsourced && !jcc->job.try_source_range().has_value()) {
+                has_unclosed_conjunction = true;
             }
         } else if (const argument_t *arg = node.try_as<argument_t>()) {
             const wcstring &arg_src = arg->source(buff_src, &storage);
@@ -1262,7 +1339,8 @@ parser_test_error_bits_t parse_util_detect_errors(const ast::ast_t &ast, const w
 
     if (errored) res |= PARSER_TEST_ERROR;
 
-    if (has_unclosed_block || has_unclosed_pipe) res |= PARSER_TEST_INCOMPLETE;
+    if (has_unclosed_block || has_unclosed_pipe || has_unclosed_conjunction)
+        res |= PARSER_TEST_INCOMPLETE;
 
     return res;
 }

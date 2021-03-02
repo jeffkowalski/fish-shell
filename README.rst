@@ -92,8 +92,8 @@ Running fish requires:
 -  some common \*nix system utilities (currently ``mktemp``), in
    addition to the basic POSIX utilities (``cat``, ``cut``, ``dirname``,
    ``ls``, ``mkdir``, ``mkfifo``, ``rm``, ``sort``, ``tee``, ``tr``,
-   ``uname`` and ``sed`` at least, but the full coreutils plus find, sed
-   and awk is preferred)
+   ``uname`` and ``sed`` at least, but the full coreutils plus ``find`` and
+   ``awk`` is preferred)
 -  The gettext library, if compiled with
    translation support
 
@@ -102,11 +102,8 @@ The following optional features also have specific requirements:
 -  builtin commands that have the ``--help`` option or print usage
    messages require ``ul`` and either ``nroff`` or ``mandoc`` for
    display
--  automated completion generation from manual pages requires Python
-   (2.7+ or 3.3+) and possibly the ``backports.lzma`` module for Python
-   2.7
--  the ``fish_config`` web configuration tool requires Python (2.7+ or
-   3.3 +) and a web browser
+-  automated completion generation from manual pages requires Python 3.5+
+-  the ``fish_config`` web configuration tool requires Python 3.5+ and a web browser
 -  system clipboard integration (with the default Ctrl-V and Ctrl-X
    bindings) require either the ``xsel``, ``xclip``,
    ``wl-copy``/``wl-paste`` or ``pbcopy``/``pbpaste`` utilities
@@ -158,7 +155,7 @@ Compiling fish requires:
 Sphinx is also optionally required to build the documentation from a
 cloned git repository.
 
-Additionally, running the test suite requires python 3.3+ and the pexpect package.
+Additionally, running the test suite requires Python 3.5+ and the pexpect package.
 
 Building from source (all platforms) - Makefile generator
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -234,7 +231,7 @@ questions (e.g., customizing colors, changing key bindings).
 Found a bug? Have an awesome idea? Please `open an
 issue <https://github.com/fish-shell/fish-shell/issues/new>`__.
 
-.. |Build Status| image:: https://travis-ci.org/fish-shell/fish-shell.svg?branch=master
-   :target: https://travis-ci.org/fish-shell/fish-shell
+.. |Build Status| image:: https://github.com/fish-shell/fish-shell/workflows/C/C++%20CI/badge.svg
+   :target: https://github.com/fish-shell/fish-shell/actions
 .. |Try in browser| image:: https://cdn.rawgit.com/rootnroll/library/assets/try.svg
    :target: https://rootnroll.com/d/fish-shell/

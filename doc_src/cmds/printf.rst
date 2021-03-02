@@ -42,7 +42,9 @@ Valid format specifiers are taken from the C library function ``printf(3)``:
 
 ``%%`` signifies a literal "%".
 
-Conversion can fail, e.g. "102.234" can't losslessly convert to an integer, causing printf to print an error. If you are okay with losing information, silence errors with `2>/dev/null`.
+Conversion can fail, e.g. "102.234" can't losslessly convert to an integer, causing printf to print an error. If you are okay with losing information, silence errors with ``2>/dev/null``.
+
+A number between the ``%`` and the format letter specifies the width. The result will be left-padded with spaces.
 
 Backslash Escapes
 -----------------
@@ -66,7 +68,7 @@ printf also knows a number of backslash escapes:
 
 Errors and Return Status
 ------------------------
-If the given argument doesn't work for the given format (like when you try to convert a number like `3.141592` to an integer), printf prints an error, to stderr. printf will then also return non-zero, but will still try to print as much as it can.
+If the given argument doesn't work for the given format (like when you try to convert a number like 3.141592 to an integer), printf prints an error, to stderr. printf will then also return non-zero, but will still try to print as much as it can.
 
 It will also return non-zero if no argument at all was given, in which case it will print nothing.
 
@@ -77,7 +79,7 @@ Example
 
 ::
 
-    printf '%s\\t%s\\n' flounder fish
+    printf '%s\t%s\n' flounder fish
 
 Will print "flounder	fish" (separated with a tab character), followed by a newline character. This is useful for writing completions, as fish expects completion scripts to output the option followed by the description, separated with a tab character.
 
@@ -85,7 +87,7 @@ Will print "flounder	fish" (separated with a tab character), followed by a newli
 
     printf '%s: %d' "Number of bananas in my pocket" 42
 
-Will print "Number of bananas in my pocket: 42", _without_ a newline.
+Will print "Number of bananas in my pocket: 42", `without` a newline.
 
 See Also
 --------
@@ -94,4 +96,4 @@ See Also
 
 Footnotes
 ---------
-.. [#] (in fact while fish's ``echo`` supports ``--``, POSIX forbids it, so other implementations can't be used if the input contains anything starting with `-`)
+.. [#] (in fact while fish's ``echo`` supports ``--``, POSIX forbids it, so other implementations can't be used if the input contains anything starting with ``-``)

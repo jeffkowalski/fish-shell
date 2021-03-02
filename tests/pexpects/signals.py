@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from pexpect_helper import SpawnedProc
 
-sp = SpawnedProc()
+sp = SpawnedProc(timeout=10)
 send, sendline, sleep, expect_prompt, expect_re, expect_str = (
     sp.send,
     sp.sendline,
@@ -15,6 +15,7 @@ from time import sleep
 import os
 import signal
 import subprocess
+import sys
 
 expect_prompt()
 
@@ -33,6 +34,7 @@ sendline("function postexec --on-event fish_postexec; echo fish_postexec spotted
 expect_prompt()
 sendline("read")
 expect_re("\r\n?read> $")
+sleep(0.100)
 os.kill(sp.spawn.pid, signal.SIGINT)
 expect_str("fish_postexec spotted")
 expect_prompt()
@@ -61,7 +63,8 @@ send("sleep 130 &\r")
 expect_prompt()
 send("sleep 131 &\r")
 expect_prompt()
-send("sleep 132\r")
+send("sleep 9999999\r")
+sleep(0.100)  # ensure fish kicks off the above sleep before it gets HUP - see #7288
 os.kill(sp.spawn.pid, signal.SIGHUP)
 
 # Verify the spawned fish shell has exited.

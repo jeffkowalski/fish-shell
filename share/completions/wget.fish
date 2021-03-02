@@ -73,8 +73,8 @@ complete -c wget -l proxy-password -d "Specify the proxy password" -x
 complete -c wget -l referer -d "Set referer URL" -x
 complete -c wget -l save-headers -d "Save the headers sent by the HTTP server"
 complete -c wget -s U -l user-agent -d "Identify as agent-string" -x
-complete -c wget -l post-data -d "Use POST as the method for all HTTP requests and send the specified data in the request body" -x
-complete -c wget -l post-file -d "Use POST as the method for all HTTP requests and send the specified data in the request body" -r
+complete -c wget -l post-data -d "Use POST for all HTTP requests and send the specified data in the request body" -x
+complete -c wget -l post-file -d "Use POST for all HTTP requests and send the specified file in the request body" -r
 complete -c wget -l no-http-keep-alive -d "Turn off keep-alive for http downloads"
 
 # HTTPS options
@@ -130,4 +130,3 @@ complete -c wget -s I -l include-directories -d "Specify a comma-separated list 
 complete -c wget -s X -l exclude-directories -d "Specify a comma-separated list of directories you wish to exclude" -x
 complete -c wget -l no-parent -d "Do not ever ascend to the parent directory"
 complete -c wget -o np -d "Do not ever ascend to the parent directory"
-

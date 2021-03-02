@@ -53,9 +53,9 @@ class scoped_buffer_t {
     screen_t &screen_;
 
    public:
-    explicit scoped_buffer_t(screen_t &s) : screen_(s) { screen_.outp().beginBuffering(); }
+    explicit scoped_buffer_t(screen_t &s) : screen_(s) { screen_.outp().begin_buffering(); }
 
-    ~scoped_buffer_t() { screen_.outp().endBuffering(); }
+    ~scoped_buffer_t() { screen_.outp().end_buffering(); }
 };
 
 // Singleton of the cached escape sequences seen in prompts and similar strings.
@@ -368,7 +368,7 @@ prompt_layout_t layout_cache_t::calc_prompt_layout(const wcstring &prompt_str,
     size_t prompt_len = prompt_str.size();
     const wchar_t *prompt = prompt_str.c_str();
 
-    prompt_layout_t layout = {1, 0, 0};
+    prompt_layout_t layout = {{}, 0, 0};
     wcstring trunc_prompt;
 
     size_t run_start = 0;
@@ -389,7 +389,9 @@ prompt_layout_t layout_cache_t::calc_prompt_layout(const wcstring &prompt_str,
 
         wchar_t endc = prompt[run_end];
         if (endc) {
-            layout.line_count += (endc == L'\n' || endc == L'\f');
+            if (endc == L'\n' || endc == L'\f') {
+                layout.line_breaks.push_back(trunc_prompt.size());
+            }
             trunc_prompt.push_back(endc);
             run_start = run_end + 1;
         } else {
@@ -409,7 +411,7 @@ static size_t calc_prompt_lines(const wcstring &prompt) {
     // calc_prompt_width_and_lines.
     size_t result = 1;
     if (prompt.find_first_of(L"\n\f") != wcstring::npos) {
-        result = layout_cache_t::shared.calc_prompt_layout(prompt).line_count;
+        result = layout_cache_t::shared.calc_prompt_layout(prompt).line_breaks.size() + 1;
     }
     return result;
 }
@@ -696,7 +698,8 @@ static void s_update(screen_t *scr, const wcstring &left_prompt, const wcstring 
     const scoped_buffer_t buffering(*scr);
 
     // Determine size of left and right prompt. Note these have already been truncated.
-    const size_t left_prompt_width = cached_layouts.calc_prompt_layout(left_prompt).last_line_width;
+    const prompt_layout_t left_prompt_layout = cached_layouts.calc_prompt_layout(left_prompt);
+    const size_t left_prompt_width = left_prompt_layout.last_line_width;
     const size_t right_prompt_width =
         cached_layouts.calc_prompt_layout(right_prompt).last_line_width;
 
@@ -734,7 +737,15 @@ static void s_update(screen_t *scr, const wcstring &left_prompt, const wcstring 
     // Output the left prompt if it has changed.
     if (left_prompt != scr->actual_left_prompt) {
         s_move(scr, 0, 0);
-        s_write_str(scr, left_prompt.c_str());
+        size_t start = 0;
+        for (const size_t line_break : left_prompt_layout.line_breaks) {
+            s_write_str(scr, left_prompt.substr(start, line_break - start).c_str());
+            if (clr_eol) {
+                s_write_mbs(scr, clr_eol);
+            }
+            start = line_break;
+        }
+        s_write_str(scr, left_prompt.c_str() + start);
         scr->actual_left_prompt = left_prompt;
         scr->actual.cursor.x = static_cast<int>(left_prompt_width);
     }
@@ -919,8 +930,6 @@ struct screen_layout_t {
     wcstring right_prompt;
     // The autosuggestion.
     wcstring autosuggestion;
-    // Whether the prompts get their own line or not.
-    bool prompts_get_own_line;
 };
 
 // Given a vector whose indexes are offsets and whose values are the widths of the string if
@@ -1085,14 +1094,7 @@ static screen_layout_t compute_layout(screen_t *s, size_t screen_width,
     if (!done) {
         result.left_prompt = left_prompt;
         result.left_prompt_space = left_prompt_width;
-        // See remark about for why we can't use the right prompt here result.right_prompt =
-        // right_prompt. If the command wraps, and the prompt is not short, place the command on its
-        // own line. A short prompt is 33% or less of the terminal's width.
-        const size_t prompt_percent_width = (100 * left_prompt_width) / screen_width;
-        if (left_prompt_width + first_command_line_width + 1 > screen_width &&
-            prompt_percent_width > 33) {
-            result.prompts_get_own_line = true;
-        }
+        result.autosuggestion = autosuggestion;
     }
 
     return result;
@@ -1153,10 +1155,6 @@ void s_write(screen_t *s, const wcstring &left_prompt, const wcstring &right_pro
 
     // If overflowing, give the prompt its own line to improve the situation.
     size_t first_line_prompt_space = layout.left_prompt_space;
-    if (layout.prompts_get_own_line) {
-        s_desired_append_char(s, L'\n', highlight_spec_t{}, 0, 0, 0);
-        first_line_prompt_space = 0;
-    }
 
     // Reconstruct the command line.
     wcstring effective_commandline = explicit_command_line + layout.autosuggestion;

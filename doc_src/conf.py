@@ -11,6 +11,7 @@ import os.path
 import pygments
 import subprocess
 from sphinx.errors import SphinxError, SphinxWarning
+from docutils import nodes, utils
 
 # -- Helper functions --------------------------------------------------------
 
@@ -20,8 +21,29 @@ def strip_ext(path):
     return os.path.splitext(path)[0]
 
 
-# -- Load our Pygments lexer -------------------------------------------------
+# A :issue: role to link to github issues.
+# Used like :issue:`2364`
+def issue_role(name, rawtext, text, lineno, inliner, options=None, content=None):
+    options = options or {}
+    config = inliner.document.settings.env.app.config
+    try:
+        issue_num = int(text.strip())
+        if issue_num <= 0:
+            raise ValueError
+    except ValueError:
+        msg = inliner.reporter.error('Invalid issue number: "%s"' % text, line=lineno)
+        prb = inliner.problematic(rawtext, rawtext, msg)
+        return [prb], [msg]
+    template = issue_url + "/{n}"
+    ref = template.format(n=issue_num)
+    issue_text = "#{issue_no}".format(issue_no=issue_num)
+    link = nodes.reference(text=issue_text, refuri=ref, **options)
+    return [link], []
+
+
+# -- Load our extensions -------------------------------------------------
 def setup(app):
+    # Our own pygments lexer
     from sphinx.highlighting import lexers
 
     this_dir = os.path.dirname(os.path.realpath(__file__))
@@ -29,11 +51,9 @@ def setup(app):
         os.path.join(this_dir, "fish_indent_lexer.py"), lexername="FishIndentLexer"
     )
     lexers["fish-docs-samples"] = fish_indent_lexer
-    # add_css_file only appears in Sphinx 1.8.0
-    if hasattr(app, "add_css_file"):
-        app.add_css_file("custom.css")
-    else:
-        app.add_stylesheet("custom.css")
+
+    app.add_config_value("issue_url", default=None, rebuild="html")
+    app.add_role("issue", issue_role)
 
 
 # The default language to assume
@@ -55,6 +75,7 @@ highlight_language = "fish-docs-samples"
 project = "fish-shell"
 copyright = "2020, fish-shell developers"
 author = "fish-shell developers"
+issue_url = "https://github.com/fish-shell/fish-shell/issues"
 
 # Parsing FISH-BUILD-VERSION-FILE is possible but hard to ensure that it is in the right place
 # fish_indent is guaranteed to be on PATH for the Pygments highlighter anyway
@@ -111,8 +132,12 @@ pygments_style = None
 # The theme to use for HTML and HTML Help pages.  See the documentation for
 # a list of builtin themes.
 # !!! If you change this you also need to update the @import at the top
-# of _static/fish-syntax-style.css
-html_theme = "nature"
+# of _static/pygments.css
+html_theme_path = ["."]
+html_theme = "python_docs_theme"
+
+# Don't add a weird "_sources" directory
+html_copy_source = False
 
 # Theme options are theme-specific and customize the look and feel of a theme
 # further.  For a list of options available for each theme, see the
@@ -123,7 +148,7 @@ html_theme = "nature"
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
 # so a file named "default.css" will overwrite the builtin "default.css".
-html_static_path = ["_static"]
+# html_static_path = ["_static"]
 
 # Custom sidebar templates, must be a dictionary that maps document names
 # to template names.
@@ -191,8 +216,15 @@ def get_command_description(path, name):
 man_pages = [
     (master_doc, "fish-doc", "fish-shell Documentation", [author], 1),
     ("tutorial", "fish-tutorial", "fish-shell tutorial", [author], 1),
-    ("CHANGELOG", "fish-changelog", "fish-shell changelog", [author], 1),
+    ("relnotes", "fish-releasenotes", "fish-shell release notes", [author], 1),
     ("completions", "fish-completions", "Writing fish completions", [author], 1),
+    (
+        "fish_for_bash_users",
+        "fish-for-bash-users",
+        "A quick fish primer for those coming from bash",
+        [author],
+        1,
+    ),
     ("faq", "fish-faq", "fish-shell faq", [author], 1),
 ]
 for path in sorted(glob.glob("cmds/*")):

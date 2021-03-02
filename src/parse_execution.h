@@ -12,6 +12,7 @@
 #include "proc.h"
 
 class block_t;
+class cancellation_group_t;
 class operation_context_t;
 class parser_t;
 
@@ -37,6 +38,7 @@ class parse_execution_context_t {
     parsed_source_ref_t pstree;
     parser_t *const parser;
     const operation_context_t &ctx;
+    const std::shared_ptr<cancellation_group_t> cancel_group;
 
     // The currently executing job node, used to indicate the line number.
     const ast::job_t *executing_job_node{};
@@ -72,7 +74,7 @@ class parse_execution_context_t {
     // Utilities
     wcstring get_source(const ast::node_t &node) const;
     const ast::decorated_statement_t *infinite_recursive_statement_in_job_list(
-        const ast::job_list_t &job_list, wcstring *out_func_name) const;
+        const ast::job_list_t &jobs, wcstring *out_func_name) const;
 
     // Expand a command which may contain variables, producing an expand command and possibly
     // arguments. Prints an error message on error.
@@ -85,7 +87,7 @@ class parse_execution_context_t {
     enum process_type_t process_type_for_command(const ast::decorated_statement_t &statement,
                                                  const wcstring &cmd) const;
     end_execution_reason_t apply_variable_assignments(
-        process_t *proc, const ast::variable_assignment_list_t &variable_assignments,
+        process_t *proc, const ast::variable_assignment_list_t &variable_assignment_list,
         const block_t **block);
 
     // These create process_t structures from statements.
@@ -128,7 +130,11 @@ class parse_execution_context_t {
                                                        globspec_t glob_behavior);
 
     // Determines the list of redirections for a node.
+    // If \p allow_high_fds is false, then report an error for an fd redirection other than to
+    // in/out/err. This is set when constructing an internal process and prevents writing random
+    // data to internal fish fds.
     end_execution_reason_t determine_redirections(const ast::argument_or_redirection_list_t &list,
+                                                  bool allow_high_fds,
                                                   redirection_spec_list_t *out_redirections);
 
     end_execution_reason_t run_1_job(const ast::job_t &job, const block_t *associated_block);
@@ -149,8 +155,10 @@ class parse_execution_context_t {
 
    public:
     /// Construct a context in preparation for evaluating a node in a tree, with the given block_io.
-    /// The execution context may access the parser and group through ctx.
+    /// The cancel group is never null and should be provided when resolving job groups.
+    /// The execution context may access the parser and parent job group (if any) through ctx.
     parse_execution_context_t(parsed_source_ref_t pstree, const operation_context_t &ctx,
+                              std::shared_ptr<cancellation_group_t> cancel_group,
                               io_chain_t block_io);
 
     /// Returns the current line number, indexed from 1. Not const since it touches

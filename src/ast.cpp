@@ -125,7 +125,7 @@ class token_stream_t {
         if (count_ == 0) {
             return next_from_tok();
         }
-        parse_token_t result = std::move(lookahead_[start_]);
+        parse_token_t result = lookahead_[start_];
         start_ = mask(start_ + 1);
         count_ -= 1;
         return result;
@@ -471,7 +471,7 @@ class ast_t::populator_t {
 
     /// \return whether the status is unwinding.
     /// This is more efficient than checking the status directly.
-    bool is_unwinding() { return unwinding_; }
+    bool is_unwinding() const { return unwinding_; }
 
     /// \return whether any leaf nodes we visit should be marked as unsourced.
     bool unsource_leaves() {
@@ -915,7 +915,11 @@ class ast_t::populator_t {
 
             // Now try parsing a node.
             if (auto node = this->try_parse<ContentsNode>()) {
-                contents.push_back(std::move(node));
+                // #7201: Minimize reallocations of contents vector
+                if (contents.empty()) {
+                    contents.reserve(64);
+                }
+                contents.emplace_back(std::move(node));
             } else if (exhaust_stream && peek_type() != parse_token_type_t::terminate) {
                 // We aren't allowed to stop. Produce an error and keep going.
                 consume_excess_token_generating_error();
@@ -933,7 +937,7 @@ class ast_t::populator_t {
 
             // We're going to heap-allocate our array.
             using contents_ptr_t = typename list_t<ListType, ContentsNode>::contents_ptr_t;
-            contents_ptr_t *array = new contents_ptr_t[contents.size()];
+            auto *array = new contents_ptr_t[contents.size()];
             std::move(contents.begin(), contents.end(), array);
 
             list.length = static_cast<uint32_t>(contents.size());
@@ -1107,6 +1111,12 @@ class ast_t::populator_t {
 
         if (!token.allows_token(peek_token().type)) {
             const auto &peek = peek_token();
+            if ((flags_ & parse_flag_leave_unterminated) &&
+                (peek.tok_error == tokenizer_error_t::unterminated_quote ||
+                 peek.tok_error == tokenizer_error_t::unterminated_subshell)) {
+                return;
+            }
+
             parse_error(peek, parse_error_generic, L"Expected %ls, but found %ls",
                         token_types_user_presentable_description({TokTypes...}).c_str(),
                         peek.user_presentable_description().c_str());
@@ -1130,8 +1140,13 @@ class ast_t::populator_t {
             keyword.unsourced = true;
             const auto &peek = peek_token();
 
+            if ((flags_ & parse_flag_leave_unterminated) &&
+                (peek.tok_error == tokenizer_error_t::unterminated_quote ||
+                 peek.tok_error == tokenizer_error_t::unterminated_subshell)) {
+                return;
+            }
+
             // Special error reporting for keyword_t<kw_end>.
-            bool specially_handled = false;
             std::array<parse_keyword_t, sizeof...(KWs)> allowed = {{KWs...}};
             if (allowed.size() == 1 && allowed[0] == parse_keyword_t::kw_end) {
                 assert(!visit_stack_.empty() && "Visit stack should not be empty");
@@ -1143,11 +1158,9 @@ class ast_t::populator_t {
                                       L"Missing end to balance this %ls", kw_name);
                 }
             }
-            if (!specially_handled) {
-                parse_error(peek, parse_error_generic, L"Expected %ls, but found %ls",
-                            keywords_user_presentable_description({KWs...}).c_str(),
-                            peek.user_presentable_description().c_str());
-            }
+            parse_error(peek, parse_error_generic, L"Expected %ls, but found %ls",
+                        keywords_user_presentable_description({KWs...}).c_str(),
+                        peek.user_presentable_description().c_str());
             return;
         }
         parse_token_t tok = consume_any_token();

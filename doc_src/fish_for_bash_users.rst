@@ -1,7 +1,9 @@
+.. _fish_for_bash_users:
+
 Fish for bash users
 ###################
 
-This is to give you a quick overview if you come from bash (or to a lesser extent other shells zsh or ksh) and want to know how fish differs. Fish is intentionally not POSIX-compatible and as such some of the things you are used to work differently.
+This is to give you a quick overview if you come from bash (or to a lesser extent other shells like zsh or ksh) and want to know how fish differs. Fish is intentionally not POSIX-compatible and as such some of the things you are used to work differently.
 
 Many things are similar - they both fundamentally expand commandlines to execute commands, have pipes, redirections, variables, globs, use command output in various ways. This document is there to quickly show you the differences.
 
@@ -21,9 +23,11 @@ Variables
 
 Fish sets and erases variables with :ref:`set <cmd-set>` instead of ``VAR=VAL`` and ``declare`` and ``unset`` and ``export``. ``set`` takes options to determine the scope and exportedness of a variable::
 
-  set -gx PAGER less # $PAGER is now global and exported, so this is like `export PAGER=less`
+  # Define $PAGER global and exported, so this is like ``export PAGER=less``
+  set -gx PAGER less
 
-  set -l alocalvariable foo # $alocalvariable is now only locally defined.
+  # Define $alocalvariable only locally - like ``local alocalvariable=foo``
+  set -l alocalvariable foo
 
 or to erase variables::
 
@@ -166,7 +170,34 @@ It can handle floating point numbers::
 Prompts
 -------
 
-Fish does not use the ``$PS1``, ``$PS2`` and so on variables. Instead the prompt is the output of the ``fish_prompt`` function, plus the ``fish_mode_prompt`` function if vi-mode is enabled and the ``fish_right_prompt`` function for the right prompt.
+Fish does not use the ``$PS1``, ``$PS2`` and so on variables. Instead the prompt is the output of the :ref:`fish_prompt <cmd-fish_prompt>` function, plus the :ref:`fish_mode_prompt <cmd-fish_mode_prompt>` function if vi-mode is enabled and the :ref:`fish_right_prompt <cmd-fish_right_prompt>` function for the right prompt.
+
+As an example, here's a relatively simple bash prompt:
+
+.. code-block:: sh
+
+    # <$HOSTNAME> <$PWD in blue> <Prompt Sign in Yellow> <Rest in default light white>
+    export PS1='\h\[\e[1;34m\]\w\[\e[m\] \[\e[1;32m\]\$\[\e[m\] '
+
+and a rough fish equivalent::
+
+  function fish_prompt
+      set -l prompt_symbol '$'
+      fish_is_root_user; and set prompt_symbol '#'
+
+      echo -s $hostname (set_color blue) (prompt_pwd) \
+      (set_color yellow) $prompt_symbol (set_color normal)
+  end
+
+This shows a few differences:
+
+- Fish provides :ref:`set_color <cmd-set_color>` to color text. It can use the 16 named colors and also RGB sequences (so you could also use ``set_color 5555FF``)
+- Instead of introducing specific escapes like ``\h`` for the hostname, the prompt is simply a function, so you can use variables like ``$hostname``.
+- Fish offers helper functions for adding things to the prompt, like :ref:`fish_vcs_prompt <cmd-fish_vcs_prompt>` for adding a display for common version control systems (git, mercurial, svn) and :ref:`prompt_pwd <cmd-prompt_pwd>` for showing a shortened $PWD (the user's home directory becomes ``~`` and any path component is shortened). 
+
+The default prompt is reasonably full-featured and its code can be read via ``type fish_prompt``.
+
+Fish does not have ``$PS2`` for continuation lines, instead it leaves the lines indented to show that the commandline isn't complete yet.
 
 Blocks and loops
 ----------------
@@ -242,4 +273,4 @@ By now it has become apparent that fish puts much more of a focus on its builtin
 - :ref:`count <cmd-count>` can be used to count things and therefore replaces ``$#`` and can be used instead of ``wc``.
 - :ref:`status <cmd-status>` provides information about the shell status, e.g. if it's interactive or what the current linenumber is. This replaces ``$-`` and ``$BASH_LINENO`` and other variables.
 
-- ``seq(1)`` can be used as a replacement for ``{1..10}`` range expansion. If your OS doesn't ship a `seq` fish includes a replacement function.
+- ``seq(1)`` can be used as a replacement for ``{1..10}`` range expansion. If your OS doesn't ship a ``seq`` fish includes a replacement function.

@@ -197,7 +197,7 @@ void accept_field_visitor(FieldVisitor &v, bool /*reverse*/, Field &field) {
 
 // Call visit_field on visitor \p v, for the field \p field and also \p rest.
 template <typename FieldVisitor, typename Field, typename... Rest>
-void accept_field_visitor(FieldVisitor &v, bool reverse, Field &field, Rest &... rest) {
+void accept_field_visitor(FieldVisitor &v, bool reverse, Field &field, Rest &...rest) {
     if (!reverse) visit_1_field(v, field);
     accept_field_visitor<FieldVisitor, Rest...>(v, reverse, rest...);
     if (reverse) visit_1_field(v, field);
@@ -730,11 +730,12 @@ struct job_conjunction_continuation_t final
     : public branch_t<type_t::job_conjunction_continuation> {
     // The && or || token.
     token_t<parse_token_type_t::andand, parse_token_type_t::oror> conjunction;
+    maybe_newlines_t newlines;
 
     // The job itself.
     job_t job;
 
-    FIELDS(conjunction, job)
+    FIELDS(conjunction, newlines, job)
 };
 
 // An andor_job just wraps a job, but requires that the job have an 'and' or 'or' job_decorator.

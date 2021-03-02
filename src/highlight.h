@@ -17,6 +17,7 @@ enum class highlight_role_t : uint8_t {
     normal = 0,            // normal text
     error,                 // error
     command,               // command
+    keyword,
     statement_terminator,  // process separator
     param,                 // command parameter (argument)
     comment,               // comment
@@ -95,11 +96,10 @@ std::string colorize(const wcstring &text, const std::vector<highlight_spec_t> &
 /// \param buffstr The buffer on which to perform syntax highlighting
 /// \param color The array in which to store the color codes. The first 8 bits are used for fg
 /// color, the next 8 bits for bg color.
-/// \param pos the cursor position. Used for quote matching, etc.
 /// \param ctx The variables and cancellation check for this operation.
 /// \param io_ok If set, allow IO which may block. This means that e.g. invalid commands may be
 /// detected.
-void highlight_shell(const wcstring &buffstr, std::vector<highlight_spec_t> &color, size_t pos,
+void highlight_shell(const wcstring &buffstr, std::vector<highlight_spec_t> &color,
                      const operation_context_t &ctx, bool io_ok = false);
 
 /// highlight_color_resolver_t resolves highlight specs (like "a command") to actual RGB colors.
@@ -117,9 +117,9 @@ struct highlight_color_resolver_t {
                                       const environment_t &vars) const;
 };
 
-/// Given a command 'str' from the history, try to determine whether we ought to suggest it by
-/// specially recognizing the command. Returns true if we validated the command. If so, returns by
-/// reference whether the suggestion is valid or not.
+/// Given an item \p item from the history which is a proposed autosuggestion, return whether the
+/// autosuggestion is valid. It may not be valid if e.g. it is attempting to cd into a directory
+/// which does not exist.
 bool autosuggest_validate_from_history(const history_item_t &item,
                                        const wcstring &working_directory,
                                        const operation_context_t &ctx);

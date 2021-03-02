@@ -134,14 +134,11 @@ wcstring parse_error_t::describe(const wcstring &src, bool is_interactive) const
 }
 
 void parse_error_offset_source_start(parse_error_list_t *errors, size_t amt) {
-    assert(errors != nullptr);
-    if (amt > 0) {
-        size_t i, max = errors->size();
-        for (i = 0; i < max; i++) {
-            parse_error_t *error = &errors->at(i);
+    if (amt > 0 && errors != nullptr) {
+        for (parse_error_t &error : *errors) {
             // Preserve the special meaning of -1 as 'unknown'.
-            if (error->source_start != SOURCE_LOCATION_UNKNOWN) {
-                error->source_start += amt;
+            if (error.source_start != SOURCE_LOCATION_UNKNOWN) {
+                error.source_start += amt;
             }
         }
     }
@@ -182,6 +179,12 @@ wcstring token_type_user_presentable_description(parse_token_type_t type, parse_
             return L"end of the statement";
         case parse_token_type_t::terminate:
             return L"end of the input";
+        case parse_token_type_t::error:
+            return L"a parse error";
+        case parse_token_type_t::tokenizer_error:
+            return L"an incomplete token";
+        case parse_token_type_t::comment:
+            return L"a comment";
         default: {
             return format_string(L"a %ls", token_type_description(type));
         }

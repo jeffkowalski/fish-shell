@@ -24,7 +24,7 @@ function __fish_complete_svn_diff --description 'Complete "svn diff" arguments'
 
 end
 
-function _svn_cmpl_ -d 'Make a completion for a subcommand' --no-scope-shadowing --argument-names subcommand
+function _svn_cmpl_ -d 'Make a completion for a subcommand' --argument-names subcommand
     set -e argv[1]
     complete -c svn -n "__fish_seen_subcommand_from $subcommand" $argv
 end
@@ -196,7 +196,7 @@ for cmd in $blame $diff $log $merge
 end
 
 for cmd in $cleanup $merge $switch $update
-    _svn_cmpl_ $cmd -l diff3-cmd -d 'Use as merge command' -xa "(__fish_complete_external_command)"
+    _svn_cmpl_ $cmd -l diff3-cmd -d 'Use as merge command' -xa "(complete -C '')"
 end
 
 for cmd in $blame $info $list $log $stat
@@ -217,7 +217,7 @@ end
 
 for cmd in $diff $log
     _svn_cmpl_ $cmd -l internal-diff -d 'Override diff-cmd specified in config file'
-    _svn_cmpl_ $cmd -l diff-cmd -d 'Use external diff command' -xa "(__fish_complete_external_command)"
+    _svn_cmpl_ $cmd -l diff-cmd -d 'Use external diff command' -xa "(complete -C '')"
 end
 
 for cmd in $add $import

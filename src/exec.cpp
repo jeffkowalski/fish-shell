@@ -54,6 +54,14 @@
 /// Number of calls to fork() or posix_spawn().
 static relaxed_atomic_t<int> s_fork_count{0};
 
+/// A launch_result_t indicates when a process failed to launch, and therefore the rest of the
+/// pipeline should be aborted. This includes failed redirections, fd exhaustion, fork() failures,
+/// etc.
+enum class launch_result_t {
+    ok,
+    failed,
+} __warn_unused_type;
+
 /// This function is executed by the child process created by a call to fork(). It should be called
 /// after \c child_setup_process. It calls execve to replace the fish process image with the command
 /// specified in \c p. It never returns. Called in a forked child! Do not allocate memory, etc.
@@ -318,10 +326,10 @@ bool blocked_signals_for_job(const job_t &job, sigset_t *sigmask) {
 }
 
 /// Call fork() as part of executing a process \p p in a job \j. Execute \p child_action in the
-/// context of the child. Returns true if fork succeeded, false if fork failed.
-static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t *p,
-                                   const dup2_list_t &dup2s, const char *fork_type,
-                                   const std::function<void()> &child_action) {
+/// context of the child.
+static launch_result_t fork_child_for_process(const std::shared_ptr<job_t> &job, process_t *p,
+                                              const dup2_list_t &dup2s, const char *fork_type,
+                                              const std::function<void()> &child_action) {
     assert(!job->group->is_internal() && "Internal groups should never need to fork");
     // Decide if we want to job to control the tty.
     // If so we need to get our pgroup; if not we don't need the pgroup.
@@ -337,7 +345,7 @@ static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t 
 
         // The child attempts to join the pgroup.
         if (int err = execute_setpgid(p->pid, pgid, false /* not parent */)) {
-            report_setpgid_error(err, pgid, job.get(), p);
+            report_setpgid_error(err, false /* is_parent */, pgid, job.get(), p);
         }
         child_setup_process(claim_tty ? pgid : INVALID_PID, fish_pgrp, *job, true, dup2s);
         child_action();
@@ -345,9 +353,7 @@ static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t 
     }
 
     if (pid < 0) {
-        FLOGF(warning, L"Failed to fork %s!\n", fork_type);
-        job_mark_process_as_failed(job, p);
-        return false;
+        return launch_result_t::failed;
     }
 
     // This is the parent process. Store away information on the child, and
@@ -362,39 +368,32 @@ static bool fork_child_for_process(const std::shared_ptr<job_t> &job, process_t 
     // The parent attempts to send the child to its pgroup.
     // EACCESS is an expected benign error as the child may have called exec().
     if (int err = execute_setpgid(p->pid, pgid, true /* is parent */)) {
-        if (err != EACCES) report_setpgid_error(err, pgid, job.get(), p);
+        if (err != EACCES) report_setpgid_error(err, true /* is_parent */, pgid, job.get(), p);
     }
     terminal_maybe_give_to_job_group(job->group.get(), false);
-    return true;
+    return launch_result_t::ok;
 }
 
 /// Execute an internal builtin. Given a parser and a builtin process, execute the builtin with the
-/// given streams. If pipe_read is set, assign stdin to it; otherwise infer stdin from the IO chain.
-/// \return true on success, false if there is an exec error.
-static bool exec_internal_builtin_proc(parser_t &parser, process_t *p, const io_pipe_t *pipe_read,
+/// given streams. Infer stdin from the IO chain. An error return here indicates that the process
+/// failed to launch, and the rest of the pipeline should be cancelled.
+static void exec_internal_builtin_proc(parser_t &parser, process_t *p,
                                        const io_chain_t &proc_io_chain, io_streams_t &streams) {
     assert(p->type == process_type_t::builtin && "Process must be a builtin");
     int local_builtin_stdin = STDIN_FILENO;
-    autoclose_fd_t locally_opened_stdin{};
 
-    // If this is the first process, check the io redirections and see where we should
-    // be reading from.
-    if (pipe_read) {
-        local_builtin_stdin = pipe_read->source_fd;
-    } else if (const auto in = proc_io_chain.io_for_fd(STDIN_FILENO)) {
+    // Figure out what fd to use for the builtin's stdin.
+    if (const auto in = proc_io_chain.io_for_fd(STDIN_FILENO)) {
         // Ignore fd redirections from an fd other than the
         // standard ones. e.g. in source <&3 don't actually read from fd 3,
         // which is internal to fish. We still respect this redirection in
         // that we pass it on as a block IO to the code that source runs,
         // and therefore this is not an error.
-        bool ignore_redirect =
-            in->io_mode == io_mode_t::fd && in->source_fd >= 0 && in->source_fd < 3;
+        bool ignore_redirect = in->io_mode == io_mode_t::fd && in->source_fd >= 3;
         if (!ignore_redirect) {
             local_builtin_stdin = in->source_fd;
         }
     }
-
-    if (local_builtin_stdin == -1) return false;
 
     // Determine if we have a "direct" redirection for stdin.
     bool stdin_is_directly_redirected = false;
@@ -425,16 +424,16 @@ static bool exec_internal_builtin_proc(parser_t &parser, process_t *p, const io_
     streams.stdin_is_directly_redirected = stdin_is_directly_redirected;
     streams.io_chain = &proc_io_chain;
 
-    // Note this call may block for a long time, while the builtin performs I/O.
+    // Note this call may block for a long time while the builtin runs.
     p->status = builtin_run(parser, p->get_argv(), streams);
-    return true;  // "success"
 }
 
 /// \return an newly allocated output stream for the given fd, which is typically stdout or stderr.
 /// This inspects the io_chain and decides what sort of output stream to return.
-static std::unique_ptr<output_stream_t> create_output_stream_for_builtin(const parser_t &parser,
-                                                                         const io_chain_t &io_chain,
-                                                                         int fd) {
+/// If \p piped_output_needs_buffering is set, and if the output is going to a pipe, then the other
+/// end then synchronously writing to the pipe risks deadlock, so we must buffer it.
+static std::unique_ptr<output_stream_t> create_output_stream_for_builtin(
+    int fd, const io_chain_t &io_chain, bool piped_output_needs_buffering) {
     const shared_ptr<const io_data_t> io = io_chain.io_for_fd(fd);
     if (io == nullptr) {
         // Common case of no redirections.
@@ -442,94 +441,54 @@ static std::unique_ptr<output_stream_t> create_output_stream_for_builtin(const p
         return make_unique<fd_output_stream_t>(fd);
     }
     switch (io->io_mode) {
-        case io_mode_t::bufferfill:
-            // Write to a buffer.
-            return make_unique<buffered_output_stream_t>(parser.libdata().read_limit);
+        case io_mode_t::bufferfill: {
+            // Our IO redirection is to an internal buffer, e.g. a command substitution.
+            // We will write directly to it.
+            std::shared_ptr<io_buffer_t> buffer =
+                // (this is not a dynamic_cast because that needs rtti,
+                // and we currently use it nowhere else)
+                ((const io_bufferfill_t *)io.get())->buffer();
+            return make_unique<buffered_output_stream_t>(buffer);
+        }
 
         case io_mode_t::close:
+            // Like 'echo foo >&-'
             return make_unique<null_output_stream_t>();
 
-        // TODO: reconsider these.
         case io_mode_t::file:
+            // Output is to a file which has been opened.
+            return make_unique<fd_output_stream_t>(io->source_fd);
+
         case io_mode_t::pipe:
+            // Output is to a pipe. We may need to buffer.
+            if (piped_output_needs_buffering) {
+                return make_unique<string_output_stream_t>();
+            } else {
+                return make_unique<fd_output_stream_t>(io->source_fd);
+            }
+
         case io_mode_t::fd:
-            return make_unique<buffered_output_stream_t>(parser.libdata().read_limit);
+            // This is a case like 'echo foo >&5'
+            // It's uncommon and unclear what should happen.
+            return make_unique<string_output_stream_t>();
     }
     DIE("Unreachable");
 }
 
 /// Handle output from a builtin, by printing the contents of builtin_io_streams to the redirections
 /// given in io_chain.
-static bool handle_builtin_output(parser_t &parser, const std::shared_ptr<job_t> &j, process_t *p,
-                                  io_chain_t *io_chain, const io_streams_t &builtin_io_streams) {
+static void handle_builtin_output(parser_t &parser, const std::shared_ptr<job_t> &j, process_t *p,
+                                  const io_chain_t &io_chain, const io_streams_t &streams) {
     assert(p->type == process_type_t::builtin && "Process is not a builtin");
 
-    const separated_buffer_t<wcstring> *output_buffer =
-        builtin_io_streams.out.get_separated_buffer();
-    const separated_buffer_t<wcstring> *errput_buffer =
-        builtin_io_streams.err.get_separated_buffer();
-
     // Mark if we discarded output.
-    if (output_buffer && output_buffer->discarded()) {
+    if (streams.out.discarded() || streams.err.discarded()) {
         p->status = proc_status_t::from_exit_code(STATUS_READ_TOO_MUCH);
     }
 
-    const shared_ptr<const io_data_t> stdout_io = io_chain->io_for_fd(STDOUT_FILENO);
-    const shared_ptr<const io_data_t> stderr_io = io_chain->io_for_fd(STDERR_FILENO);
-
-    // If we are directing output to a buffer, then we can just transfer it directly without needing
-    // to write to the bufferfill pipe. Note this is how we handle explicitly separated stdout
-    // output (i.e. string split0) which can't really be sent through a pipe.
-    bool stdout_done = false;
-    if (output_buffer && stdout_io && stdout_io->io_mode == io_mode_t::bufferfill) {
-        auto stdout_buffer = dynamic_cast<const io_bufferfill_t *>(stdout_io.get())->buffer();
-        stdout_buffer->append_from_wide_buffer(*output_buffer);
-        stdout_done = true;
-    }
-
-    bool stderr_done = false;
-    if (errput_buffer && stderr_io && stderr_io->io_mode == io_mode_t::bufferfill) {
-        auto stderr_buffer = dynamic_cast<const io_bufferfill_t *>(stderr_io.get())->buffer();
-        stderr_buffer->append_from_wide_buffer(*errput_buffer);
-        stderr_done = true;
-    }
-
-    // Figure out any data remaining to write. We may have none in which case we can short-circuit.
-    std::string outbuff;
-    if (output_buffer && !stdout_done) {
-        outbuff = wcs2string(output_buffer->newline_serialized());
-    }
-    std::string errbuff;
-    if (errput_buffer && !stderr_done) {
-        errbuff = wcs2string(errput_buffer->newline_serialized());
-    }
-
-    // If we have no redirections for stdout/stderr, just write them directly.
-    if (!stdout_io && !stderr_io) {
-        bool did_err = false;
-        if (write_loop(STDOUT_FILENO, outbuff.data(), outbuff.size()) < 0) {
-            if (errno != EPIPE) {
-                did_err = true;
-                FLOG(error, L"Error while writing to stdout");
-                wperror(L"write_loop");
-            }
-        }
-        if (write_loop(STDERR_FILENO, errbuff.data(), errbuff.size()) < 0) {
-            if (errno != EPIPE && !did_err) {
-                did_err = true;
-                FLOG(error, L"Error while writing to stderr");
-                wperror(L"write_loop");
-            }
-        }
-        if (did_err) {
-            redirect_tty_output();  // workaround glibc bug
-            FLOG(error, L"!builtin_io_done and errno != EPIPE");
-            show_stackframe(L'E');
-        }
-        // Clear the buffers to indicate we finished.
-        outbuff.clear();
-        errbuff.clear();
-    }
+    // Figure out any data remaining to write. We may have none, in which case we can short-circuit.
+    std::string outbuff = wcs2string(streams.out.contents());
+    std::string errbuff = wcs2string(streams.err.contents());
 
     // Some historical behavior.
     if (!outbuff.empty()) fflush(stdout);
@@ -537,14 +496,14 @@ static bool handle_builtin_output(parser_t &parser, const std::shared_ptr<job_t>
 
     // Construct and run our background process.
     run_internal_process_or_short_circuit(parser, j, p, std::move(outbuff), std::move(errbuff),
-                                          *io_chain);
-    return true;
+                                          io_chain);
 }
 
 /// Executes an external command.
-/// \return true on success, false if there is an exec error.
-static bool exec_external_command(parser_t &parser, const std::shared_ptr<job_t> &j, process_t *p,
-                                  const io_chain_t &proc_io_chain) {
+/// An error return here indicates that the process failed to launch, and the rest of
+/// the pipeline should be cancelled.
+static launch_result_t exec_external_command(parser_t &parser, const std::shared_ptr<job_t> &j,
+                                             process_t *p, const io_chain_t &proc_io_chain) {
     assert(p->type == process_type_t::external && "Process is not external");
     // Get argv and envv before we fork.
     null_terminated_array_t<char> argv_array;
@@ -579,8 +538,7 @@ static bool exec_external_command(parser_t &parser, const std::shared_ptr<job_t>
                                            const_cast<char *const *>(envv));
         if (int err = spawner.get_error()) {
             safe_report_exec_error(err, actual_cmd, argv, envv);
-            job_mark_process_as_failed(j, p);
-            return false;
+            return launch_result_t::failed;
         }
         assert(pid.has_value() && *pid > 0 && "Should have either a valid pid, or an error");
 
@@ -601,16 +559,13 @@ static bool exec_external_command(parser_t &parser, const std::shared_ptr<job_t>
         // Ensure it gets set. See #4715, also https://github.com/Microsoft/WSL/issues/2997.
         execute_setpgid(p->pid, pgid, true /* is parent */);
         terminal_maybe_give_to_job_group(j->group.get(), false);
+        return launch_result_t::ok;
     } else
 #endif
     {
-        if (!fork_child_for_process(j, p, dup2s, "external command",
-                                    [&] { safe_launch_process(p, actual_cmd, argv, envv); })) {
-            return false;
-        }
+        return fork_child_for_process(j, p, dup2s, "external command",
+                                      [&] { safe_launch_process(p, actual_cmd, argv, envv); });
     }
-
-    return true;
 }
 
 // Given that we are about to execute a function, push a function block and set up the
@@ -708,20 +663,17 @@ static proc_performer_t get_performer_for_process(process_t *p, job_t *job,
 }
 
 /// Execute a block node or function "process".
-/// \p conflicts contains the list of fds which pipes should avoid.
-/// \p allow_buffering if true, permit buffering the output.
-/// \return true on success, false on error.
-static bool exec_block_or_func_process(parser_t &parser, const std::shared_ptr<job_t> &j,
-                                       process_t *p, const fd_set_t &conflicts, io_chain_t io_chain,
-                                       bool allow_buffering) {
+/// \p piped_output_needs_buffering if true, buffer the output.
+static launch_result_t exec_block_or_func_process(parser_t &parser, const std::shared_ptr<job_t> &j,
+                                                  process_t *p, io_chain_t io_chain,
+                                                  bool piped_output_needs_buffering) {
     // Create an output buffer if we're piping to another process.
     shared_ptr<io_bufferfill_t> block_output_bufferfill{};
-    if (!p->is_last_in_job && allow_buffering) {
+    if (piped_output_needs_buffering) {
         // Be careful to handle failure, e.g. too many open fds.
-        block_output_bufferfill = io_bufferfill_t::create(conflicts);
+        block_output_bufferfill = io_bufferfill_t::create();
         if (!block_output_bufferfill) {
-            job_mark_process_as_failed(j, p);
-            return false;
+            return launch_result_t::failed;
         }
         // Teach the job about its bufferfill, and add it to our io chain.
         io_chain.push_back(block_output_bufferfill);
@@ -733,7 +685,7 @@ static bool exec_block_or_func_process(parser_t &parser, const std::shared_ptr<j
     if (proc_performer_t performer = get_performer_for_process(p, j.get(), io_chain)) {
         p->status = performer(parser);
     } else {
-        return false;
+        return launch_result_t::failed;
     }
 
     // If we have a block output buffer, populate it now.
@@ -742,24 +694,27 @@ static bool exec_block_or_func_process(parser_t &parser, const std::shared_ptr<j
         // Remove our write pipe and forget it. This may close the pipe, unless another thread has
         // claimed it (background write) or another process has inherited it.
         io_chain.remove(block_output_bufferfill);
-        auto block_output_buffer = io_bufferfill_t::finish(std::move(block_output_bufferfill));
-        buffer_contents = block_output_buffer->buffer().newline_serialized();
+        buffer_contents =
+            io_bufferfill_t::finish(std::move(block_output_bufferfill)).newline_serialized();
     }
 
     run_internal_process_or_short_circuit(parser, j, p, std::move(buffer_contents),
                                           {} /* errdata */, io_chain);
-    return true;
+    return launch_result_t::ok;
 }
 
 /// Executes a process \p \p in \p job, using the pipes \p pipes (which may have invalid fds if this
 /// is the first or last process).
 /// \p deferred_pipes represents the pipes from our deferred process; if set ensure they get closed
 /// in any child. If \p is_deferred_run is true, then this is a deferred run; this affects how
-/// certain buffering works. \returns true on success, false on exec error.
-static bool exec_process_in_job(parser_t &parser, process_t *p, const std::shared_ptr<job_t> &j,
-                                const io_chain_t &block_io, autoclose_pipes_t pipes,
-                                const fd_set_t &conflicts, const autoclose_pipes_t &deferred_pipes,
-                                bool is_deferred_run = false) {
+/// certain buffering works.
+/// An error return here indicates that the process failed to launch, and the rest of
+/// the pipeline should be cancelled.
+static launch_result_t exec_process_in_job(parser_t &parser, process_t *p,
+                                           const std::shared_ptr<job_t> &j,
+                                           const io_chain_t &block_io, autoclose_pipes_t pipes,
+                                           const autoclose_pipes_t &deferred_pipes,
+                                           bool is_deferred_run = false) {
     // The write pipe (destined for stdout) needs to occur before redirections. For example,
     // with a redirection like this:
     //
@@ -803,21 +758,10 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
     }
 
     // Append IOs from the process's redirection specs.
-    // This may fail.
+    // This may fail, e.g. a failed redirection.
     if (!process_net_io_chain.append_from_specs(p->redirection_specs(),
                                                 parser.vars().get_pwd_slash())) {
-        // If the redirection to a file failed, append_from_specs closes the corresponding handle
-        // allowing us to recover from failure mid-way through execution of a piped job to e.g.
-        // recover from loss of terminal control, etc.
-
-        // It is unsafe to abort execution in the middle of a multi-command job as we might end up
-        // trying to resume execution without control of the terminal.
-        if (p->is_first_in_job) {
-            // It's OK to abort here
-            return false;
-        }
-        // Otherwise, just rely on the closed fd to take care of things. It's also probably more
-        // semantically correct!
+        return launch_result_t::failed;
     }
 
     // Read pipe goes last.
@@ -851,41 +795,47 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
         parser.vars().set(assignment.variable_name, ENV_LOCAL | ENV_EXPORT, assignment.values);
     }
 
+    // Decide if outputting to a pipe may deadlock.
+    // This happens if fish pipes from an internal process into another internal process:
+    //    echo $big | string match...
+    // Here fish will only run one process at a time, so the pipe buffer may overfill.
+    // It may also happen when piping internal -> external:
+    //    echo $big | external_proc
+    // fish wants to run `echo` before launching external_proc, so the pipe may deadlock.
+    // However if we are a deferred run, it means that we are piping into an external process
+    // which got launched before us!
+    bool piped_output_needs_buffering = !p->is_last_in_job && !is_deferred_run;
+
     // Execute the process.
     p->check_generations_before_launch();
     switch (p->type) {
         case process_type_t::function:
         case process_type_t::block_node: {
-            // Allow buffering unless this is a deferred run. If deferred, then processes after us
-            // were already launched, so they are ready to receive (or reject) our output.
-            bool allow_buffering = !is_deferred_run;
-            if (!exec_block_or_func_process(parser, j, p, conflicts, process_net_io_chain,
-                                            allow_buffering)) {
-                return false;
+            if (exec_block_or_func_process(parser, j, p, process_net_io_chain,
+                                           piped_output_needs_buffering) ==
+                launch_result_t::failed) {
+                return launch_result_t::failed;
             }
             break;
         }
 
         case process_type_t::builtin: {
-            std::unique_ptr<output_stream_t> output_stream =
-                create_output_stream_for_builtin(parser, process_net_io_chain, STDOUT_FILENO);
-            std::unique_ptr<output_stream_t> errput_stream =
-                create_output_stream_for_builtin(parser, process_net_io_chain, STDERR_FILENO);
+            std::unique_ptr<output_stream_t> output_stream = create_output_stream_for_builtin(
+                STDOUT_FILENO, process_net_io_chain, piped_output_needs_buffering);
+            std::unique_ptr<output_stream_t> errput_stream = create_output_stream_for_builtin(
+                STDERR_FILENO, process_net_io_chain, piped_output_needs_buffering);
             io_streams_t builtin_io_streams{*output_stream, *errput_stream};
             builtin_io_streams.job_group = j->group;
-            if (!exec_internal_builtin_proc(parser, p, pipe_read.get(), process_net_io_chain,
-                                            builtin_io_streams)) {
-                return false;
-            }
-            if (!handle_builtin_output(parser, j, p, &process_net_io_chain, builtin_io_streams)) {
-                return false;
-            }
+
+            exec_internal_builtin_proc(parser, p, process_net_io_chain, builtin_io_streams);
+            handle_builtin_output(parser, j, p, process_net_io_chain, builtin_io_streams);
             break;
         }
 
         case process_type_t::external: {
-            if (!exec_external_command(parser, j, p, process_net_io_chain)) {
-                return false;
+            if (exec_external_command(parser, j, p, process_net_io_chain) ==
+                launch_result_t::failed) {
+                return launch_result_t::failed;
             }
             break;
         }
@@ -896,7 +846,7 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
                 "Aborting.");
         }
     }
-    return true;
+    return launch_result_t::ok;
 }
 
 // Do we have a fish internal process that pipes into a real process? If so, we are going to
@@ -907,20 +857,31 @@ static bool exec_process_in_job(parser_t &parser, process_t *p, const std::share
 // This should show the output as it comes, not buffer until the end.
 // Any such process (only one per job) will be called the "deferred" process.
 static process_t *get_deferred_process(const shared_ptr<job_t> &j) {
-    // By enumerating in reverse order, we can avoid walking the entire list
+    // Common case is no deferred proc.
+    if (j->processes.size() <= 1) return nullptr;
+
+    // Skip execs, which can only appear at the front.
+    if (j->processes.front()->type == process_type_t::exec) return nullptr;
+
+    // Find the last non-external process, and return it if it pipes into an extenal process.
     for (auto i = j->processes.rbegin(); i != j->processes.rend(); ++i) {
-        const auto &p = *i;
-        if (p->type == process_type_t::exec) {
-            // No tail reordering for execs.
-            return nullptr;
-        } else if (p->type != process_type_t::external) {
-            if (p->is_last_in_job) {
-                return nullptr;
-            }
-            return p.get();
+        process_t *p = i->get();
+        if (p->type != process_type_t::external) {
+            return p->is_last_in_job ? nullptr : p;
         }
     }
     return nullptr;
+}
+
+/// Given that we failed to execute process \p failed_proc in job \p job, mark that process and
+/// every subsequent process in the pipeline as aborted before launch.
+static void abort_pipeline_from(const shared_ptr<job_t> &job, const process_t *failed_proc) {
+    bool found = false;
+    for (process_ptr_t &p : job->processes) {
+        found = found || (p.get() == failed_proc);
+        if (found) p->mark_aborted_before_launch();
+    }
+    assert(found && "Process not present in job");
 }
 
 // Given that we are about to execute an exec() call, check if the parser is interactive and there
@@ -950,27 +911,18 @@ static bool allow_exec_with_background_jobs(parser_t &parser) {
 bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &block_io) {
     assert(j && "null job_t passed to exec_job!");
 
-    // Set to true if something goes wrong while executing the job, in which case the cleanup
-    // code will kick in.
-    bool exec_error = false;
-
     // If fish was invoked with -n or --no-execute, then no_exec will be set and we do nothing.
     if (no_exec()) {
         return true;
-    }
-
-    // Get the list of all FDs so we can ensure our pipes do not conflict.
-    fd_set_t conflicts = block_io.fd_set();
-    for (const auto &p : j->processes) {
-        for (const auto &spec : p->redirection_specs()) {
-            conflicts.add(spec.fd);
-        }
     }
 
     // Handle an exec call.
     if (j->processes.front()->type == process_type_t::exec) {
         // If we are interactive, perhaps disallow exec if there are background jobs.
         if (!allow_exec_with_background_jobs(parser)) {
+            for (const auto &p : j->processes) {
+                p->mark_aborted_before_launch();
+            }
             return false;
         }
 
@@ -981,9 +933,12 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &bl
         parser.set_last_statuses(statuses_t::just(status));
 
         // A false return tells the caller to remove the job from the list.
+        for (const auto &p : j->processes) {
+            p->mark_aborted_before_launch();
+        }
         return false;
     }
-    cleanup_t timer = push_timer(j->flags().has_time_prefix && !no_exec());
+    cleanup_t timer = push_timer(j->wants_timing() && !no_exec());
 
     // Get the deferred process, if any. We will have to remember its pipes.
     autoclose_pipes_t deferred_pipes;
@@ -1000,44 +955,68 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &bl
     // 2. The pipe that the current process should write to
     // 3. The pipe that the next process should read from (courtesy of us)
     //
+    // Lastly, a process may experience a pipeline-aborting error, which prevents launching
+    // further processes in the pipeline.
     autoclose_fd_t pipe_next_read;
-    for (const auto &p : j->processes) {
+    bool aborted_pipeline = false;
+    size_t procs_launched = 0;
+    for (const auto &procptr : j->processes) {
+        process_t *p = procptr.get();
+
         // proc_pipes is the pipes applied to this process. That is, it is the read end
         // containing the output of the previous process (if any), plus the write end that will
         // output to the next process (if any).
         autoclose_pipes_t proc_pipes;
         proc_pipes.read = std::move(pipe_next_read);
         if (!p->is_last_in_job) {
-            auto pipes = make_autoclose_pipes(conflicts);
+            auto pipes = make_autoclose_pipes();
             if (!pipes) {
                 FLOGF(warning, PIPE_ERROR);
                 wperror(L"pipe");
-                job_mark_process_as_failed(j, p.get());
-                exec_error = true;
+                aborted_pipeline = true;
+                abort_pipeline_from(j, p);
                 break;
             }
             pipe_next_read = std::move(pipes->read);
             proc_pipes.write = std::move(pipes->write);
         }
 
-        if (p.get() == deferred_process) {
+        // Save any deferred process for last.
+        if (p == deferred_process) {
             deferred_pipes = std::move(proc_pipes);
-        } else {
-            if (!exec_process_in_job(parser, p.get(), j, block_io, std::move(proc_pipes), conflicts,
-                                     deferred_pipes)) {
-                exec_error = true;
-                break;
-            }
+            continue;
         }
+
+        // Regular process.
+        if (exec_process_in_job(parser, p, j, block_io, std::move(proc_pipes), deferred_pipes) ==
+            launch_result_t::failed) {
+            aborted_pipeline = true;
+            abort_pipeline_from(j, p);
+            break;
+        }
+        procs_launched += 1;
     }
     pipe_next_read.close();
 
-    // Now execute any deferred process.
-    if (!exec_error && deferred_process) {
-        assert(deferred_pipes.write.valid() && "Deferred process should always have a write pipe");
-        if (!exec_process_in_job(parser, deferred_process, j, block_io, std::move(deferred_pipes),
-                                 conflicts, {}, true)) {
-            exec_error = true;
+    // If our pipeline was aborted before any process was successfully launched, then there is
+    // nothing to reap, and we can perform an early return.
+    // Note we must never return false if we have launched even one process, since it will not be
+    // properly reaped; see #7038.
+    if (aborted_pipeline && procs_launched == 0) {
+        return false;
+    }
+
+    // Ok, at least one thing got launched.
+    // Handle any deferred process.
+    if (deferred_process) {
+        if (aborted_pipeline) {
+            // Some other process already aborted our pipeline.
+            deferred_process->mark_aborted_before_launch();
+        } else if (exec_process_in_job(parser, deferred_process, j, block_io,
+                                       std::move(deferred_pipes), {},
+                                       true) == launch_result_t::failed) {
+            // The deferred proc itself failed to launch.
+            deferred_process->mark_aborted_before_launch();
         }
     }
 
@@ -1045,14 +1024,12 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &bl
           j->command_wcstr(), j->get_pgid() ? *j->get_pgid() : -2);
 
     j->mark_constructed();
-    if (!j->is_foreground()) {
-        auto pgid = j->get_pgid();
-        assert(pgid.has_value() && "Background jobs should always have a pgroup");
-        parser.vars().set_one(L"last_pid", ENV_GLOBAL, to_string(*pgid));
-    }
 
-    if (exec_error) {
-        return false;
+    // If exec_error then a backgrounded job would have been terminated before it was ever assigned
+    // a pgroup, so error out before setting last_pid.
+    auto pgid = j->get_pgid();
+    if (!j->is_foreground() && pgid.has_value()) {
+        parser.vars().set_one(L"last_pid", ENV_GLOBAL, to_string(*pgid));
     }
 
     j->continue_job(parser, !j->is_initially_background());
@@ -1060,9 +1037,10 @@ bool exec_job(parser_t &parser, const shared_ptr<job_t> &j, const io_chain_t &bl
 }
 
 /// Populate \p lst with the output of \p buffer, perhaps splitting lines according to \p split.
-static void populate_subshell_output(wcstring_list_t *lst, const io_buffer_t &buffer, bool split) {
+static void populate_subshell_output(wcstring_list_t *lst, const separated_buffer_t &buffer,
+                                     bool split) {
     // Walk over all the elements.
-    for (const auto &elem : buffer.buffer().elements()) {
+    for (const auto &elem : buffer.elements()) {
         if (elem.is_explicitly_separated()) {
             // Just append this one.
             lst->push_back(str2wcstring(elem.contents));
@@ -1127,14 +1105,14 @@ static int exec_subshell_internal(const wcstring &cmd, parser_t &parser,
 
     // IO buffer creation may fail (e.g. if we have too many open files to make a pipe), so this may
     // be null.
-    auto bufferfill = io_bufferfill_t::create(fd_set_t{}, ld.read_limit);
+    auto bufferfill = io_bufferfill_t::create(ld.read_limit);
     if (!bufferfill) {
         *break_expand = true;
         return STATUS_CMD_ERROR;
     }
     eval_res_t eval_res = parser.eval(cmd, io_chain_t{bufferfill}, job_group, block_type_t::subst);
-    std::shared_ptr<io_buffer_t> buffer = io_bufferfill_t::finish(std::move(bufferfill));
-    if (buffer->buffer().discarded()) {
+    separated_buffer_t buffer = io_bufferfill_t::finish(std::move(bufferfill));
+    if (buffer.discarded()) {
         *break_expand = true;
         return STATUS_READ_TOO_MUCH;
     }
@@ -1145,7 +1123,7 @@ static int exec_subshell_internal(const wcstring &cmd, parser_t &parser,
     }
 
     if (lst) {
-        populate_subshell_output(lst, *buffer, split_output);
+        populate_subshell_output(lst, buffer, split_output);
     }
     *break_expand = false;
     return eval_res.status.status_value();

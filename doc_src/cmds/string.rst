@@ -15,6 +15,7 @@ Synopsis
     string length [(-q | --quiet)] [STRING...]
     string lower [(-q | --quiet)] [STRING...]
     string match [(-a | --all)] [(-e | --entire)] [(-i | --ignore-case)] [(-r | --regex)] [(-n | --index)] [(-q | --quiet)] [(-v | --invert)] PATTERN [STRING...]
+    string pad [(-r | --right)] [(-c | --char) CHAR] [(-w | --width) INTEGER] [STRING...]
     string repeat [(-n | --count) COUNT] [(-m | --max) MAX] [(-N | --no-newline)] [(-q | --quiet)] [STRING...]
     string replace [(-a | --all)] [(-f | --filter)] [(-i | --ignore-case)] [(-r | --regex)] [(-q | --quiet)] PATTERN REPLACEMENT [STRING...]
     string split [(-m | --max) MAX] [(-n | --no-empty)] [(-q | --quiet)] [(-r | --right)] SEP [STRING...]
@@ -33,7 +34,7 @@ STRING arguments are taken from the command line unless standard input is connec
 
 Arguments beginning with ``-`` are normally interpreted as switches; ``--`` causes the following arguments not to be treated as switches even if they begin with ``-``. Switches and required arguments are recognized only on the command line.
 
-Most subcommands accept a ``-q`` or ``--quiet`` switch, which suppresses the usual output but exits with the documented status.
+Most subcommands accept a ``-q`` or ``--quiet`` switch, which suppresses the usual output but exits with the documented status. In this case these commands will quit early, without reading all of the available input.
 
 The following subcommands are available.
 
@@ -138,6 +139,21 @@ Examples
    :end-before: END DESCRIPTION
 
 .. include:: string-match.rst
+   :start-after: BEGIN EXAMPLES
+   :end-before: END EXAMPLES
+
+"pad" subcommand
+------------------
+
+.. include:: string-pad.rst
+   :start-after: BEGIN SYNOPSIS
+   :end-before: END SYNOPSIS
+
+.. include:: string-pad.rst
+   :start-after: BEGIN DESCRIPTION
+   :end-before: END DESCRIPTION
+
+.. include:: string-pad.rst
    :start-after: BEGIN EXAMPLES
    :end-before: END EXAMPLES
 
@@ -310,8 +326,8 @@ If you are familiar with these, it is useful to know how ``string`` differs from
 
 In contrast to these classics, ``string`` reads input either from stdin or as arguments. ``string`` also does not deal with files, so it requires redirections to be used with them.
 
-In contrast to ``grep``, ``string``\ s `match` defaults to glob-mode, while `replace` defaults to literal matching. If set to regex-mode, they use PCRE regular expressions, which is comparable to ``grep``\ s `-P` option. `match` defaults to printing just the match, which is like ``grep`` with `-o` (use `--entire` to enable grep-like behavior).
+In contrast to ``grep``, ``string``'s ``match`` defaults to glob-mode, while ``replace`` defaults to literal matching. If set to regex-mode, they use PCRE regular expressions, which is comparable to ``grep``'s ``-P`` option. ``match`` defaults to printing just the match, which is like ``grep`` with ``-o`` (use ``--entire`` to enable grep-like behavior).
 
-Like ``sed``\ s `s/` command, ``string replace`` still prints strings that don't match. ``sed``\ s `-n` in combination with a `/p` modifier or command is like ``string replace -f``.
+Like ``sed``'s ``s/old/new/`` command, ``string replace`` still prints strings that don't match. ``sed``'s ``-n`` in combination with a ``/p`` modifier or command is like ``string replace -f``.
 
-``string split somedelimiter`` is a replacement for ``tr somedelimiter \\n``.
+``string split somedelimiter`` is a replacement for ``tr somedelimiter \n``.

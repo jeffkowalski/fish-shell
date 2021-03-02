@@ -17,7 +17,7 @@ Description
 
 For checking timing after a command has completed, check :ref:`$CMD_DURATION <variables-special>`.
 
-Your system most likely also has a `time` command. To use that use something like `command time`, as in `command time sleep 10`. Because it's not inside fish, it won't have access to fish functions and won't be able to time blocks and such.
+Your system most likely also has a ``time`` command. To use that use something like ``command time``, as in ``command time sleep 10``. Because it's not inside fish, it won't have access to fish functions and won't be able to time blocks and such.
 
 Example
 -------
@@ -39,3 +39,12 @@ Example
    Executed in    3,01 secs   fish           external
       usr time    9,16 millis    2,94 millis    6,23 millis
       sys time    0,23 millis    0,00 millis    0,23 millis
+
+Inline variable assignments need to follow the ``time`` keyword::
+
+   >_ time a_moment=1.5m sleep $a_moment
+
+   ________________________________________________________
+   Executed in   90.00 secs      fish           external
+      usr time    4.62 millis    4.62 millis    0.00 millis
+      sys time    2.35 millis    0.41 millis    1.95 millis

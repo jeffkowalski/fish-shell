@@ -4,9 +4,9 @@
 
 set -l progname pacman
 
-set -l listinstalled "(__fish_print_packages --installed)"
+set -l listinstalled "(__fish_print_pacman_packages --installed)"
 # This might be an issue if another package manager is also installed (e.g. for containers)
-set -l listall "(__fish_print_packages)"
+set -l listall "(__fish_print_pacman_packages)"
 set -l listrepos "(__fish_print_pacman_repos)"
 set -l listgroups "(pacman -Sg)\t'Package Group'"
 
@@ -141,4 +141,4 @@ complete -c $progname -n "$sync" -xa "$listall $listgroups"
 # Upgrade options
 # Theoretically, pacman reads packages in all formats that libarchive supports
 # In practice, it's going to be tar.xz, tar.gz, tar.zst, or just pkg.tar (uncompressed pkg)
-complete -c $progname -n "$upgrade" -xa '(__fish_complete_suffix pkg.tar.zst; __fish_complete_suffix pkg.tar.xz; __fish_complete_suffix pkg.tar.gz; __fish_complete_suffix pkg.tar;)' -d 'Package file'
+complete -c $progname -n "$upgrade" -k -xa '(__fish_complete_suffix pkg.tar.zst; __fish_complete_suffix pkg.tar.xz; __fish_complete_suffix pkg.tar.gz; __fish_complete_suffix pkg.tar;)' -d 'Package file'

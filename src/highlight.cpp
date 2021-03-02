@@ -47,6 +47,8 @@ static const wchar_t *get_highlight_var_name(highlight_role_t role) {
             return L"fish_color_error";
         case highlight_role_t::command:
             return L"fish_color_command";
+        case highlight_role_t::keyword:
+            return L"fish_color_keyword";
         case highlight_role_t::statement_terminator:
             return L"fish_color_end";
         case highlight_role_t::param:
@@ -107,6 +109,8 @@ static highlight_role_t get_fallback(highlight_role_t role) {
             return highlight_role_t::normal;
         case highlight_role_t::command:
             return highlight_role_t::normal;
+        case highlight_role_t::keyword:
+            return highlight_role_t::command;
         case highlight_role_t::statement_terminator:
             return highlight_role_t::normal;
         case highlight_role_t::param:
@@ -164,8 +168,8 @@ static highlight_role_t get_fallback(highlight_role_t role) {
 ///     false: the filesystem is not case insensitive
 ///     true: the file system is case insensitive
 using case_sensitivity_cache_t = std::unordered_map<wcstring, bool>;
-bool fs_is_case_insensitive(const wcstring &path, int fd,
-                            case_sensitivity_cache_t &case_sensitivity_cache) {
+static bool fs_is_case_insensitive(const wcstring &path, int fd,
+                                   case_sensitivity_cache_t &case_sensitivity_cache) {
     bool result = false;
 #ifdef _PC_CASE_SENSITIVE
     // Try the cache first.
@@ -205,7 +209,7 @@ bool is_potential_path(const wcstring &potential_path_fragment, const wcstring_l
 
     const bool require_dir = static_cast<bool>(flags & PATH_REQUIRE_DIR);
     wcstring clean_potential_path_fragment;
-    int has_magic = 0;
+    bool has_magic = false;
 
     wcstring path_with_magic(potential_path_fragment);
     if (flags & PATH_EXPAND_TILDE) expand_tilde(path_with_magic, ctx.vars);
@@ -221,7 +225,7 @@ bool is_potential_path(const wcstring &potential_path_fragment, const wcstring_l
             case ANY_CHAR:
             case ANY_STRING:
             case ANY_STRING_RECURSIVE: {
-                has_magic = 1;
+                has_magic = true;
                 break;
             }
             case INTERNAL_SEPARATOR: {
@@ -434,9 +438,6 @@ bool autosuggest_validate_from_history(const history_item_t &item,
                                        const operation_context_t &ctx) {
     ASSERT_IS_BACKGROUND_THREAD();
 
-    bool handled = false;
-    bool suggestion_ok = false;
-
     // Parse the string.
     wcstring parsed_command;
     wcstring cd_dir;
@@ -447,35 +448,35 @@ bool autosuggest_validate_from_history(const history_item_t &item,
         return true;
     }
 
+    // We handle cd specially.
     if (parsed_command == L"cd" && !cd_dir.empty()) {
-        // We can possibly handle this specially.
         if (expand_one(cd_dir, expand_flag::skip_cmdsubst, ctx)) {
-            handled = true;
-            bool is_help =
-                string_prefixes_string(cd_dir, L"--help") || string_prefixes_string(cd_dir, L"-h");
-            if (!is_help) {
+            if (string_prefixes_string(cd_dir, L"--help") ||
+                string_prefixes_string(cd_dir, L"-h")) {
+                // cd --help is always valid.
+                return true;
+            } else {
+                // Check the directory target, respecting CDPATH.
+                // Permit the autosuggestion if the path is valid and not our directory.
                 auto path = path_get_cdpath(cd_dir, working_directory, ctx.vars);
-                if (path && !paths_are_same_file(working_directory, *path)) {
-                    suggestion_ok = true;
-                }
+                return path && !paths_are_same_file(working_directory, *path);
             }
         }
     }
 
-    if (handled) {
-        return suggestion_ok;
-    }
-
-    // Not handled specially so handle it here.
+    // Not handled specially. Is the command valid?
     bool cmd_ok = builtin_exists(parsed_command) || function_exists_no_autoload(parsed_command) ||
                   path_get_path(parsed_command, nullptr, ctx.vars);
-
-    if (cmd_ok) {
-        const path_list_t &paths = item.get_required_paths();
-        suggestion_ok = all_paths_are_valid(paths, working_directory);
+    if (!cmd_ok) {
+        return false;
     }
 
-    return suggestion_ok;
+    // Did the historical command have arguments that look like paths, which aren't paths now?
+    if (!all_paths_are_valid(item.get_required_paths(), ctx)) {
+        return false;
+    }
+
+    return true;
 }
 
 // Highlights the variable starting with 'in', setting colors within the 'colors' array. Returns the
@@ -772,8 +773,6 @@ class highlighter_t {
     // The string we're highlighting. Note this is a reference memmber variable (to avoid copying)!
     // We must not outlive this!
     const wcstring &buff;
-    // Cursor position.
-    const size_t cursor_pos;
     // The operation context. Again, a reference member variable!
     const operation_context_t &ctx;
     // Whether it's OK to do I/O.
@@ -785,6 +784,9 @@ class highlighter_t {
     // The resulting colors.
     using color_array_t = std::vector<highlight_spec_t>;
     color_array_t color_array;
+    // A stack of variables that the current commandline probably defines.  We mark redirections
+    // as valid if they use one of these variables, to avoid marking valid targets as error.
+    std::vector<wcstring> pending_variables;
 
     // Flags we use for AST parsing.
     static constexpr parse_tree_flags_t ast_flags =
@@ -796,10 +798,6 @@ class highlighter_t {
     void color_command(const ast::string_t &node);
     // Color a node as if it were an argument.
     void color_as_argument(const ast::node_t &node);
-    // Color a redirection.
-    void color_redirection(const ast::redirection_t &node);
-    // Color all the children of the command with the given type.
-    void color_children(const ast::node_t &parent, ast::type_t type, highlight_spec_t color);
     // Colors the source range of a node with a given color.
     void color_node(const ast::node_t &node, highlight_spec_t color);
     // Colors a range with a given color.
@@ -823,6 +821,7 @@ class highlighter_t {
     void visit(const ast::variable_assignment_t &varas);
     void visit(const ast::semi_nl_t &semi_nl);
     void visit(const ast::decorated_statement_t &stmt);
+    void visit(const ast::block_statement_t &header);
 
     // Visit an argument, perhaps knowing that our command is cd.
     void visit(const ast::argument_t &arg, bool cmd_is_cd = false);
@@ -831,10 +830,8 @@ class highlighter_t {
     void visit(const ast::node_t &node) { visit_children(node); }
 
     // Constructor
-    highlighter_t(const wcstring &str, size_t pos, const operation_context_t &ctx, wcstring wd,
-                  bool can_do_io)
+    highlighter_t(const wcstring &str, const operation_context_t &ctx, wcstring wd, bool can_do_io)
         : buff(str),
-          cursor_pos(pos),
           ctx(ctx),
           io_ok(can_do_io),
           working_directory(std::move(wd)),
@@ -904,18 +901,9 @@ void highlighter_t::color_as_argument(const ast::node_t &node) {
         if (arg_subcmd_end < this->buff.size())
             this->color_array.at(arg_subcmd_end) = highlight_role_t::operat;
 
-        // Compute the cursor's position within the cmdsub. We must be past the open paren (hence >)
-        // but can be at the end of the string or closed paren (hence <=).
-        size_t cursor_subpos = CURSOR_POSITION_INVALID;
-        if (cursor_pos != CURSOR_POSITION_INVALID && cursor_pos > arg_subcmd_start &&
-            cursor_pos <= arg_subcmd_end) {
-            // The -1 because the cmdsub_contents does not include the open paren.
-            cursor_subpos = cursor_pos - arg_subcmd_start - 1;
-        }
-
         // Highlight it recursively.
-        highlighter_t cmdsub_highlighter(cmdsub_contents, cursor_subpos, this->ctx,
-                                         this->working_directory, this->io_ok);
+        highlighter_t cmdsub_highlighter(cmdsub_contents, this->ctx, this->working_directory,
+                                         this->io_ok);
         const color_array_t &subcolors = cmdsub_highlighter.highlight();
 
         // Copy out the subcolors back into our array.
@@ -969,7 +957,7 @@ void highlighter_t::visit(const ast::keyword_base_t &kw) {
         case parse_keyword_t::kw_in:
         case parse_keyword_t::kw_switch:
         case parse_keyword_t::kw_while:
-            role = highlight_role_t::command;
+            role = highlight_role_t::keyword;
             break;
 
         case parse_keyword_t::kw_and:
@@ -1034,10 +1022,13 @@ void highlighter_t::visit(const ast::argument_t &arg, bool cmd_is_cd) {
 
 void highlighter_t::visit(const ast::variable_assignment_t &varas) {
     color_as_argument(varas);
-    // TODO: Color the '=' in the variable assignment as an operator, for fun.
-    //    if (auto where = variable_assignment_equals_pos(varas.source(this->buff))) {
-    //        this->color_array.at(*where) = highlight_role_t::operat;
-    //    }
+    // Highlight the '=' in variable assignments as an operator.
+    if (auto where = variable_assignment_equals_pos(varas.source(this->buff))) {
+        size_t equals_loc = varas.source_range().start + *where;
+        this->color_array.at(equals_loc) = highlight_role_t::operat;
+        auto var_name = varas.source(this->buff).substr(0, *where);
+        this->pending_variables.push_back(std::move(var_name));
+    }
 }
 
 void highlighter_t::visit(const ast::decorated_statement_t &stmt) {
@@ -1076,13 +1067,35 @@ void highlighter_t::visit(const ast::decorated_statement_t &stmt) {
     // Color arguments and redirections.
     // Except if our command is 'cd' we have special logic for how arguments are colored.
     bool is_cd = (expanded_cmd == L"cd");
+    bool is_set = (expanded_cmd == L"set");
     for (const ast::argument_or_redirection_t &v : stmt.args_or_redirs) {
         if (v.is_argument()) {
+            if (is_set) {
+                auto arg = v.argument().source(this->buff);
+                if (valid_var_name(arg)) {
+                    this->pending_variables.push_back(std::move(arg));
+                    is_set = false;
+                }
+            }
             this->visit(v.argument(), is_cd);
         } else {
             this->visit(v.redirection());
         }
     }
+}
+
+void highlighter_t::visit(const ast::block_statement_t &block) {
+    this->visit(*block.header.contents.get());
+    this->visit(block.args_or_redirs);
+    const ast::node_t &bh = *block.header.contents;
+    size_t pending_variables_count = this->pending_variables.size();
+    if (const auto *fh = bh.try_as<ast::for_header_t>()) {
+        auto var_name = fh->var_name.source(this->buff);
+        pending_variables.push_back(std::move(var_name));
+    }
+    this->visit(block.jobs);
+    this->visit(block.end);
+    pending_variables.resize(pending_variables_count);
 }
 
 /// \return whether a string contains a command substitution.
@@ -1091,6 +1104,20 @@ static bool has_cmdsub(const wcstring &src) {
     size_t start = 0;
     size_t end = 0;
     return parse_util_locate_cmdsubst_range(src, &cursor, nullptr, &start, &end, true) != 0;
+}
+
+static bool contains_pending_variable(const std::vector<wcstring> &pending_variables,
+                                      const wcstring &haystack) {
+    for (const auto &var_name : pending_variables) {
+        size_t pos = -1;
+        while ((pos = haystack.find(var_name, pos + 1)) != wcstring::npos) {
+            if (pos == 0 || haystack.at(pos - 1) != L'$') continue;
+            size_t end = pos + var_name.size();
+            if (end < haystack.size() && valid_var_name_char(haystack.at(end))) continue;
+            return true;
+        }
+    }
+    return false;
 }
 
 void highlighter_t::visit(const ast::redirection_t &redir) {
@@ -1124,6 +1151,8 @@ void highlighter_t::visit(const ast::redirection_t &redir) {
         if (!this->io_ok) {
             // I/O is disallowed, so we don't have much hope of catching anything but gross
             // errors. Assume it's valid.
+            target_is_valid = true;
+        } else if (contains_pending_variable(this->pending_variables, target)) {
             target_is_valid = true;
         } else if (!expand_one(target, expand_flag::skip_cmdsubst, ctx)) {
             // Could not be expanded.
@@ -1320,9 +1349,9 @@ std::string colorize(const wcstring &text, const std::vector<highlight_spec_t> &
     return outp.contents();
 }
 
-void highlight_shell(const wcstring &buff, std::vector<highlight_spec_t> &color, size_t pos,
+void highlight_shell(const wcstring &buff, std::vector<highlight_spec_t> &color,
                      const operation_context_t &ctx, bool io_ok) {
     const wcstring working_directory = ctx.vars.get_pwd_slash();
-    highlighter_t highlighter(buff, pos, ctx, working_directory, io_ok);
+    highlighter_t highlighter(buff, ctx, working_directory, io_ok);
     color = highlighter.highlight();
 }

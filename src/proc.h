@@ -81,6 +81,8 @@ class proc_status_t {
         // Some paranoia.
         constexpr int zerocode = w_exitcode(0, 0);
         static_assert(WIFEXITED(zerocode), "Synthetic exit status not reported as exited");
+
+        assert(ret < 256);
         return proc_status_t(w_exitcode(ret, 0 /* sig */));
     }
 
@@ -259,6 +261,10 @@ class process_t {
     /// launch. This helps us avoid spurious waitpid calls.
     void check_generations_before_launch();
 
+    /// Mark that this process was part of a pipeline which was aborted.
+    /// The process was never successfully launched; give it a status of EXIT_FAILURE.
+    void mark_aborted_before_launch();
+
     /// \return whether this process type is internal (block, function, or builtin).
     bool is_internal() const;
 
@@ -276,14 +282,19 @@ class process_t {
 
     /// File descriptor that pipe output should bind to.
     int pipe_write_fd{0};
+
     /// True if process has completed.
     bool completed{false};
+
     /// True if process has stopped.
     bool stopped{false};
+
     /// Reported status value.
     proc_status_t status{};
+
     /// Last time of cpu time check.
     struct timeval last_time {};
+
     /// Number of jiffies spent in process at last cpu time check.
     unsigned long last_jiffies{0};
 };
@@ -312,6 +323,9 @@ class job_t {
         /// Note that a job may move between foreground and background; this just describes what the
         /// initial state should be.
         bool initial_background{};
+
+        /// Whether the job has the 'time' prefix and so we should print timing for this job.
+        bool wants_timing{};
 
         /// Whether this job was created as part of an event handler.
         bool from_event_handler{};
@@ -345,26 +359,16 @@ class job_t {
     /// \return whether it is OK to reap a given process. Sometimes we want to defer reaping a
     /// process if it is the group leader and the job is not yet constructed, because then we might
     /// also reap the process group and then we cannot add new processes to the group.
-    bool can_reap(const process_t *p) const {
-        // Internal processes can always be reaped.
-        if (p->internal_proc_) {
-            return true;
-        } else if (p->pid <= 0) {
-            // Can't reap without a pid.
+    bool can_reap(const process_ptr_t &p) const {
+        if (p->completed) {
+            // Can't reap twice.
             return false;
-        } else if (!is_constructed() && this->get_pgid() == maybe_t<pid_t>{p->pid}) {
+        } else if (p->pid && !is_constructed() && this->get_pgid() == maybe_t<pid_t>{p->pid}) {
             // p is the the group leader in an under-construction job.
             return false;
         } else {
             return true;
         }
-    }
-
-    /// \returns the reap topic for a process, which describes the manner in which we are reaped. A
-    /// none returns means don't reap, or perhaps defer reaping.
-    maybe_t<topic_t> reap_topic_for_process(const process_t *p) const {
-        if (p->completed || !can_reap(p)) return none();
-        return p->internal_proc_ ? topic_t::internal_exit : topic_t::sigchld;
     }
 
     /// Returns a truncated version of the job string. Used when a message has already been emitted
@@ -414,9 +418,6 @@ class job_t {
         /// This job is disowned, and should be removed from the active jobs list.
         bool disown_requested{false};
 
-        /// Whether to print timing for this job.
-        bool has_time_prefix{false};
-
         // Indicates that we are the "group root." Any other jobs using this tree are nested.
         bool is_group_root{false};
 
@@ -427,6 +428,9 @@ class job_t {
 
     /// Access mutable job flags.
     flags_t &mut_flags() { return job_flags; }
+
+    // \return whether we should print timing information.
+    bool wants_timing() const { return properties.wants_timing; }
 
     /// \return if we want job control.
     bool wants_job_control() const { return properties.job_control; }
@@ -482,10 +486,9 @@ class job_t {
     maybe_t<statuses_t> get_statuses() const;
 };
 
-/// Whether this shell is attached to the keyboard at all.
-enum class session_interactivity_t { not_interactive, implied, explicit_ };
-session_interactivity_t session_interactivity();
-void set_interactive_session(session_interactivity_t flag);
+/// Whether this shell is attached to a tty.
+bool is_interactive_session();
+void set_interactive_session(bool flag);
 
 /// Whether we are a login shell.
 bool get_login();
@@ -519,9 +522,6 @@ job_list_t jobs_requiring_warning_on_exit(const parser_t &parser);
 /// Print the exit warning for the given jobs, which should have been obtained via
 /// jobs_requiring_warning_on_exit().
 void print_exit_warning_for_jobs(const job_list_t &jobs);
-
-/// Mark a process as failed to execute (and therefore completed).
-void job_mark_process_as_failed(const std::shared_ptr<job_t> &job, const process_t *failed_proc);
 
 /// Use the procfs filesystem to look up how many jiffies of cpu time was used by this process. This
 /// function is only available on systems with the procfs file entry 'stat', i.e. Linux.

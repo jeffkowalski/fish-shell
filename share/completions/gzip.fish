@@ -1,5 +1,5 @@
 complete -c gzip -s c -l stdout -d "Compress to stdout"
-complete -c gzip -s d -l decompress -x -a "
+complete -c gzip -s d -l decompress -k -x -a "
 (
 	__fish_complete_suffix .gz
 	__fish_complete_suffix .tgz
@@ -20,4 +20,3 @@ complete -c gzip -s v -l verbose -d "Display compression ratios"
 complete -c gzip -s V -l version -d "Display version and exit"
 complete -c gzip -s 1 -l fast -d "Use fast setting"
 complete -c gzip -s 9 -l best -d "Use high compression setting"
-
